@@ -13,7 +13,7 @@ E_unit = {
 def htc_gap(Tfo,Tci,delta,kgas,eps_c=1.0,eps_f=1.0,units='J'):
     """
     Equation for the heat transfer coefficient across an OPEN gas gap,
-    does NOT include closure effects.
+    does NOT include closure effects. Assumes diametral gap << fuel radius
 
     Tfo (float): Fuel pellet outer temperature [K]
     Tci (float): Inner cladding temperature [K]
@@ -41,12 +41,19 @@ def htc_gap(Tfo,Tci,delta,kgas,eps_c=1.0,eps_f=1.0,units='J'):
     val = (cond + rad)*scale
     return val
 
-def T_ci(Rco, Rci, kc, Tco, qp, units='J'):
-    lib = aac.array_namespace(Tco,qp)
+def T_ci(Rco, Rci, kc, Tco, qp):
+    """
+    Temperature drop across the cladding.
+    Assumes contstant conductivity
 
-    scale = E_unit[units]
-    qp_J = qp*scale
+    Rco (float or array/tensor): Outer cladding radius
+    Rci (float): Inner cladding radius
+    kc (float):  Cladding thermal conductivity
+    Tco (float): Outer cladding temperature
+    """
     
+    lib = aac.array_namespace(Tco,qp)
+   
     log_term = lib.log(Rco/Rci)
     if (Rco > Rci):
         print('The inputted Rco is less than Rci, using Rci/Rco')
@@ -56,5 +63,23 @@ def T_ci(Rco, Rci, kc, Tco, qp, units='J'):
     return val
 
 
+
+class Bundle:
+
+    def Weissman(P,D):
+        R = P/D
+        c1 = 1.826
+        c2 = -1.0430
+        val = c1*R + c2
+        return val
+
+    def Presser(P,D):
+        R = P/D
+        c1 = 0.9217
+        c2 = 0.1478
+        c3 = 0.1130
+        exp_term = -7*(R-1)
+        val = c1+c2*R-c3*np.exp(exp_term)
+        return val
 
     
