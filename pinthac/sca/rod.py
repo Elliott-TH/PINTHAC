@@ -147,7 +147,60 @@ def Swenson(Property, Tb, Ts, p, G, D):
     return Nu_s * k_s / D
 
 
-def htc_scw(Property, Tm, qp_val, p, G, D, psi=1.0):
+def Chen_SCW(Property, Tb, Ts, p, G, D, q):
+    """
+    Chen & Fang (2014) supercritical-water heat transfer coefficient, table-lookup form.
+
+    Why this model is here:
+        The alternative to Swenson in this solver. Swenson (1965) is the legacy benchmark;
+        Chen & Fang is the more accurate modern fit -- 5366 data points, MAD 5.4 percent,
+        95.7 percent within +/-15 percent -- and per docs/DECISIONS.md is the recommended
+        default. Written against the same `Property` lookup and the same argument order as
+        `Swenson` above so the two are interchangeable inside `htc_scw`, with the single
+        difference that Chen needs the local heat flux as well.
+
+    Formulation:
+        Nu_b = 0.46*Re_b^0.16*(Pr_w/Pr_b)^0.1*(nu_w/nu_b)^-0.55*(cp_bar/cp_b)^0.88
+               *(Gr_b*/Gr_b)^0.81
+        htc = Nu_b*k_b/D
+
+        The Grashof ratio collapses to q*D/(k_b*(Tw-Tb)) under the Boussinesq
+        approximation beta_b = (rho_b-rho_w)/(rho_b*(Tw-Tb)) -- g, beta and nu_b all
+        cancel. See correlations/htc.py::SCW.Chen_SCW_dT, whose derivation this mirrors.
+
+    Valid range / Uncertainty / Reference:
+        As correlations/htc.py::SCW.Chen_SCW_dT -- Chen, W. and Fang, X., Int. J. Heat
+        Mass Transfer 78 (2014) 156-160, docs/reference/Chen_Supercritical_H2O.pdf.
+
+    Inputs:
+        Property : the table lookup built by make_Property
+        Tb, Ts   : bulk and surface (wall) temperature, K
+        p        : pressure, MPa (accepted for signature parity; the table is built at p)
+        G        : mass flux, kg/m^2-s
+        D        : hydraulic diameter, m
+        q        : wall heat flux, W/m^2
+    Returns:
+        htc : heat transfer coefficient, W/m^2-K
+    """
+    rho_b, rho_s = Property(['T', Tb], 'rho'), Property(['T', Ts], 'rho')
+    mu_b, cp_b, k_b, h_b = (Property(['T', Tb], 'mu'), Property(['T', Tb], 'cp'),
+                            Property(['T', Tb], 'k'), Property(['T', Tb], 'h'))
+    mu_s, cp_s, k_s, h_s = (Property(['T', Ts], 'mu'), Property(['T', Ts], 'cp'),
+                            Property(['T', Ts], 'k'), Property(['T', Ts], 'h'))
+
+    Pr_b = mu_b * cp_b / k_b
+    Pr_w = mu_s * cp_s / k_s
+    Re_b = G * D / mu_b
+    nu_b, nu_w = mu_b / rho_b, mu_s / rho_s
+    cp_bar = (h_s - h_b) / (Ts - Tb)
+    Gr_ratio = (D * q) / (k_b * (Ts - Tb))
+
+    Nu = (0.46 * Re_b**0.16 * (Pr_w / Pr_b)**0.1 * (nu_w / nu_b)**(-0.55)
+          * (cp_bar / cp_b)**0.88 * Gr_ratio**0.81)
+    return Nu * k_b / D
+
+
+def htc_scw(Property, Tm, qp_val, p, G, D, psi=1.0, correlation="swenson"):
     """
     Solve Swenson's implicit wall-temperature balance for the rod-bundle heat transfer
     coefficient, htc_pin = psi * htc_round_tube (Hughes et al. 2014, Eq. 11).
@@ -161,14 +214,33 @@ def htc_scw(Property, Tm, qp_val, p, G, D, psi=1.0):
 
     psi = 1.0 (default) reproduces the previous round-tube-only behaviour exactly.
     """
-    lo = Tm - 50.0
+    # Chen's Grashof ratio carries (Tw - Tb) in its denominator and is then raised to
+    # 0.81, so any trial wall temperature at or below the bulk gives a negative base and a
+    # NaN. Swenson survives it -- its cp_bar ratio is negative over negative -- but the
+    # bracket has to exclude Tw <= Tb either way, since a heated wall is hotter than its
+    # coolant by definition. Swenson keeps the wider bracket it was validated with.
+    lo = Tm + 1.0e-3 if correlation == "chen_scw" else Tm - 50.0
     hi = Tm + 1500.0
 
+    # Swenson and Chen take the same arguments in the same order, so selecting between
+    # them is a one-line closure rather than a second solver. Chen additionally needs the
+    # local wall heat flux, which is qp_val spread over the heated perimeter.
+    if correlation == "swenson":
+        def h_of(Tco):
+            return Swenson(Property, Tm, Tco, p, G, D)
+    elif correlation == "chen_scw":
+        q_flux = qp_val / (math.pi * D)
+        def h_of(Tco):
+            return Chen_SCW(Property, Tm, Tco, p, G, D, q_flux)
+    else:
+        raise ValueError(
+            f"unknown supercritical-water correlation {correlation!r}; "
+            "expected one of: swenson, chen_scw")
+
     def res(Tco):
-        htc = Swenson(Property, Tm, Tco, p, G, D)
-        return (Tco - Tm) - qp_val / (math.pi * D * psi * htc)
+        return (Tco - Tm) - qp_val / (math.pi * D * psi * h_of(Tco))
     Tco = gpu_solve(res, lo, hi)
-    return psi * Swenson(Property, Tm, Tco, p, G, D)
+    return psi * h_of(Tco)
 
 
 def gap(qp_val, delta, Tci, rci, rfo):
@@ -220,7 +292,7 @@ def _log(x):
 # B runs at once, all the gpu_solve() calls inside broadcast elementwise
 # over the batch dim already) -- see run_SCA vs run_SCA_batch below.
 # =============================================================================
-def rod_node(Property, Tm, p, qp_val, inputs):
+def rod_node(Property, Tm, p, qp_val, inputs, correlation="swenson"):
     G, pitch = inputs['G'], inputs['pitch']
     rco, tc, kc, delta = inputs['rco'], inputs['tc'], inputs['kc'], inputs['delta']
 
@@ -239,7 +311,7 @@ def rod_node(Property, Tm, p, qp_val, inputs):
     # factor at all before (docs/PHYSICS_REVIEW.md, SCA_IAPWS95_Rod.py gap 1).
     psi = Bundle.Presser(pitch, d_o)
 
-    htc_conv = htc_scw(Property, Tm, qp_val, p, G, Dh, psi)
+    htc_conv = htc_scw(Property, Tm, qp_val, p, G, Dh, psi, correlation=correlation)
     Tco = Tm + qp_val / (math.pi * d_o * htc_conv)
     Tci = Tco + qp_val / (2 * math.pi * kc) * _log(rco / rci)
     Tfo = gap(qp_val, delta, Tci, rci, rfo)
@@ -323,7 +395,7 @@ def pressure_drop(T_arr, G, D, scw_table, fric_func, dz, g=9.81):
 # single SCW enthalpy balance (no LHGR split solve -- qp_val at each node
 # *is* the local linear heat rate, all of it going to this one channel).
 # =============================================================================
-def run_SCA(inputs, pval, Tscw_in, q0, L=3.0, n=400, scw_table=None, device=device):
+def run_SCA(inputs, pval, Tscw_in, q0, L=3.0, n=400, scw_table=None, device=device, correlation='swenson'):
     """Runs the same axial march as SCA_IAPWS95.run_SCA() for a normal
     (solid, single-coolant) rod and returns the axial profiles as plain
     python lists.
@@ -361,7 +433,7 @@ def run_SCA(inputs, pval, Tscw_in, q0, L=3.0, n=400, scw_table=None, device=devi
 
     qp0 = q_p(-L / 2 + dz / 2)
     qp0_t = torch.tensor(float(qp0), dtype=DTYPE, device=device)
-    _, Tmax0 = rod_node(Property, Tin_t, pval, qp0_t, inputs)
+    _, Tmax0 = rod_node(Property, Tin_t, pval, qp0_t, inputs, correlation=correlation)
     h0 = hin + qp0_t * dz / mdot
     T0 = Property(['h', h0], 'T')
 
@@ -371,7 +443,7 @@ def run_SCA(inputs, pval, Tscw_in, q0, L=3.0, n=400, scw_table=None, device=devi
         z = Z[i]
         qp_local = q_p(z - dz / 2)
         qp_t = torch.tensor(float(qp_local), dtype=DTYPE, device=device)
-        _, Tmax = rod_node(Property, T_i[i - 1], pval, qp_t, inputs)
+        _, Tmax = rod_node(Property, T_i[i - 1], pval, qp_t, inputs, correlation=correlation)
 
         h_scw = h_i[i - 1] + qp_t * dz / mdot
         T_scw = Property(['h', h_scw], 'T')
@@ -420,7 +492,7 @@ def interp_sensors(q_sensors, sensor_z, zq):
 
 
 def run_SCA_batch(inputs_b, Tscw_in_b, q_sensors_b, sensor_z, pval=25.0,
-                   L=3.0, n=400, scw_table=None, device=device):
+                   L=3.0, n=400, scw_table=None, device=device, correlation='swenson'):
     """Same axial march as run_SCA(), but over a whole batch of B runs at
     once instead of one python-level run at a time: every quantity at a
     given axial node is a (B,) tensor, and the n sequential axial steps
@@ -462,7 +534,7 @@ def run_SCA_batch(inputs_b, Tscw_in_b, q_sensors_b, sensor_z, pval=25.0,
     hin = Property(['T', Tscw_in_b], 'h')
 
     qp0 = q_p_batch(-L / 2 + dz / 2)
-    _, Tmax0 = rod_node(Property, Tscw_in_b, pval, qp0, inputs_b)
+    _, Tmax0 = rod_node(Property, Tscw_in_b, pval, qp0, inputs_b, correlation=correlation)
     h0 = hin + qp0 * dz / mdot
     T0 = Property(['h', h0], 'T')
 
@@ -471,7 +543,7 @@ def run_SCA_batch(inputs_b, Tscw_in_b, q_sensors_b, sensor_z, pval=25.0,
     for i in range(1, n):
         z = Z[i]
         qp_local = q_p_batch(z - dz / 2)
-        _, Tmax = rod_node(Property, T_i[i - 1], pval, qp_local, inputs_b)
+        _, Tmax = rod_node(Property, T_i[i - 1], pval, qp_local, inputs_b, correlation=correlation)
 
         h_scw = h_i[i - 1] + qp_local * dz / mdot
         T_scw = Property(['h', h_scw], 'T')

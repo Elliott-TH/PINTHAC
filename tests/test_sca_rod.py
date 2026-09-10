@@ -18,6 +18,12 @@ import torch
 from pinthac.sca import rod
 
 
+def _np(v):
+    """Solver outputs come back as torch tensors or numpy arrays depending on the path;
+    this normalizes them for comparison."""
+    return np.asarray(v.detach().cpu() if torch.is_tensor(v) else v)
+
+
 INPUTS = {"pitch": 0.0125, "rco": 0.0045, "tc": 0.00063, "delta": 5e-4, "kc": 24, "G": 1200}
 
 
@@ -135,3 +141,34 @@ def test_pressure_drop_is_positive_and_starts_at_zero():
     assert dP[0] == 0.0
     assert dP[-1] > 0.0
     assert np.all(np.isfinite(dP))
+
+
+def test_swenson_and_chen_are_both_selectable_and_actually_differ():
+    """The two supercritical correlations take the same arguments, so selecting between
+    them is a closure rather than a second solver. The check that matters is that the
+    choice reaches every axial node: an earlier wiring pass threaded `correlation` into
+    the first node but not the marching loop, and the symptom was that both names
+    returned bit-identical profiles."""
+    geometry = {'pitch': 0.0125, 'rco': 0.0045, 'tc': 0.00063,
+                'kc': 24.0, 'delta': 5.0e-4, 'G': 1200.0}
+    kw = dict(pval=25.0, Tscw_in=553.0, q0=25.0e3, L=3.0, n=20)
+
+    sw = _np(rod.run_SCA(geometry, correlation="swenson", **kw)['T_fuel_max'])
+    ch = _np(rod.run_SCA(geometry, correlation="chen_scw", **kw)['T_fuel_max'])
+
+    assert np.isfinite(sw).all() and np.isfinite(ch).all()
+    assert not np.allclose(sw, ch)          # different correlations, different answers
+
+    # Coolant temperature is set by the axial energy balance alone, so the choice of
+    # wall correlation must not move it at all.
+    sw_T = _np(rod.run_SCA(geometry, correlation="swenson", **kw)['T_i'])
+    ch_T = _np(rod.run_SCA(geometry, correlation="chen_scw", **kw)['T_i'])
+    assert np.allclose(sw_T, ch_T, rtol=1e-12)
+
+
+def test_unknown_correlation_name_raises_with_the_valid_names():
+    geometry = {'pitch': 0.0125, 'rco': 0.0045, 'tc': 0.00063,
+                'kc': 24.0, 'delta': 5.0e-4, 'G': 1200.0}
+    with pytest.raises(ValueError, match="swenson"):
+        rod.run_SCA(geometry, pval=25.0, Tscw_in=553.0, q0=25.0e3, L=3.0, n=5,
+                    correlation="nope")
