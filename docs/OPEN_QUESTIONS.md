@@ -737,3 +737,30 @@ all of them but prints a formula only for Mikityuk.
 Still no source for the Peclet exponent, and the two copies in the repository disagree in
 sign. The new papers do not contain it. `correlations/htc.py::Lead.Shen` keeps the form
 it had, with the disagreement documented in `docs/DUPLICATES.md` D3.
+
+---
+
+## Q42. `sca/annular.py` also has no rod-bundle correction factor -- the Phase 5 brief
+## says otherwise
+
+`docs/PHASE5_BRIEF.md` section 1 item 1 states: "`sca/annular.py` already applies it
+[the Presser rod-bundle correction] to its outer channel; the rod solver does not." That
+is not what the current code does. `pinthac/sca/annular.py::closure()` was read end to
+end and grepped for "Presser", "psi" and "Bundle" -- none appear anywhere in the file.
+Neither `htc_conv_i` nor `htc_conv_o` is ever multiplied by a bundle factor; both come
+straight from `htc.SCW.Swenson_dT`/`htc.SCW.Swenson` on the round-tube correlation.
+
+This matches `docs/PHYSICS_REVIEW.md`'s own assessment of `Ann_SCA.py` (the file that
+became `sca/annular.py`), item 3 of "`Ann_SCA.py` -- three gaps": "No rod-bundle
+correction factor, same as the rod code -- `Presser` is never called even though the
+outer channel is a rod-bundle geometry." The physics review and the brief's summary of
+it disagree; the physics review was written by reading the code and the brief's
+sentence was not verified against it before Phase 5 began.
+
+Per Phase 5's instruction to fix only the four explicitly listed items and flag anything
+else rather than fixing it, the outer-channel Presser correction was **not** added to
+`sca/annular.py` in this phase -- adding it was not one of the four fixes, and the
+brief's stated reason for skipping it (that it was already done) does not hold. Flagging
+for the owner: either treat this as a fifth physics fix for `sca/annular.py` (same
+`Bundle.Presser(Pitch, D_o)` pattern now in `sca/rod.py`, applied to the outer channel's
+`htc_conv_o`), or confirm the omission is intentional for some reason not recorded here.
