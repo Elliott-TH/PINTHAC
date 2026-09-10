@@ -202,20 +202,34 @@ def Kint(T):
     tau = T / 1000
     a = 16.35
     Term1 = 7.00155 * torch.log((tau + 0.471675) / (tau + 4.42356))
-    const = math.sqrt(math.pi / a) / (2 * a**3)
+    # Integrating tau^(-5/2)*exp(-a/tau) by the substitution s = 1/tau and one
+    # integration by parts gives
+    #     exp(-a/tau)/(a*sqrt(tau)) - sqrt(pi/a)/(2*a) * erf(sqrt(a/tau))
+    # so the erf coefficient is 1/(2a), not 1/(2a^3). The a^2 = 267 error is nearly
+    # invisible below 1000 K -- erf(sqrt(a/tau)) is flat there, so the mistake acts
+    # as an additive constant that cancels out of C1 -- and grows to 3.3 percent of
+    # the integral above 2000 K, which is exactly where peak fuel temperature is
+    # read off.
+    const = math.sqrt(math.pi / a) / (2 * a)
     Term2 = 6400 * (torch.exp(-16.35 / tau) / (a * torch.sqrt(tau)) - const * torch.erf(torch.sqrt(a / tau)))
     return 1000 * (Term1 + Term2)
 
 
 def Kfo(T):
-    # Carried over from SCA_IAPWS95.py/SCA_Clear_2.py, where it's also
-    # defined but unused. It is NOT dKint/dT (checked numerically: off by
-    # ~100x at low T, ~6x at high T) despite the similar name, so
-    # T_from_Kint below polishes via autograd instead of trusting it as an
-    # exact derivative.
+    # The Klimenko-Zorin thermal conductivity of UO2 at 95 percent theoretical
+    # density, W/m-K. This is exactly dKint/dT, which is what lets T_from_Kint use it
+    # as an analytic derivative instead of paying for autograd.
+    #
+    # It did not used to be: the missing factor of 100 below and the erf coefficient in
+    # Kint above were two separate defects, and together they made this look ~100x off
+    # at low temperature and ~6x off at high temperature. That discrepancy was recorded
+    # here as a property of the naming rather than as two bugs.
     T = torch.clamp(T, min=1.0)
     tau = T / 1000
-    Term1 = (7.5408 + 17.692 * tau + 3.6142 * tau**2)**(-1)
+    # The Klimenko-Zorin conductivity is 100/(7.5408 + 17.692*tau + 3.6142*tau^2),
+    # and the factor of 100 was missing here -- which is why this did not match
+    # dKint/dT at low temperature, where that term dominates.
+    Term1 = 100 / (7.5408 + 17.692 * tau + 3.6142 * tau**2)
     Term2 = 6400 * tau**(-5 / 2) * torch.exp(-16.35 / tau)
     return Term1 + Term2
 
