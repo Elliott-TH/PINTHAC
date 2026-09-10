@@ -47,7 +47,9 @@ from pinthac.solvers import bisect_newton
 
 from pinthac.correlations.bundle import Bundle
 from pinthac.correlations import friction as fric
+from pinthac.pin.cylindrical import Cyl_T
 from pinthac.properties.iapws95 import IAPWS95, device
+from pinthac.properties.matmod import UO2
 
 sigma = scipy.constants.sigma  # Stefan-Boltzmann constant
 DTYPE = torch.float64
@@ -187,54 +189,17 @@ def gap(qp_val, delta, Tci, rci, rfo):
     return gpu_solve(res, lo, hi)
 
 
-def Kint(T):
-    # Clamp (not abs/fold): folding a negative excursion onto its positive
-    # mirror creates a spurious second root at -T, since Kint(-T)==Kint(T)
-    # either way; clamping to a floor keeps it monotonic instead.
-    T = torch.clamp(T, min=1.0)
-    tau = T / 1000
-    a = 16.35
-    Term1 = 7.00155 * torch.log((tau + 0.471675) / (tau + 4.42356))
-    # Integrating tau^(-5/2)*exp(-a/tau) by the substitution s = 1/tau and one
-    # integration by parts gives
-    #     exp(-a/tau)/(a*sqrt(tau)) - sqrt(pi/a)/(2*a) * erf(sqrt(a/tau))
-    # so the erf coefficient is 1/(2a), not 1/(2a^3). The a^2 = 267 error is nearly
-    # invisible below 1000 K -- erf(sqrt(a/tau)) is flat there, so the mistake acts
-    # as an additive constant that cancels out of C1 -- and grows to 3.3 percent of
-    # the integral above 2000 K, which is exactly where peak fuel temperature is
-    # read off.
-    const = math.sqrt(math.pi / a) / (2 * a)
-    Term2 = 6400 * (torch.exp(-16.35 / tau) / (a * torch.sqrt(tau)) - const * torch.erf(torch.sqrt(a / tau)))
-    return 1000 * (Term1 + Term2)
-
-
-def Kfo(T):
-    # The Klimenko-Zorin thermal conductivity of UO2 at 95 percent theoretical
-    # density, W/m-K. This is exactly dKint/dT, which is what lets T_from_Kint use it
-    # as an analytic derivative instead of paying for autograd.
-    #
-    # It did not used to be: the missing factor of 100 below and the erf coefficient in
-    # Kint above were two separate defects, and together they made this look ~100x off
-    # at low temperature and ~6x off at high temperature. That discrepancy was recorded
-    # here as a property of the naming rather than as two bugs.
-    T = torch.clamp(T, min=1.0)
-    tau = T / 1000
-    # The Klimenko-Zorin conductivity is 100/(7.5408 + 17.692*tau + 3.6142*tau^2),
-    # and the factor of 100 was missing here -- which is why this did not match
-    # dKint/dT at low temperature, where that term dominates.
-    Term1 = 100 / (7.5408 + 17.692 * tau + 3.6142 * tau**2)
-    Term2 = 6400 * tau**(-5 / 2) * torch.exp(-16.35 / tau)
-    return Term1 + Term2
-
-
-def T_from_Kint(K_target):
-    """Invert Kint(T) = K_target for T. Kint is monotonic increasing but
-    not analytically invertible, so bracket by bisection (Kint's range
-    over a 1-6000K bracket comfortably covers any physical fuel
-    temperature) then polish with autograd Newton."""
-    lo = torch.full_like(K_target, 1.0)
-    hi = torch.full_like(K_target, 6000.0)
-    return gpu_solve(lambda T: Kint(T) - K_target, lo, hi)
+# Kint/Kfo/T_from_Kint used to live here as this module's own hand-rolled copy of the
+# Klimenko-Zorin conductivity integral and its inversion -- the D4 erf-coefficient and
+# factor-of-100 fixes (see commit 14172e4) were made directly in this file. Phase 3
+# (docs/PHASE3_BRIEF.md item 3) ported the same fixed formulas into the property library
+# as properties.matmod.UO2.Theta_Klimenko/k_Klimenko, verified bit-identical to this
+# module's own Kint/Kfo (max abs diff 0.0 / 4.4e-16 over 300-3000 K -- floating-point
+# noise, not a difference in the formula). rod_node below now calls pin.cylindrical.Cyl_T
+# with those two functions instead of keeping a second copy, per docs/PHASE5_BRIEF.md
+# section 2 ("use it if it is a clean substitution") -- Cyl_T's r=0 solid-pellet solve is
+# exactly the (A1=0, A2=Kint(Tfo)+q'''*rfo^2/4, Tmax=Kint^-1(A2)) scheme this module used
+# by hand, so the substitution is a rename, not a redesign.
 
 
 def _log(x):
@@ -279,8 +244,12 @@ def rod_node(Property, Tm, p, qp_val, inputs):
     Tci = Tco + qp_val / (2 * math.pi * kc) * _log(rco / rci)
     Tfo = gap(qp_val, delta, Tci, rci, rfo)
 
-    A2 = Kint(Tfo) + 0.25 * q_ppp * rfo**2
-    Tmax = T_from_Kint(A2)
+    # Solid-pellet centerline temperature: pin.cylindrical.Cyl_T at r=0, the shared
+    # solver's version of the (A1=0, A2=Kint(Tfo)+q'''*rfo^2/4, Tmax=Kint^-1(A2)) scheme
+    # this module used to invert by hand (see the note above Kfo/Kint used to be).
+    Theta_fo = UO2.Theta_Klimenko(Tfo)
+    Tmax = Cyl_T(0.0, rfo, q_ppp, Theta_fo, UO2.Theta_Klimenko, k_func=UO2.k_Klimenko,
+                 T_lo=1.0, T_hi=6000.0)
     return Tco, Tmax
 
 
