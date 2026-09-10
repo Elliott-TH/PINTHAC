@@ -140,7 +140,12 @@ class Water:
         cp = Props['cp']
         Pr = mu * cp / k
         Re = G * D / mu
-        Nu = 0.026 * Re**(0.8) * Pr**(0.4)
+        # Dittus-Boelter's leading constant is 0.023, not 0.026. 0.026 belongs to the
+        # Colburn j-factor correlation, which pairs it with Pr^(1/3) rather than Pr^0.4 --
+        # taking one constant from one correlation and one exponent from the other
+        # overpredicts by 13 percent. Every other copy of Dittus-Boelter in this
+        # repository already used 0.023.
+        Nu = 0.023 * Re**(0.8) * Pr**(0.4)
         val = Nu * k / D
 
         self.err = [0.25, 0.45]
