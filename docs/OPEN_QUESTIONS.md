@@ -416,3 +416,46 @@ That is enough for a constant-conductivity clad but not a temperature-dependent 
 
 Leave `MatMod.D9_SS` empty as you said, or add the two constants with the citation and a
 docstring saying it is constant-property only?
+
+---
+
+# Round 4 — after the Phase 2 cleanup
+
+## Q31 is now largely unblocked
+
+`docs/reference/MatLib_Info.pdf` turned out to be **PNNL-35702, "MatLib-1.2.1: Nuclear
+Material Properties Library", Geelhood et al., March 2024** — 146 pages, and the source
+for essentially every model in `properties/matmod.py`. The existing docstrings already
+called it "Matlib", and one Zircaloy docstring already cited PNNL-35702 by number.
+
+That supplies the references, valid ranges and uncertainties Phase 2 had to leave as
+`Not established` for the UO2, Zircaloy, HT9 and gas models. Filling them in is Phase 3
+work, not a retrofit of the Phase 2 commits.
+
+Q31 remains open only for the models PNNL-35702 does not cover: the liquid-metal
+correlations in `liqprops.py` (Sobolev / IAEA is named in the manual but the document is
+not in the repository), and `bundle.Weissman`.
+
+## Q32 resolved
+
+`docs/DECISIONS.md` did contradict itself on `D9_SS` — the round-1 entry said to leave it
+unimplemented, the round-2 entry said to add Hughes' two constants. Round 2 supersedes;
+the round-1 entry is now marked as such. Good catch.
+
+## Q34 — status of the two integration bugs
+
+Both were real, and one of them is mine.
+
+- **`sca/lut.py` calling `ht.Bundle.Weissman`.** Pre-existing relative to Phase 2, but
+  *introduced in Phase 1*: `Bundle` lived inside `PinHT.py`, so `ht.Bundle` resolved
+  before the split moved it to `correlations/bundle.py`. Fixed — `sca/lut.py` now imports
+  `correlations.bundle` directly, which is a legal downward import.
+- **`sca/annular.py` calling `iapws95.rho_Tp(..., bisect_iters=...)`** when the signature
+  is `rho_Tp(cls, T, p, newton_iters=60)`. Genuinely pre-existing, from before the
+  cleanup began. Left alone deliberately: `sca/` is Phase 5 scope and the fix is a choice
+  between dropping the argument and adding the bisection control to `rho_Tp`, which
+  changes the solver. Recorded here so it is not forgotten.
+
+Consequence worth stating plainly: **`sca/annular.py::solve_field` has never run
+end-to-end**, so the annular axial solve is unverified. Only its `closure()` has been
+exercised.

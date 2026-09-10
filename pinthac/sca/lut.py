@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import RegularGridInterpolator
 from pinthac import pin as ht
+from pinthac.correlations import bundle
 from pinthac.properties import matmod as mats
 from pinthac.correlations import htc as htc
 from pinthac.correlations import friction as fric
@@ -93,7 +94,7 @@ def SCA(Inputs):
     Per_w = 2*np.pi*Rco                  # wetted perimeter
     Dh = 4*Ah/Per_w                      # hydraulic diameter
     G = mdot/Ah                          # mass flux
-    psi = ht.Bundle.Weissman(Pitch, D)   # bundle correction factor applied to htc
+    psi = bundle.Bundle.Weissman(Pitch, D)   # bundle correction factor applied to htc
 
     def q_p(z):  # Linear heat generation rate
         return q0*np.cos(np.pi*z/L)
