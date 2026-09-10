@@ -576,3 +576,112 @@ The supercritical-water work runs at 25 MPa, above `p_c`, so it never sits at th
 point itself -- but the pseudocritical region at 25 MPa is close enough that `mu` and `lam`
 carry some of this error, and the NaN is reachable. **Nothing downstream should be trusted
 near `rho_c` until these are fixed.** They are the first item of Phase 3's remaining work.
+
+---
+
+# Round 7 — Phase 3 delegated half (`matmod.py`, `liqprops.py`)
+
+## Q35. `liqprops.py`'s `h()` has the wrong sign on its last term, for all three metals
+
+Sobolev (2020) Equation [14] is the analytic integral of the module's own `cp` (Equation
+[12]) from `Tm` to `T`:
+
+    H(T) = H(Tm) + a*(T-Tm) + (b/2)*(T^2-Tm^2) + (c/3)*(T^3-Tm^3) + d*(1/Tm - 1/T)
+
+`Sodium.h`, `Lead.h` and `LBE.h` all compute the last term as `d*(1/T - 1/Tm)` instead --
+the opposite sign. This is not a transcription-vs-source ambiguity: integrating `cp`'s own
+`d*T^-2` term by hand,
+
+    integral of d*T^-2 dT from Tm to T = [-d/T] from Tm to T = d*(1/Tm - 1/T)
+
+confirms Sobolev's sign is the one that actually integrates this module's `cp`, and the
+code's is not. Checked against `IAEA_LiquidCoolants_...pdf` too (the document the owner
+already flagged as containing enthalpy errors, per `docs/PHASE3_BRIEF.md`): its Eqs.
+(3-41)-(3-44) use the code's sign, `d*(T^-1 - TM,0^-1)`, not Sobolev's -- so this module's
+`h()` appears to trace back to the flawed IAEA formulation rather than to Sobolev, exactly
+the situation the brief anticipated.
+
+Magnitude (hand arithmetic, not a run of the code under test): for Sodium at T = Tb =
+1155 K, the disputed term is `d*(1/T-1/Tm) = -6.9e4 * (1/1155 - 1/371) ~= +126.24` against
+the correct `d*(1/Tm-1/T) ~= -126.24` -- a difference of about 252.5 out of a total
+`a*(T-Tm) + (b/2)*(...) + (c/3)*(...)` of about 23310 (both before dividing by `M`), i.e.
+roughly 1.1 percent of the enthalpy rise at the top of Sodium's range, growing with
+`|T - Tm|`. Not fixed here per CLAUDE.md ("change no physics") -- `Sodium.h`, `Lead.h` and
+`LBE.h`'s docstrings record the derivation. `tests/test_liqprops.py`'s new Sobolev anchors
+only check `h(Tm) = 0` (unaffected by this sign, since both candidate terms vanish at
+`T = Tm`) for exactly this reason -- the `T > Tm` behavior could not be anchored to
+Sobolev's Equation [14] without asserting the wrong number.
+
+## Q36. Three liqprops uncertainty bands do not match what Sobolev (2020) states
+
+Checked while filling in "Reference" fields (`docs/PHASE3_BRIEF.md` item 4's "if Sobolev
+gives a value you cannot reproduce, that is a finding"):
+
+- `Sodium.uncert_k = [0, 8%]`. Sobolev section 5.3 instead states that Fink and
+  Leibowitz's examination of the sodium thermal-conductivity literature found differences
+  of "up to +/-15%" over 371-1500 K -- a wider band, and from a literature-spread
+  examination rather than a single recommended sigma. No 8% figure appears in section 5.3.
+- `Lead.uncert_sig = [0, 5%]` and `LBE.uncert_sig = [0, 0.3%]`. Sobolev section 4.3 gives
+  only one collective figure for surface tension, "(3-6)%", covering Na, Pb and Pb-Bi(e)
+  together (attributed to an internal report, ref. 34, not in this repository) -- it does
+  not break the number out per metal, so neither of these two module values is
+  independently confirmable from the text, though Sodium's own `uncert_sig = [3%, 6%]`
+  happens to match that collective figure exactly.
+
+Not changed -- these may well come from report 34 (Sobolev's own unpublished-here source)
+rather than being wrong, but this document cannot confirm them. Left as-is, flagged in
+each function's docstring.
+
+## Q37. `PNNL-35702` gives two different UO2/MOX solid-swelling uncertainty numbers for
+the same stated burnup condition
+
+Section 2.1.8.3 states, as two separate bullets: "UO2, MOX: sigma = 0.00008 dV/V per 1
+GWd/MTU, Bu < 80 GWd/MTU" and then "UO2, MOX: sigma = 0.00016 dV/V per 1 GWd/MTU, Bu < 80
+GWd/MTU" -- both conditioned on the same "Bu < 80" (likely a `Bu >= 80` intended for the
+second, with the inequality lost in the PDF's text layer, but that is a guess, not
+confirmed against the PDF image). `UO2.swelling_solid`'s docstring now states both numbers
+verbatim rather than picking one.
+
+## Q38. `PNNL-35702` contradicts itself on which correlation family (RXA/SRA) Optimized
+ZIRLO's creep uses
+
+Section 3.1.10.1's introductory sentence: "An adjustment to the RXA correlation is used
+for Optimized ZIRLO." The same section's model description, a page later, next to the
+equations: "The Zircaloy SRA model is used for ZIRLO and Optimized ZIRLO with a reduction
+factor of 0.8 on eps_H." `matmod.Zircalloy.cw_type('Optimized ZIRLO')` returns `"SRA"`,
+matching the second (equation-level, and matching the explicit 0.8 factor the code also
+implements) statement, not the first. Not a code defect -- the code is self-consistent
+with the more specific half of a self-contradictory source -- but recorded per
+`docs/PHASE3_BRIEF.md`'s instruction to report what was checked and found.
+
+## Q39. `PNNL-35702`'s irradiation creep-rate flux range is stated in the wrong unit for
+its own formula
+
+Equation 3-18's own "Where," clause gives `phi`'s unit as n/m^2-s. Section 3.1.10.3's
+applicability bullet for the same model states "Fast Neutron Flux: 1e17 to 2e18
+n/cm^2-s" -- four orders of magnitude off from the formula's own stated unit. Not
+resolved by guessing which is right; `matmod.Zircalloy.strain_rate_irrad`'s `RANGES` entry
+checks `T` and `sig` only, not `flux`, and its docstring states the ambiguity.
+
+## Q40. `HT9.thrm_expan` returns what PNNL-35702 calls a "thermal expansion coefficient,
+K^-1", but this module (both before and after Phase 3) calls it a dimensionless "strain"
+
+PNNL-35702 Equation 3-42 labels its output `alpha`, units 1/K, the same symbol and unit
+convention transport/materials texts use for a CTE, not a strain. `HT9.thrm_expan`'s
+docstring (unchanged by Phase 2) instead documents a dimensionless `strain`, matching how
+`Zircalloy.thrm_expan_axial`/`thrm_expan_diametral` and `UO2.thrm_expan` are used
+elsewhere. Whether the coefficients were fit to a true CTE that this module mislabels, or
+to a strain that PNNL-35702 mislabels, is not resolvable from the formula alone (both
+readings are numerically plausible at the coefficients' magnitude). Not changed --
+recorded for whoever next touches `pin/clad.py`'s HT-9 dimensional-change path, which is
+where the distinction would actually matter.
+
+## Q41 (housekeeping). `UO2.eps`'s uncertainty text changed from an unsourced "+/-6.8%"
+to PNNL-35702's sourced "sigma = 0.072"
+
+Not a code change (only the docstring's `Uncertainty` field), but noted because it
+replaces a specific-looking number rather than a placeholder. The two are not obviously
+the same quantity: `eps` itself only spans about 0.79 to 0.82 over the model's 300-2500 K
+range, so a 0.072 absolute band and a 6.8 percent relative band are not equivalent. The
+old figure's source was never established (Q31); PNNL-35702's is. See `UO2.eps`'s
+docstring.
