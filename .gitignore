@@ -27,3 +27,6 @@ figures/*.png
 # Reference literature: large, and includes copyrighted textbooks. Cited by name in
 # docstrings rather than shipped with the repository.
 Useful_pdfs/
+
+# Editor tooling output
+.VSCodeCounter/
