@@ -97,4 +97,8 @@ def finish(fig, out_path):
     """
     fig.tight_layout()
     fig.savefig(out_path, format="svg", facecolor=BG)
+    # A PNG beside the SVG so the figure can actually be looked at while it is being
+    # built. The SVG is the deliverable; the PNG is never referenced by the page.
+    fig.savefig(str(out_path).replace(".svg", ".png"), dpi=130,
+                facecolor=fig.get_facecolor())
     print(f"Saved {out_path}")

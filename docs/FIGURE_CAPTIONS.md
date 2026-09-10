@@ -119,13 +119,36 @@ Regenerate: `HIP_VISIBLE_DEVICES=0 python figures/sca_surrogate_validation.py`
 
 Regenerate: `HIP_VISIBLE_DEVICES=0 python figures/sca_inference_speed.py`
 
-*(numbers filled in once the GPU run completes — see the coordinator's report)*
+Measured on the GPU (AMD RX 7800 XT, ROCm 7.2, `HIP_VISIBLE_DEVICES=0`), held-out
+runs only:
 
-**Do not caption this with a single headline number.** The CPU numbers already on
-record collapse with batch size (51.8x at N=100, 5.5x at N=1000) because
-`run_SCA_batch` is itself vectorized over the batch — the figure plots speedup as a
-function of batch size for exactly this reason, and the caption should quote the range
-plus explain the trend, not a lone "Nx faster."
+    batch   iterative FVM   DeepONet surrogate   speedup
+       10       4057 ms            1.88 ms        2158x
+      100       4423 ms           15.84 ms         279x
+    1,000       5334 ms          136.25 ms          39x
+   10,000       5265 ms         1343.38 ms         3.9x
+   20,000       5025 ms         2678.96 ms         1.9x
+
+```html
+<figure class="panel-media">
+  <img src="assets/projects/sca-inference-speed.svg" alt="Surrogate vs iterative solver wall-clock, against batch size" />
+  <figcaption>
+    Wall-clock cost of a full 100-node axial solve: the DeepONet surrogate against the
+    iterative finite-volume solver it was trained on, both on an AMD Radeon RX 7800 XT
+    (ROCm 7.2, torch 2.9.1). Plotted against batch size rather than as a single number,
+    because the answer depends entirely on it: <strong>2158&times; for a single-rod
+    query (10 rods), 39&times; at 1,000, and 1.9&times; at 20,000</strong>. The
+    iterative solver is itself vectorized over the batch, so its cost is nearly flat
+    from 10 to 20,000 rods (4.1 to 5.0 s) while the surrogate's grows linearly — the
+    surrogate wins overwhelmingly for the interactive, one-case-at-a-time queries a
+    design study makes, and the advantage narrows toward break-even for the large
+    sweeps the solver was already good at.
+  </figcaption>
+</figure>
+```
+
+**Deliberately not captioned with a single headline number.** A lone "Nx faster" would
+be true at exactly one batch size and misleading everywhere else.
 
 ---
 
@@ -167,3 +190,27 @@ own `import` statements via Python's `ast` module — no GPU, no physics)
    metal project bullet). Per `docs/DECISIONS.md` ("Scope: liquid metals"), this is not
    supported by the repository (one correlation per property) and was already flagged
    for rewording at Phase 7 by that decision.
+
+---
+
+## Timing methodology, added after the first pass
+
+The GPU side of both benchmark figures originally timed each batch size **once**. That is
+not reproducible on this machine: one run recorded 2.50 s at 20,000 points and 1.95 s at
+50,000 -- a larger problem finishing faster, which is a property of the driver at that
+moment (allocation, clock ramp, another process on the card) rather than of the code. The
+same script, unchanged, reported 59.9x, 57.7x and 21.9x at the same batch size across three
+runs.
+
+Both scripts now take the **best of five** timed runs, with `torch.cuda.empty_cache()`
+between repeats so the sweep cannot accumulate allocations into an out-of-memory at the
+largest sizes. The minimum is the right statistic here: interference can only ever make a
+run slower, so the fastest of several is both the cleanest estimate of what the code costs
+and stable between runs in a way the mean is not.
+
+With that fix the IAPWS-95 figure reproduces 59.9x at N = 20,000, and the extrapolated
+curve is smooth at 69x / 68x / 67x rather than jumping discontinuously from the measured
+segment. All numbers quoted in this document come from that corrected run.
+
+**Run both figures sequentially, not concurrently** -- two processes sweeping to a million
+points will exhaust the card's 16 GB.

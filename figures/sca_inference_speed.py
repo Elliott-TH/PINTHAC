@@ -154,12 +154,19 @@ def main():
                 label="DeepONet surrogate")
     ax_t.set_xlabel("Batch size (rods evaluated at once)")
     ax_t.set_ylabel("Wall-clock time [ms]")
-    ax_t.legend(frameon=False, fontsize=8, loc="upper left")
+    # Lower right: both curves climb with batch size, so the top-left corner is where the
+    # FVM curve already sits at small N. The bottom-right stays empty at every batch size.
+    ax_t.legend(frameon=False, fontsize=8, loc="lower right")
 
-    ax_s.semilogx(ns, speedups, "o-", color=style.ACCENT, lw=1.8, ms=6)
-    for x, y in zip(ns, speedups):
-        ax_s.annotate(f"{y:.1f}x", (x, y), textcoords="offset points", xytext=(0, 8),
-                      ha="center", fontsize=8, color=style.TEXT)
+    # No per-point value labels: the curve is steep enough that each label sits on the
+    # line rather than beside it, and the y axis already reads the value off directly.
+    # Log y as well as log x: the speedup spans three decades, from ~2000x on a batch of
+    # ten rods down to under 2x at twenty thousand, and a linear axis flattens everything
+    # below the first point into the baseline. The decline is the whole content of this
+    # panel, so it has to stay legible across its full range.
+    ax_s.loglog(ns, speedups, "o-", color=style.ACCENT, lw=1.8, ms=6)
+    ax_s.axhline(1.0, color=style.MUTED, lw=0.9, ls=":", alpha=0.7)
+    ax_s.text(ns[0], 1.15, "break-even", color=style.MUTED, fontsize=7.5, va="bottom")
     ax_s.set_xlabel("Batch size (rods evaluated at once)")
     ax_s.set_ylabel("Speedup (x)")
 
