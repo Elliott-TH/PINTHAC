@@ -100,8 +100,8 @@ Inputs_ann = {
     'delta_o': 0.0001,  # outer (fuel-OD-side) gas gap, m
     'Gas': 'He',        # gap fill gas (Mat_Models.Gas.k)
     'Pitch': 0.0130,    # outer bundle pitch, m
-    'Tin_i': 350.0,     # degC, inner-channel inlet temp
-    'Tin_o': 350.0,     # degC, outer-channel inlet temp
+    'Tin_i': 623.15,    # K, inner-channel inlet temp (was 350 degC)
+    'Tin_o': 623.15,    # K, outer-channel inlet temp (was 350 degC)
     'Pnom': 25.0,       # MPa
     'mdot_i': 0.010,    # kg/s, inner channel flow
     'mdot_o': 0.060,    # kg/s, outer channel flow
@@ -416,8 +416,8 @@ def solve_field(Inputs=Inputs_ann, q_p=None, outer_iter=15, tol=10.0, progress=F
     ri, ro = inp['ri'], inp['ro']
     Pnom = inp['Pnom']
     mdot_i, mdot_o = inp['mdot_i'], inp['mdot_o']
-    Tin_i = inp['Tin_i'] + 273.15
-    Tin_o = inp['Tin_o'] + 273.15
+    Tin_i = inp['Tin_i']   # K -- Inputs_ann now carries this in kelvin directly
+    Tin_o = inp['Tin_o']
 
     if q_p is None:
         q0 = inp['q0']
@@ -478,10 +478,10 @@ def solve_field(Inputs=Inputs_ann, q_p=None, outer_iter=15, tol=10.0, progress=F
     results = {
         'z': Z,
         'h_i': h_i, 'h_o': h_o,
-        'Tm_i': T_i - 273.15, 'Tm_o': T_o - 273.15,
-        'Tfo_i': c['Tfo_i'] - 273.15, 'Tfo_o': c['Tfo_o'] - 273.15,
-        'Tcldi_ID': c['Tcldi_ID'] - 273.15, 'Tcldi_OD': c['Tcldi_OD'] - 273.15,
-        'Tcldo_ID': c['Tcldo_ID'] - 273.15, 'Tcldo_OD': c['Tcldo_OD'] - 273.15,
+        'Tm_i': T_i, 'Tm_o': T_o,
+        'Tfo_i': c['Tfo_i'], 'Tfo_o': c['Tfo_o'],
+        'Tcldi_ID': c['Tcldi_ID'], 'Tcldi_OD': c['Tcldi_OD'],
+        'Tcldo_ID': c['Tcldo_ID'], 'Tcldo_OD': c['Tcldo_OD'],
         'htc_conv_i': c['htc_conv_i'], 'htc_conv_o': c['htc_conv_o'],
         'htc_gap_i': c['htc_gap_i'], 'htc_gap_o': c['htc_gap_o'],
         'q_i': q_i, 'q_o': q_o,
@@ -492,6 +492,6 @@ def solve_field(Inputs=Inputs_ann, q_p=None, outer_iter=15, tol=10.0, progress=F
 
 if __name__ == "__main__":
     out = solve_field(Inputs_ann, progress=True)
-    print(f"Peak fuel Tfo_i: {out['Tfo_i'].max():.2f} degC   Peak fuel Tfo_o: {out['Tfo_o'].max():.2f} degC   "
-          f"Outlet Tm_i: {out['Tm_i'][-1]:.2f} degC   Outlet Tm_o: {out['Tm_o'][-1]:.2f} degC")
+    print(f"Peak fuel Tfo_i: {out['Tfo_i'].max():.2f} K   Peak fuel Tfo_o: {out['Tfo_o'].max():.2f} K   "
+          f"Outlet Tm_i: {out['Tm_i'][-1]:.2f} K   Outlet Tm_o: {out['Tm_o'][-1]:.2f} K")
     print(f"Total dP_i: {out['dP_i'][-1]/1000:.2f} kPa   Total dP_o: {out['dP_o'][-1]/1000:.2f} kPa")
