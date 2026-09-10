@@ -43,6 +43,8 @@ import numpy as np
 import scipy.constants
 import torch
 
+from pinthac.solvers import bisect_newton
+
 from pinthac.properties.iapws95 import IAPWS95, device
 
 sigma = scipy.constants.sigma  # Stefan-Boltzmann constant
@@ -106,40 +108,11 @@ def make_Property(df):
 # derivative when one is cheap, e.g. Kfo for Kint, or torch.autograd
 # otherwise) sharpen the result well past bisection's linear rate.
 # =============================================================================
-def gpu_solve(residual, lo, hi, deriv=None, bisect_iters=40, newton_iters=6):
-    lo_ = torch.as_tensor(lo, dtype=DTYPE)
-    hi_ = torch.as_tensor(hi, dtype=DTYPE)
-    lo_, hi_ = torch.broadcast_tensors(lo_, hi_)
-    lo_, hi_ = lo_.clone(), hi_.clone()
-
-    f_lo = residual(lo_)
-    for _ in range(bisect_iters):
-        mid = 0.5 * (lo_ + hi_)
-        f_mid = residual(mid)
-        keep_lo = (f_mid * f_lo) > 0
-        lo_ = torch.where(keep_lo, mid, lo_)
-        f_lo = torch.where(keep_lo, f_mid, f_lo)
-        hi_ = torch.where(keep_lo, hi_, mid)
-    x = 0.5 * (lo_ + hi_)
-
-    for _ in range(newton_iters):
-        if deriv is None:
-            xg = x.detach().requires_grad_(True)
-            F = residual(xg)
-            # grad_outputs=ones_like, not the implicit-scalar default: every
-            # residual here is elementwise in x (batched independent scalar
-            # equations, same as the bisection loop above already assumes),
-            # so summing before differentiating still gives the right
-            # per-element dF/dx with no cross-batch leakage -- and it's what
-            # lets this same code path serve both a single scalar solve and
-            # a batch of B simultaneous ones (run_SCA vs run_SCA_batch).
-            dF, = torch.autograd.grad(F, xg, grad_outputs=torch.ones_like(F))
-            F = F.detach()
-        else:
-            F = residual(x)
-            dF = deriv(x)
-        x = x - F / dF
-    return x.detach()
+# gpu_solve moved to pinthac/solvers.py in Phase 4: the pin layer needs the same batched
+# root finder, and pin sits below sca in the one-way import order, so the alternative was
+# a second copy. Re-exported under its original name so this module's call sites and any
+# script importing it from here keep working.
+gpu_solve = bisect_newton
 
 
 # =============================================================================
