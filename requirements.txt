@@ -1,0 +1,18 @@
+# Runtime dependencies. See pyproject.toml for the authoritative list; this file exists
+# for `pip install -r`, which is how the project environment (conda env GenEnv3.12) was
+# built.
+numpy>=1.24
+scipy>=1.10
+torch>=2.0
+pandas>=2.0
+matplotlib>=3.7
+tqdm>=4.60
+
+# Optional, by layer:
+#   iapws>=1.5              reference CPU library, used only by figures/iapws95_benchmark.py
+#   pytorch_optimizer>=3.0  SOAP optimizer, used by pinthac/ml
+#   pytest>=7.0             test suite
+#
+# Deliberately removed during the Phase 1 cleanup:
+#   array_api_compat        replaced by pinthac/backend.py, which needs no dependency
+#   torchquad               was used once, for a one-dimensional integral numpy handles

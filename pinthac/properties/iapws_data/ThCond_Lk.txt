@@ -1,0 +1,8 @@
+# Table 1: Coefficients L_k for lambda_0 (dilute-gas), Eq. (16)
+# IAPWS 2011 Thermal Conductivity, ThCond.pdf
+# k=0..4, one value per line
+2.443221e-3
+1.323095e-2
+6.770357e-3
+-3.454586e-3
+4.096266e-4
