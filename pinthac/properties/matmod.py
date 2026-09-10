@@ -114,7 +114,7 @@ class UO2:
 
         # Bu defaults to the plain Python float 0.0; torch.exp(-0.04*Bu) below then
         # raises TypeError on a tensor T unless Bu is promoted to match it first.
-        Bu = backend.promote(Bu, T)
+        T, Bu = backend.promote_all(T, Bu)
         xp = backend.lib(T, Bu)
         f_Bu = 0.00187 * Bu
         g_Bu = 0.038 * Bu**(0.28)
@@ -340,6 +340,10 @@ class UO2:
         Returns:
             val : dimension change, percent, same type as T
         """
+        # Promote before any arithmetic touches these: each of them is routinely the
+        # scalar while another is a whole batch, and a numpy intermediate formed from
+        # the scalar cannot afterwards combine with the tensor.
+        T, Bu = backend.promote_all(T, Bu)
         xp = backend.lib(T, Bu)
         dL_max = UO2.dens_max(T, rho_TD, T_sint)
         B = UO2.dens_B(dL_max)
@@ -421,6 +425,7 @@ class UO2:
         Returns:
             val : swelling, dimensionless volume fraction, same type as T
         """
+        T, Bu = backend.promote_all(T, Bu)
         low = -4.37E-2 + 4.55E-5*T
         high = 7.40E-2 - 4.05E-5*T
         zero = backend.zeros_like(T)
@@ -680,7 +685,7 @@ class Zircalloy:
         # unpromoted, a torch T would make this where() dispatch to numpy instead (none
         # of its three arguments are tensors), producing a bare numpy value that later
         # silently strips the gradient when multiplied against a torch quantity below.
-        t_ox = backend.promote(t_ox, T)
+        T, t_ox = backend.promote_all(T, t_ox)
         eps_1 = backend.where(t_ox < 3.88E-6, 0.325+0.1246E6*t_ox,
                                        0.808642-50.0*t_ox)
         eps_2 = backend.maximum(0.325, xp.exp((1500-T)/300)*eps_1)
@@ -726,7 +731,7 @@ class Zircalloy:
         xp = backend.lib(T)
         # phi defaults to the plain float 0.0; torch.exp rejects a bare float even when
         # T is a tensor, same failure mode as k_NFI's Bu (see that docstring's note).
-        phi = backend.promote(phi, T)
+        T, phi = backend.promote_all(T, phi)
         c2 = 0.88 + 0.12*xp.exp(-phi/1E25)
         c3 = -2.6E10
         low = (1.088E11 - 5.475E7*T + (6.61E11+5.912E8*T)*d_ox + c3*CW)/c2
@@ -776,7 +781,7 @@ class Zircalloy:
         """
         xp = backend.lib(T)
         # phi defaults to the plain float 0.0; same fix as Zircalloy.E, above.
-        phi = backend.promote(phi, T)
+        T, phi = backend.promote_all(T, phi)
         c2 = 0.88 + 0.12*xp.exp(-phi/1E25)
         c3 = -0.867E10
         low = (4.04E10 - 2.168E7*T + (7.07E11-2.315E8*T)*d_ox + c3)/c2
@@ -973,18 +978,19 @@ class Zircalloy:
         Returns:
             val : thermal creep strain rate, 1/hr, same type as T
         """
-        xp = backend.lib(T, sig)
         dic = {
                 "SRA": [1.08E9, 2.0],
                 "RXA": [5.47E8, 3.5]
             }
+        # Promote before any arithmetic touches these: each of them is routinely the
+        # scalar while another is a whole batch, and a numpy intermediate formed from
+        # the scalar cannot afterwards combine with the tensor.
+        T, sig, Phi = backend.promote_all(T, sig, Phi)
+        xp = backend.lib(T, sig, Phi)
         A, n = dic[cw]
         Q = 201000.0
         R = 8.314
         E = 1.148E5 - 59.9*T
-        # Phi has no default but is often a scalar fluence applied across a batch of
-        # temperatures; torch.exp rejects it directly unless promoted to match T first.
-        Phi = backend.promote(Phi, T)
         a_i = 650*(1 - 0.56*(1 - xp.exp(-1.4E-27*Phi**1.3)))
         val = A*(E/T)*xp.sinh(a_i*sig/E)**n * xp.exp(-Q/(R*T))
         return val
@@ -1028,6 +1034,9 @@ class Zircalloy:
         c0, f_lo, f_a, f_b, f_hi = dic[cw]
         c1 = 0.85
         c2 = 1.0
+        # f_T comes out of `where` over T alone, so it is a numpy value whenever T is the
+        # scalar and sig or flux is the array. Promote before combining them.
+        T, sig, flux = backend.promote_all(T, sig, flux)
         f_T = backend.where(T <= 570, f_lo, backend.where(T >= 625, f_hi, f_a+f_b*T))
         val = c0*flux**c1 * sig**c2 * f_T
         return val
@@ -1455,6 +1464,10 @@ class HT9:
         Returns:
             val : primary thermal creep strain rate, 1/s, same type as T
         """
+        # Promote before any arithmetic touches these: each of them is routinely the
+        # scalar while another is a whole batch, and a numpy intermediate formed from
+        # the scalar cannot afterwards combine with the tensor.
+        T, sig, t = backend.promote_all(T, sig, t)
         xp = backend.lib(T, sig)
         C1 = 13.4
         C2 = 8.43E-3
@@ -1467,9 +1480,6 @@ class HT9:
         Term1 = C1*sig*xp.exp(-Q1/(R*T))
         Term2 = C2*sig**4*xp.exp(-Q2/(R*T))
         Term3 = C3*xp.sqrt(sig)*xp.exp(-Q3/(R*T))
-        # t has no default but is used directly inside exp(); torch.exp rejects a bare
-        # float t even with a tensor T, so it needs the same promotion as Phi above.
-        t = backend.promote(t, T)
         val = (Term1+Term2+Term3)*C4*xp.exp(-C4*t)
         return val
 

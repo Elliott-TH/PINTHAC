@@ -51,6 +51,17 @@ def _assert_backend_contract(fn, G=1200.0, D=0.01, label=""):
     (grad,) = torch.autograd.grad(out_t.sum(), Props_t['mu'], allow_unused=True)
     assert grad is not None and torch.isfinite(grad).all(), label
 
+    # Reverse mixed case: the geometry/flow argument is the batch and the properties are
+    # scalars. This is how a design sweep calls these -- one property state, many mass
+    # fluxes -- and it is the direction backend.lib() gets wrong if a correlation resolves
+    # its library from the Props dict alone.
+    G_t = torch.tensor([1200.0, 1800.0], dtype=torch.float64, requires_grad=True)
+    out_g = fn(props_water(), G_t, D)
+    assert torch.is_tensor(out_g), label
+    assert torch.isfinite(out_g).all(), label
+    (grad_g,) = torch.autograd.grad(out_g.sum(), G_t, allow_unused=True)
+    assert grad_g is not None and torch.isfinite(grad_g).all(), label
+
 
 def test_dittus_backend_contract():
     _assert_backend_contract(htc.Water.Dittus, label="Dittus")
