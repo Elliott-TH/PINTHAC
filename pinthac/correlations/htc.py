@@ -55,6 +55,8 @@ RANGES = {
     # Chen & Fang (2014)'s full validated database, transcribed from Chen_SCW_dT's own
     # docstring below (h_b converted from the kJ/kg the paper states to the J/kg
     # Props_b['h'] actually carries, at the call site).
+    # Mikityuk (2009) section 3: 658 data points over these bounds.
+    "mikityuk": {"Pe": (30.0, 5000.0), "P_over_D": (1.1, 1.95)},
     "chen_scw": {"G": (201.0, 2500.0), "q": (129.0e3, 1735.0e3), "D": (0.006, 0.026),
                  "h_b_kJ": (278.0, 3169.0)},
 }
@@ -963,6 +965,92 @@ class Sodium:
         Re = G * D / mu
         Pe = Re * Pr
         Nu = 5.0 + 0.025 * Pe**0.8
+        htc = Nu * k / D
+        return htc
+
+    @staticmethod
+    def Mikityuk(Props, G, D, pitch, check_range=True):
+        """
+        Mikityuk correlation for liquid-metal heat transfer in a rod bundle.
+
+        Why this model is here:
+            Lyon and Seban-Shimazaki above are circular-tube correlations. A fuel bundle
+            is not a tube: the subchannel shape varies azimuthally around each rod and
+            the pitch-to-diameter ratio controls how much. This is the bundle correlation
+            proper, and Mikityuk derived it as a best fit across four experimental sets
+            -- 658 points, NaK and mercury, triangular and square lattices -- after
+            reviewing eight correlations published between 1960 and 1977. Todreas &
+            Kazimi single it out as the best fit over its range.
+
+            Note this returns a Nusselt number outright rather than a correction factor
+            to a tube correlation, which is why it lives here and not in
+            correlations/bundle.py. Weissman and Presser there are multipliers on a
+            round-tube htc; this is not.
+
+        Formulation:
+            x  = pitch/D                            pitch-to-diameter ratio
+            Pe = Re*Pr = G*D*cp/k
+            Nu = 0.047*(1 - exp(-3.8*(x - 1)))*(Pe^0.77 + 250)
+            htc = Nu*k/D
+
+            Two limits are worth seeing in the form. As Pe goes to zero the second factor
+            tends to 250, leaving the conduction floor 11.75*(1 - exp(-3.8*(x-1))) rather
+            than zero -- the liquid-metal behaviour Lyon's constant 7.0 also encodes. And
+            as x grows the first factor saturates at 1, so Nu approaches a finite
+            asymptote instead of diverging; Mikityuk calls this out as the property that
+            distinguishes his correlation from the others he reviewed, and the reason it
+            is usable in a transient code where the geometry term might be pushed
+            outside its fitted range.
+
+        Valid range:
+            Peclet number 30 to 5000; pitch-to-diameter ratio 1.1 to 1.95.
+
+        Uncertainty:
+            Mean absolute error -0.1 and root-mean-square error 1.9, both in Nusselt
+            number units and both absolute rather than relative -- which is why there is
+            no entry for this correlation in the module-level UNCERTAINTY table, whose
+            values are all relative bands. At the low-Peclet end, where Nu is around 12,
+            an RMS error of 1.9 is roughly 16 percent; at Pe = 5000, where Nu is around
+            25, it is closer to 8 percent.
+
+        Reference:
+            Mikityuk, K., "Heat transfer to liquid metal: Review of data and correlations
+            for tube bundles", Nuclear Engineering and Design 239 (2009) 680-687,
+            Eq. (14).
+
+            Todreas & Kazimi Nuclear Systems Volume 1 3rd ed. reproduces this as its
+            Eq. (10.133), but with the Peclet exponent mis-typeset: it prints
+            "(Pe < 0.77+250)" where the exponent should be a superscript. Confirmed
+            against Mikityuk's own paper -- see docs/OPEN_QUESTIONS.md Q41.
+
+        Inputs:
+            Props : property dict with keys 'mu' (Pa-s), 'cp' (J/kg-K), 'k' (W/m-K)
+            G     : mass flux, kg/m^2-s (float, numpy array, or torch tensor)
+            D     : rod outer diameter, m
+            pitch : rod-to-rod pitch, m
+            check_range : if True, warn when Pe or pitch/D leaves the fitted range
+        Returns:
+            htc : heat transfer coefficient, W/m^2-K, same type as G
+        """
+        mu, cp, k = Props['mu'], Props['cp'], Props['k']
+        # Promote across the properties as well as the geometry, not just among the
+        # geometry. Either side can be the batch: a fixed lattice swept over many mass
+        # fluxes leaves pitch/D a float, and a single operating point evaluated over a
+        # batch of property states leaves G, D and pitch floats while mu is the tensor.
+        # Only the second case reaches xp.exp with a bare float, and only that one fails
+        # -- which is exactly why the contract test sweeps each argument separately.
+        G, D, pitch, mu, cp, k = backend.promote_all(G, D, pitch, mu, cp, k)
+        xp = backend.lib(G, D, pitch, mu, cp, k)
+
+        x = pitch / D
+        Pr = mu * cp / k
+        Re = G * D / mu
+        Pe = Re * Pr
+
+        if check_range:
+            ranges.check("mikityuk", {"Pe": Pe, "P_over_D": x}, RANGES["mikityuk"])
+
+        Nu = 0.047 * (1.0 - xp.exp(-3.8 * (x - 1.0))) * (Pe**0.77 + 250.0)
         htc = Nu * k / D
         return htc
 
