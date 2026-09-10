@@ -137,7 +137,6 @@ def qp(z):
     return q0*torch.cos(np.pi*z/L)
 
 h_in = interp(torch.tensor([T_in],device=device),T_tab,h_tab)
-water = htc.Water()
 kgas = lambda T: mat.Gas.k(GAS,T)
 
 # ------------------------------------------------------------- geometry
@@ -298,8 +297,8 @@ def chain(h_i,h_o,qp_i,qp_o,P,g):
     """
     Tb_i, Tb_o = T_h(h_i), T_h(h_o)
 
-    htc_i = water.Dittus(Props(h_i),g['G_i'],g['D_i'])
-    htc_o = water.Dittus(Props(h_o),g['G_o'],g['D_o'])
+    htc_i = htc.Water.Dittus(Props(h_i),g['G_i'],g['D_i'])
+    htc_o = htc.Water.Dittus(Props(h_o),g['G_o'],g['D_o'])
 
     Tci_ID = Tb_i + qp_i/(2*np.pi*g['Rci_ID']*htc_i)
     Tco_OD = Tb_o + qp_o/(2*np.pi*g['Rco_OD']*htc_o)
