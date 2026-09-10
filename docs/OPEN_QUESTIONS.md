@@ -5,6 +5,37 @@ basis of any of it. Questions are ordered by how much they block later phases.
 
 ---
 
+## Q34. Two pre-existing integration bugs found while updating Phase 2 call sites
+(not fixed -- both are outside the ten in-scope Phase 2 modules)
+
+While updating `sca/lut.py` and `sca/annular.py`'s call sites for the friction.py flat-
+namespace conversion (see the Phase 2 report), two independent, pre-existing bugs
+surfaced that mean neither file's top-level driver has ever run successfully, even
+before this phase:
+
+1. `sca/lut.py::SCA` calls `ht.Bundle.Weissman(Pitch, D)` where `ht = pinthac.pin`. But
+   `Bundle` lives in `correlations/bundle.py`, not `pin/` (`pin/__init__.py` does not,
+   and per the intended `properties <- correlations <- pin` layering should not,
+   re-export it) -- `pinthac.pin` has no `Bundle` attribute, so this raises
+   `AttributeError` immediately, before any of the friction-factor code this phase
+   touched is reached. Present since the Phase 1 commit that introduced `sca/lut.py`.
+2. `sca/annular.py::solve_field` -> `_T_hp_fast` calls
+   `iapws.IAPWS95.rho_Tp(mid, p, bisect_iters=..., newton_iters=...)`, but
+   `properties/iapws95.py` (out of Phase 2's scope) does not accept those keyword
+   arguments -- `TypeError` on the first call. Also present since Phase 1; not touched
+   here since `iapws95.py` is explicitly out of scope for Phase 2.
+
+Both were confirmed unrelated to this phase's changes by reproducing them against the
+pre-Phase-2 commit. The friction.py call sites in both files were still updated (the
+line each bug is on has nothing to do with friction), and the friction/bundle logic
+itself was verified directly at the function level instead of through these two broken
+drivers -- see the Phase 2 report for what was actually exercised. Fixing either bug
+means touching files outside the ten-module Phase 2 scope (`sca/lut.py`, `sca/annular.py`
+for #1; `properties/iapws95.py` for #2), so both are left for the phase that owns those
+files.
+
+---
+
 ## Blocking Phase 5 (validation)
 
 ### Q1. `SCA_Example.py` cannot run — its data files are missing
@@ -352,6 +383,16 @@ that are part of the formula itself (e.g. the 2098 K Zircaloy phase transition),
 `matmod.RANGES` is therefore left empty rather than populated with invented bounds. If
 you have the original Frapcon-4/MATPRO/PNNL-35702/Akiyama/Yamanouchi source documents,
 Phase 3 (or a dedicated documentation pass) should fill these in.
+
+## Q33. `friction.Spacer.blah2` has no recoverable description of what it was for
+
+Converted from a bare `return` to `raise NotImplementedError` per the brief's "make
+empty stubs honest" instruction. Unlike `matmod.D9_SS.k` (which at least has a target
+value from Hughes to implement later, see Q32), nothing in the source, docs/reference/,
+or docs/PHYSICS_REVIEW.md says what `Spacer` or `blah2` were meant to represent beyond
+the class name suggesting a spacer-grid friction or mixing correction. If you recall
+what this was for, it should be renamed to something legible before anything is
+implemented in it.
 
 ## Q32. `docs/DECISIONS.md` disagrees with itself on `D9_SS.k`
 

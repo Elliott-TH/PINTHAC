@@ -96,7 +96,6 @@ def SCA(Inputs):
     psi = ht.Bundle.Weissman(Pitch, D)   # bundle correction factor applied to htc
 
     htc_obj = htc.SCW()
-    fric_obj = fric.f_SCW()
 
     def q_p(z):  # Linear heat generation rate
         return q0*np.cos(np.pi*z/L)
@@ -210,7 +209,7 @@ def SCA(Inputs):
         T.append(T_i)
         Props_i = Props_TP(T_i, P_prev)
 
-        f_i = fric_obj.Wu(Props_prev, G, Dh)
+        f_i = fric.f_SCW.Wu(Props_prev, G, Dh)
         dP_i = dP_cell(Props_prev, Props_i, f_i, dz)
         dP.append(dP_i)
 
