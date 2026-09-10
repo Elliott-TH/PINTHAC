@@ -336,6 +336,37 @@ Worth implementing Bishop alongside Swenson? It is fully specified in the refere
 supplied, it is one more supercritical option for the correlation-comparison figures, and
 having both side by side in `htc.py` makes the exponents hard to confuse again.
 
+## Q31. `properties/matmod.py` correlations have no recoverable citations, ranges or
+uncertainty beyond what a few docstrings already stated in passing
+
+Phase 2 cleaned up `matmod.py` (docstrings, backend contract, RANGES scaffold) without
+changing any formula. In doing so: of the ~30 public functions in `UO2`, `Zircalloy`,
+`HT9` and `Gas`, none carry a bibliographic reference in the source, `docs/reference/`,
+or `docs/PHYSICS_REVIEW.md` -- only model *family* names survive (Frapcon-4, MATPRO,
+Rolstad, Akiyama, Yamanouchi, Klimenko-Zorin). A handful of docstrings do state a
+validated uncertainty in passing (UO2.eps +/-6.8%; Zircalloy.k sigma=1.9 W/m-K;
+Zircalloy.thrm_expan_axial/diametral sigma=4.8e-5 / 4.6e-4 m/m; Zircalloy.eps
+sigma=0.054; Zircalloy.creep_rate sigma=21.6% / 14.5%) and these are preserved in the new
+docstrings, but no function has a stated *valid range* beyond the piecewise breakpoints
+that are part of the formula itself (e.g. the 2098 K Zircaloy phase transition), and
+`matmod.RANGES` is therefore left empty rather than populated with invented bounds. If
+you have the original Frapcon-4/MATPRO/PNNL-35702/Akiyama/Yamanouchi source documents,
+Phase 3 (or a dedicated documentation pass) should fill these in.
+
+## Q32. `docs/DECISIONS.md` disagrees with itself on `D9_SS.k`
+
+The main decisions table says "No good models exist; leave it... stays an unimplemented
+stub". The "Round 2 decisions" table, further down the same file, says the opposite:
+"`MatMod.D9_SS` gets the two constants from Hughes: k = 18.9 W/m-K ... and rho = 8100
+kg/m^3". Phase 2 did **not** add those constants -- implementing new physics is outside
+Phase 2's docstring/backend/dead-code scope even when a citation is available (this one
+is: Leibowitz & Blomquist 1988, via Hughes 2014, already recorded in
+`docs/PHYSICS_REVIEW.md`) -- and instead only converted the existing bare `return` stub
+into an honest `raise NotImplementedError`, matching the brief's instruction for empty
+stubs generally. Please confirm which of the two DECISIONS.md rows is current, so a later
+phase can either add the two constants (documented as constant-property only, per the
+Round 2 wording) or leave the stub as is.
+
 ## Q30. D9 cladding — Hughes does give a value
 
 You said there are no good D9 models. Hughes uses `k = 18.9 W/m-K at 650 K`
