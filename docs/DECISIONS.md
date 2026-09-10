@@ -16,3 +16,19 @@ original brief, where the two differ.
 | **Physics defects** | Fix all, one commit each. | D1, D2, D4, D5, D11 proceed as separate commits with before/after numbers. **D6 is reclassified** (see above) and is no longer a physics change. |
 | **Power-profile basis** | Fourier-squared-with-offset (per `Annular_Heat_Transfer_Final.pdf` §2) **or** the Legendre basis used in the existing DeepONet work. | Phase 6 implements both behind one selector. **Caveat: see Q22 — the file defining `legendre_basis` was not among those supplied.** |
 | **SCA file quality** | Some SCA files are rough: they use a plain Nusselt correlation instead of Swenson or Chen, omit the hydraulic diameter, omit the rod-bundle correction factor. | These are **not** validation targets to reproduce faithfully. Phase 5 treats them as physics references, not regression anchors. Changes this materially — see Q23. |
+
+## Round 2 decisions
+
+| Item | Decision |
+|---|---|
+| **Backend dispatch** | `pinthac/backend.py` exposes `lib()`; call sites read `xp = backend.lib(...)`. `array_api_compat` is dropped. `Arr_Compat.py` and `Liquid_Metals.lib` are archived. |
+| **`HTC.Water` / `HTC.SCW`** | Convert to flat namespaces. `__init__`, `self.err` and `self.value` are removed; per-correlation uncertainty moves into the shared `ranges`/`uncertainty` tables. Call sites change from `HTC.Water().Dittus(...)` to `htc.dittus_boelter(...)`. |
+| **Root finding** | Standardize on `SCA_IAPWS95_Rod.gpu_solve` and `torchsolve`. **`scipy.optimize` is retired from the library** — that removes `fsolve` from `SCW_Annular.py`, `SCA_IAPWS95_Rod` already being clean, and `brentq` from `SCA_Clear_2.py`. No new plain Newton loops are written where these already do the job. |
+| **`torch.set_default_dtype`** | Removed from `IAPWS/IAPWS_97.py`. The EOS tensors get an explicit `dtype=torch.float64` instead, so importing the property library no longer promotes every downstream neural network to float64. |
+| **Hann / Todreas-Kazimi conductivity integral** | **Not ported.** Q27 is closed by dropping the model. Klimenko-Zorin and NFI both have unambiguous conductivity integrals and cover the same need. `SCA_Example.py` remains a historical reference only. |
+| **Bishop correlation** | **Not added.** Chen is preferred instead (below). |
+| **Chen (SCW)** | Promoted to a first-class supercritical option alongside Swenson. Swenson is retained as a legacy benchmark; Chen & Fang (2014) is the more accurate model and should be the recommended default. **Note: `HTC.SCW.Chen_SCW_dT` already exists and is the best-documented function in the repository** — the work is verification against `Chen_Supercritical_H2O.pdf` and promotion to a selectable model, not new implementation. |
+| **Petrov-Popov density correction** | Added to Filonenko as an optional argument, **defaulting off** so present behaviour is unchanged: `f = f_Filonenko * (rho_w/rho_b)^0.4` when enabled. |
+| **D9 cladding** | `MatMod.D9_SS` gets the two constants from Hughes: `k = 18.9 W/m-K` (Leibowitz & Blomquist 1988, at 650 K) and `rho = 8100 kg/m^3`, documented as constant-property only, not a temperature-dependent model. |
+| **Wu friction** | Range-limited to `G <= 1000 kg/m^2-s` in `ranges.py`. Not used in the annulus — Filonenko on both channels. Owner will supply a high-mass-flux correction factor later. |
+| **Power profiles** | Both Legendre (per `SCA_Rod_DataGen.build_shapes`, already correct: 5 % floor above zero, `1/(k+1)` mode decay) and squared-Fourier-with-offset (per the derivation PDF) behind one selector. Fourier gets matching per-mode decay and a strictly positive offset, and uses the analytic mean `<Fq> = 0.5*sum(a_n^2 + b_n^2) + phi_q` for normalization rather than quadrature. |
