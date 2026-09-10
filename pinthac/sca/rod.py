@@ -46,6 +46,7 @@ import torch
 from pinthac.solvers import bisect_newton
 
 from pinthac.correlations.bundle import Bundle
+from pinthac.correlations import friction as fric
 from pinthac.properties.iapws95 import IAPWS95, device
 
 sigma = scipy.constants.sigma  # Stefan-Boltzmann constant
@@ -283,6 +284,71 @@ def rod_node(Property, Tm, p, qp_val, inputs):
     return Tco, Tmax
 
 
+def pressure_drop(T_arr, G, D, scw_table, fric_func, dz, g=9.81):
+    """
+    Cumulative single-phase axial pressure drop from friction, gravity, and flow
+    acceleration -- same momentum balance sca/annular.py::pressure_drop and
+    sca/lut.py::dP_cell use:
+
+        dP = f*dz*G**2*vol_avg/(2*D) + g*dz/vol_avg + G**2*(vol - vol_prev)
+
+    Why this model is here:
+        rod.py held pressure at pval for the entire channel with no friction, gravity or
+        acceleration term at all (docs/PHYSICS_REVIEW.md item 2 of "SCA_IAPWS95_Rod.py --
+        six gaps"). This adds it as a single post-processing pass over the already-solved
+        axial temperature field, the same decoupled-from-the-thermal-solve structure
+        sca/annular.py::solve_field uses for its own pressure_drop call -- the
+        single-phase momentum balance does not feed back into the enthalpy/htc closure.
+
+    fric_func's correlation choice: Wu (the rod-bundle-fitted friction factor sca/lut.py
+    uses for this same square-pitch-bundle geometry) is range-limited to G <= 1000
+    kg/m^2-s (docs/DECISIONS.md, "Wu friction"). This module's own __main__ example runs
+    at G = 1200 kg/m^2-s, already 20 percent over that bound, so passing Wu here would
+    warn on every node of the reference case -- the same out-of-range situation the owner
+    flagged for sca/annular.py's outer channel (Q3 in section 1). Filonenko is used
+    instead by default at the call site below, matching the "Filonenko on both channels"
+    decision's spirit rather than repeating that mistake in a second file.
+
+    T_arr (numpy array): bulk coolant temperature along z, K.
+    G, D: mass flux [kg/m^2-s] and hydraulic diameter [m] for this channel (both constant
+        along z -- the geometry and flow rate are fixed for the whole channel).
+    scw_table: the build_scw_table(pval) dict this solver already built for the property
+        lookups, reused here via plain numpy interpolation (T_arr and the table's own T
+        grid are both already resolved to plain numbers by the time this is called, so
+        there is no need to stay in torch for a diagnostic quantity that does not feed
+        back into the solve).
+    fric_func(Props, G, D): friction-factor correlation, e.g. friction.f_SCW.Filonenko.
+    dz: axial node spacing, m.
+
+    Returns cumulative dP [Pa] along z, dP[0] = 0 (no drop across the already-counted
+    inlet half-cell, matching sca/annular.py::pressure_drop's convention).
+    """
+    T_tab = scw_table['T'].detach().cpu().numpy()
+    mu_tab = scw_table['mu'].detach().cpu().numpy()
+    rho_tab = scw_table['rho'].detach().cpu().numpy()
+
+    T = np.asarray(T_arr, dtype=float)
+    mu = np.interp(T, T_tab, mu_tab)
+    rho = np.interp(T, T_tab, rho_tab)
+    vol = 1.0 / rho
+
+    Props = {'mu': mu}
+    f = fric_func(Props, G, D)
+
+    vol_prev = np.empty_like(vol)
+    vol_prev[0] = vol[0]
+    vol_prev[1:] = vol[:-1]
+    vol_avg = 0.5 * (vol_prev + vol)
+
+    dP_fric = f * dz * G**2 * vol_avg / (2 * D)
+    dP_grav = g * dz / vol_avg
+    dP_acc = G**2 * (vol - vol_prev)
+
+    dP_cell = dP_fric + dP_grav + dP_acc
+    dP_cell[0] = 0.0
+    return np.cumsum(dP_cell)
+
+
 # =============================================================================
 # Axial marching solution: cosine power shape over a channel of length L,
 # single SCW enthalpy balance (no LHGR split solve -- qp_val at each node
@@ -302,6 +368,10 @@ def run_SCA(inputs, pval, Tscw_in, q0, L=3.0, n=400, scw_table=None, device=devi
     scw_table: optional pre-built build_scw_table(pval) dict, to skip
                rebuilding the SCW property table when many runs share the
                same pval
+
+    Returns a dict with keys Z, T_i, qp, T_fuel_max (as before) plus dP: cumulative
+    friction+gravity+acceleration pressure drop along z [Pa], dP[0] = 0 -- see
+    pressure_drop's docstring.
     """
     if scw_table is None:
         scw_table = build_scw_table(pval, device=device)
@@ -339,11 +409,21 @@ def run_SCA(inputs, pval, Tscw_in, q0, L=3.0, n=400, scw_table=None, device=devi
         qpZ.append(qp_local); h_i.append(h_scw)
         T_i.append(T_scw); T_fuel_max.append(Tmax)
 
+    T_i_list = [float(t) for t in T_i]
+
+    # Pressure drop: a single pass over the converged coolant temperature field, the
+    # same decoupled-from-the-thermal-solve structure sca/annular.py::solve_field uses
+    # (see pressure_drop's docstring for the Filonenko-not-Wu choice).
+    Cir = 2 * math.pi * inputs['rco']
+    Dh = 4 * A_flow / Cir
+    dP = pressure_drop(np.array(T_i_list), inputs['G'], Dh, scw_table, fric.f_SCW.Filonenko, dz)
+
     return {
         'Z': Z,
-        'T_i': [float(t) for t in T_i],
+        'T_i': T_i_list,
         'qp': qpZ,
         'T_fuel_max': [float(t) for t in T_fuel_max],
+        'dP': dP,
     }
 
 
@@ -455,6 +535,7 @@ if __name__ == '__main__':
     peak_idx = int(max(range(len(out['T_fuel_max'])), key=lambda i: out['T_fuel_max'][i]))
     print(f"Peak fuel temperature: {out['T_fuel_max'][peak_idx]:.1f} K at "
           f"z = {out['Z'][peak_idx]:.3f} m")
+    print(f"Total pressure drop: {out['dP'][-1]/1000:.2f} kPa")
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
     axes[0].plot(out['Z'], out['T_i'], label='SCW Temperature')
