@@ -821,3 +821,62 @@ undone and flagged here instead of attempted and asserted without a trustworthy 
 (`pin/cylindrical.py::Cyl_T`, see the Phase 5 report) did not have this obstruction --
 the solid-pellet centerline solve has only one resistance-free layer to invert, not three
 temperature-dependent ones at three different radii.
+
+---
+
+# Round 8
+
+## Q42 RESOLVED -- `sca/annular.py` had no bundle correction either
+
+The Phase 5 worker was right and my brief was wrong. `docs/PHASE5_BRIEF.md` asserted that
+`sca/annular.py` "already applies" Presser to its outer channel; it did not, and
+`docs/PHYSICS_REVIEW.md` -- which I wrote in Phase 4 -- says so explicitly. I had confused
+it with `_archive/SCW_Pb_Ann_SCA.py`, which does apply it. Declining to act on a premise
+that contradicted the repository's own record was the right call.
+
+Now fixed. Hughes et al. (2014) Eq. (11) requires `htc_pin = psi * htc_round_tube` for a
+bundle geometry, with psi from Presser (their Eq. 10). Applied to the **outer channel
+only**: that is a square-pitch cell around the cladding OD, while the inner channel is a
+bored tube through the pellet, which is the geometry Swenson was fitted on.
+
+Measured on the default `Inputs_ann` at 5 kW/m, 20 nodes:
+
+    htc_conv_o max      20801.8  ->  20721.1 W/m^2-K
+    Tfo_o max            677.975 ->    677.988 K
+    q_o max             3374.885 ->   3377.998 W/m
+    flux split closure  4.75e-16 (unchanged)
+    Tm_o                 unchanged
+
+The effect is small here only because the default lattice is unusually tight. Presser's
+psi is not monotone near unity:
+
+    P/D    1.00     1.05     1.10     1.20     1.30     1.50
+    psi   0.9565   0.9973   1.0282   1.0712   1.1000   1.1400
+
+`Inputs_ann` sits at P/D = 1.048, where psi is 0.996 and the correction is nearly
+invisible. At a realistic P/D of 1.3 it would be +10 percent. **The default geometry
+therefore understates how much this fix matters for any normal lattice.**
+
+The inner channel's htc moves by at most 9.6e-4 relative, purely as feedback through the
+flux split rather than by direct edit.
+
+## Q44. Presser has no stated validity range, and the default geometry may be outside it
+
+`correlations/bundle.py::RANGES` is empty, because neither Hughes et al. nor any document
+in this repository states a pitch-to-diameter range for Presser or Weissman. The default
+annular geometry is P/D = 1.048, which is very tight, and psi turns over below about 1.05
+-- the correction becomes a *penalty* there. Whether that turnover is physical or is the
+fit running out of data is not something the available sources answer. See also Q16.
+
+## Q43 -- declining the Ann_flux_split substitution was correct, verified independently
+
+The Phase 5 worker declined to substitute `pin/annular.py::Ann_flux_split` into
+`closure()`, on the grounds that the three resistances sit at different radii and two are
+temperature-dependent, so they cannot be collapsed into the single combined `htc_i`/`htc_o`
+that `Ann_flux_split` expects without changing the iteration schedule.
+
+Confirmed. `closure()` already calls `Ann_HT` and `Ann_qpp` directly (lines 280-282 and
+307-308), so it already has the Cramer's-rule benefit; `Ann_flux_split` would only add its
+own fixed-point loop around them, and `closure()` already has a Picard loop carrying the
+clad and gap chain outward radius by radius. Not a drop-in, and nothing to gain from
+forcing it.

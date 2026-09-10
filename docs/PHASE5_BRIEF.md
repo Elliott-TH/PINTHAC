@@ -30,9 +30,16 @@ own commit with before/after numbers measured, not estimated.
 
 1. **`rod.py` applies no rod-bundle correction factor.** Hughes et al. (2014) Eq. (11) is
    explicit: `htc_pin = psi * htc_round_tube`. Use `correlations.bundle.Bundle.Presser`,
-   which is that paper's own Eq. (10). `sca/annular.py` already applies it to its outer
-   channel; the rod solver does not. At P/D = 1.15 psi is 0.94, so this is a systematic
-   few percent on every wall temperature.
+   which is that paper's own Eq. (10).
+
+   **CORRECTION, added after the fact.** This brief originally claimed `sca/annular.py`
+   already applies Presser to its outer channel. That was wrong, and it contradicted
+   `docs/PHYSICS_REVIEW.md`, which I wrote myself in Phase 4 and which says plainly that
+   `Presser` is never called there either. I had confused it with the archived
+   `_archive/SCW_Pb_Ann_SCA.py`, which does apply it. The Phase 5 worker spotted the
+   contradiction and correctly declined to act on a false premise, flagging it as Q42.
+   Both solvers needed the fix; both now have it. At P/D = 1.15 psi is 1.028 and at
+   1.30 it is 1.100, so this is a systematic few percent on every wall temperature.
 
 2. **`rod.py` has no pressure drop at all.** Pressure is pinned at `pval` for the whole
    channel. `sca/annular.py::pressure_drop` and `sca/lut.py::dP_cell` both have a

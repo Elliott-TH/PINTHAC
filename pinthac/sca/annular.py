@@ -2,6 +2,7 @@ import numpy as np
 from pinthac.properties import getprop as gp
 from pinthac.correlations import htc as htc
 from pinthac.correlations import friction as fric
+from pinthac.correlations import bundle as bnd
 from pinthac import pin as ht
 from pinthac.properties import matmod as mat
 from pinthac.properties import iapws95 as iapws
@@ -283,7 +284,14 @@ def closure(T_i, T_o, q_tot, inp, geom, props_at, tol=1e-3,
 
         htc_conv_i = htc.SCW.Swenson_dT(Props_i, props_at(Tcldi_ID), Tcldi_ID, T_i, G_i, D_i)
         Tcldi_ID = T_i + (q_i/Per_clad_i)/htc_conv_i
-        htc_conv_o = htc.SCW.Swenson_dT(Props_o, props_at(Tcldo_OD), Tcldo_OD, T_o, G_o, D_o)
+        # Rod-bundle correction on the OUTER channel only. Hughes et al. (2014) Eq. (11)
+        # is explicit that a round-tube correlation must be scaled for bundle geometry,
+        # htc_pin = psi * htc_round_tube, with psi from Presser (their Eq. 10). The outer
+        # channel is a square-pitch cell around the cladding OD, so it needs it; the
+        # inner channel is a bored tube through the pellet, which is what Swenson was
+        # fitted on, so it does not.
+        htc_conv_o = (htc.SCW.Swenson_dT(Props_o, props_at(Tcldo_OD), Tcldo_OD, T_o, G_o, D_o)
+                      * bnd.Bundle.Presser(inp["Pitch"], 2*R_clad_o_OD))
         Tcldo_OD = T_o + (q_o/Per_clad_o)/htc_conv_o
 
         Tcldi_OD_new, Tcldo_ID_new, Tfo_i_new, Tfo_o_new, htc_gap_i, htc_gap_o = \
@@ -326,9 +334,13 @@ def closure(T_i, T_o, q_tot, inp, geom, props_at, tol=1e-3,
                                              hi=T_i + 500))
         Tcldi_ID = T_i + qpp_i/htc_conv_i
         qpp_o = np.maximum(q_o/Per_clad_o, 1.0)
+        # Same bundle correction as the fast phase above -- see the comment there. Applied
+        # after the implicit wall-temperature solve rather than inside its residual: the
+        # robust phase solves Swenson for the round-tube wall temperature first, then the
+        # outer Picard loop carries the corrected coefficient forward.
         htc_conv_o = _as_numpy(htc.SCW.Swenson(Props_o, props_at, G_o, D_o, qpp_o, T_o,
                                              tol_kw=_LOOSE_TOL_KW, anchor=_T_PC, branch_n=7,
-                                             hi=T_o + 500))
+                                             hi=T_o + 500)) * bnd.Bundle.Presser(inp["Pitch"], 2*R_clad_o_OD)
         Tcldo_OD = T_o + qpp_o/htc_conv_o
 
         Tcldi_OD_new, Tcldo_ID_new, Tfo_i_new, Tfo_o_new, htc_gap_i, htc_gap_o = \

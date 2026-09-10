@@ -1,0 +1,38 @@
+Date : 2026-09-10 05:54:39
+Directory : /home/elliott/Codes/Projects/Pinthac/pinthac
+Total : 9 files,  165 codes, 796 comments, 58 blanks, all 1019 lines
+
+Languages
++----------+------------+------------+------------+------------+------------+
+| language | files      | code       | comment    | blank      | total      |
++----------+------------+------------+------------+------------+------------+
+| Python   |          9 |        165 |        796 |         58 |      1,019 |
++----------+------------+------------+------------+------------+------------+
+
+Directories
++-----------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| path                                                                  | files      | code       | comment    | blank      | total      |
++-----------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| .                                                                     |          9 |        165 |        796 |         58 |      1,019 |
+| . (Files)                                                             |          1 |         41 |         71 |          8 |        120 |
+| correlations                                                          |          2 |         56 |        243 |         15 |        314 |
+| pin                                                                   |          2 |         61 |        257 |         24 |        342 |
+| properties                                                            |          2 |          1 |        157 |          2 |        160 |
+| sca                                                                   |          2 |          6 |         68 |          9 |         83 |
++-----------------------------------------------------------------------+------------+------------+------------+------------+------------+
+
+Files
++-----------------------------------------------------------------------+----------+------------+------------+------------+------------+
+| filename                                                              | language | code       | comment    | blank      | total      |
++-----------------------------------------------------------------------+----------+------------+------------+------------+------------+
+| /home/elliott/Codes/Projects/Pinthac/pinthac/correlations/friction.py | Python   |         22 |         81 |          7 |        110 |
+| /home/elliott/Codes/Projects/Pinthac/pinthac/correlations/htc.py      | Python   |         34 |        162 |          8 |        204 |
+| /home/elliott/Codes/Projects/Pinthac/pinthac/pin/annular.py           | Python   |         33 |        103 |         12 |        148 |
+| /home/elliott/Codes/Projects/Pinthac/pinthac/pin/cylindrical.py       | Python   |         28 |        154 |         12 |        194 |
+| /home/elliott/Codes/Projects/Pinthac/pinthac/properties/liqprops.py   | Python   |          0 |        117 |          0 |        117 |
+| /home/elliott/Codes/Projects/Pinthac/pinthac/properties/matmod.py     | Python   |          1 |         40 |          2 |         43 |
+| /home/elliott/Codes/Projects/Pinthac/pinthac/sca/annular.py           | Python   |          0 |          9 |          0 |          9 |
+| /home/elliott/Codes/Projects/Pinthac/pinthac/sca/rod.py               | Python   |          6 |         59 |          9 |         74 |
+| /home/elliott/Codes/Projects/Pinthac/pinthac/solvers.py               | Python   |         41 |         71 |          8 |        120 |
+| Total                                                                 |          |        165 |        796 |         58 |      1,019 |
++-----------------------------------------------------------------------+----------+------------+------------+------------+------------+
