@@ -1,215 +1,726 @@
-import numpy as np
-import torch as t
+"""
+Liquid-metal (sodium, lead, lead-bismuth eutectic) thermophysical properties.
 
-R = 8.31432
-L0 = 2.45E-8
+Moved from Liquid_Metals.py in Phase 1. Phase 2 brings it up to the docstring and
+backend-dispatch standard without changing any formula, constant or exponent. Per
+docs/DECISIONS.md ("Scope: lead is a toy" / "Scope: liquid metals"), no second
+correlation per property is added here -- this module is supporting infrastructure for
+the property library and the Phase 7 uncertainty figure, not an active SCA path.
 
-def lib(x):
-        if isinstance(x, t.Tensor):
-            return t
-        return np
+Each class carries its own melting/boiling points, per-property validated temperature
+range (range_rho, range_cp, ...) and per-property relative uncertainty band
+(uncert_rho, uncert_cp, ..., each a [low, high] pair, already divided by 100) as class
+attributes, next to the correlations that use them -- these are the values D11
+(docs/DUPLICATES.md) checked and, where wrong, already corrected (Sodium.uncert_k's
+missing /100, Lead.range_rho's bare scalar). RANGES, below, is built from those same
+attributes rather than inventing new bounds, so every public function here has a real
+ranges.check() call.
+"""
+from pinthac import backend, ranges
+
+
+R = 8.31432   # universal gas constant, J/mol-K -- used by each class's mu(T)
+
 
 class Sodium:
-    Tm  = 371
-    Tb  = 1155
-    M   = 0.02299
+    Tm = 371
+    Tb = 1155
+    M = 0.02299
 
-    range_rho = [Tm,Tb]
-    range_cp  = [Tm,Tb]
-    range_h   = [Tm,Tb]
-    range_mu  = [Tm,Tb]
-    range_sig = [Tm,Tb]
-    range_k  = [Tm,Tb]
+    range_rho = [Tm, Tb]
+    range_cp = [Tm, Tb]
+    range_h = [Tm, Tb]
+    range_mu = [Tm, Tb]
+    range_sig = [Tm, Tb]
+    range_k = [Tm, Tb]
 
-    uncert_rho = np.array([0.3,3])/100
-    uncert_sig = np.array([3.0,6])/100
-    uncert_cp = np.array([0,1])/100
-    uncert_h = np.array([5,7])/100
-    uncert_mu = np.array([5,5])/100
-    # Every other uncertainty entry in this file is a percentage divided by 100.
-    # Without the /100 this reads as 800 percent rather than 8 percent.
-    uncert_k = np.array([0,8])/100
+    uncert_rho = [0.3/100, 3/100]
+    uncert_sig = [3.0/100, 6/100]
+    uncert_cp = [0/100, 1/100]
+    uncert_h = [5/100, 7/100]
+    uncert_mu = [5/100, 5/100]
+    uncert_k = [0/100, 8/100]
 
-    @classmethod
-    def rho(cls,T):
-        Tm = cls.Tm
+    def rho(T):
+        """
+        Sodium density.
+
+        Why this model is here:
+            Feeds channel mass-flux and pressure-drop calculations for a sodium-cooled
+            channel.
+
+        Formulation:
+            rho = rho0 - A0*(T - Tm)
+
+        Valid range:
+            Tm = 371 K to Tb = 1155 K (Sodium.range_rho).
+
+        Uncertainty:
+            0.3 to 3 percent (Sodium.uncert_rho).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            val : density, kg/m^3, same type as T
+        """
+        ranges.check("sodium_rho", {"T": T}, RANGES["sodium_rho"])
+        Tm = Sodium.Tm
         rho0, A0 = 927, 0.235
         return rho0 - A0*(T-Tm)
 
-    @classmethod
-    def sigma(cls,T):
-        Tm = cls.Tm
+    def sigma(T):
+        """
+        Sodium surface tension.
+
+        Why this model is here:
+            Feeds two-phase / boiling-margin calculations for a sodium-cooled channel.
+
+        Formulation:
+            sigma = (sig0 - A0*(T - Tm)) * 1e-3
+
+        Valid range:
+            Tm = 371 K to Tb = 1155 K (Sodium.range_sig).
+
+        Uncertainty:
+            3 to 6 percent (Sodium.uncert_sig).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            val : surface tension, N/m, same type as T
+        """
+        ranges.check("sodium_sigma", {"T": T}, RANGES["sodium_sigma"])
+        Tm = Sodium.Tm
         sig0, A0 = 195, 0.0966
         return (sig0 - A0*(T-Tm))*1E-3
 
-    @classmethod
-    def cp(cls,T):
-        a,b,c,d = 38.12, -1.9493E-2, 1.024E-5,-6.9E4
+    def cp(T):
+        """
+        Sodium specific heat capacity.
+
+        Why this model is here:
+            Feeds enthalpy-rise (LMprop_plots.py-style Monte Carlo) and energy-balance
+            calculations for a sodium-cooled channel.
+
+        Formulation:
+            Cp = a + b*T + c*T^2 + d*T^(-2), molar; divided by molar mass M for the
+            per-kg value returned.
+
+        Valid range:
+            Tm = 371 K to Tb = 1155 K (Sodium.range_cp).
+
+        Uncertainty:
+            0 to 1 percent (Sodium.uncert_cp).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            val : specific heat capacity, J/kg-K, same type as T
+        """
+        ranges.check("sodium_cp", {"T": T}, RANGES["sodium_cp"])
+        a, b, c, d = 38.12, -1.9493E-2, 1.024E-5, -6.9E4
         Cp = a + b*T + c*T**2 + d*T**(-2)
-        return Cp/cls.M
+        return Cp/Sodium.M
 
-    @classmethod
-    def h(cls,T):
-        Tm = cls.Tm
-        a,b,c,d = 38.12, -1.9493E-2, 1.024E-5,-6.9E4
+    def h(T):
+        """
+        Sodium specific enthalpy, referenced to the melting point.
+
+        Why this model is here:
+            The analytic integral of Sodium.cp from Tm to T, used for channel
+            enthalpy-rise calculations (see figures/liquid_metal_uncertainty.py).
+
+        Formulation:
+            h = [a*(T-Tm) + (b/2)*(T^2-Tm^2) + (c/3)*(T^3-Tm^3) + d*(1/T - 1/Tm)] / M
+
+        Valid range:
+            Tm = 371 K to Tb = 1155 K (Sodium.range_h).
+
+        Uncertainty:
+            5 to 7 percent (Sodium.uncert_h).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            hout : specific enthalpy, J/kg, same type as T
+        """
+        ranges.check("sodium_h", {"T": T}, RANGES["sodium_h"])
+        Tm = Sodium.Tm
+        a, b, c, d = 38.12, -1.9493E-2, 1.024E-5, -6.9E4
         hout = a*(T-Tm) + (b/2)*(T**2-Tm**2) + (c/3)*(T**3-Tm**3) + d*(1/T-1/Tm)
-        return hout/cls.M
+        return hout/Sodium.M
 
-    @classmethod
-    def mu(cls,T):
+    def mu(T):
+        """
+        Sodium dynamic viscosity.
+
+        Why this model is here:
+            Feeds Reynolds-number and pressure-drop calculations (see liqprops.RePr).
+
+        Formulation:
+            mu = mu0 * exp(E0/(R*T))
+
+        Valid range:
+            Tm = 371 K to Tb = 1155 K (Sodium.range_mu).
+
+        Uncertainty:
+            5 percent (Sodium.uncert_mu).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            val : dynamic viscosity, Pa-s, same type as T
+        """
+        ranges.check("sodium_mu", {"T": T}, RANGES["sodium_mu"])
         mu0, E0 = 0.0844E-3, 6500
-        X = lib(T)
-        return mu0 * X.exp(E0/(R*T))
-    
-    @classmethod
-    def k(cls,T):
+        xp = backend.lib(T)
+        return mu0 * xp.exp(E0/(R*T))
+
+    def k(T):
+        """
+        Sodium thermal conductivity.
+
+        Why this model is here:
+            Feeds Prandtl-number and heat-transfer-coefficient calculations (see
+            liqprops.RePr and correlations/htc.py::Lead.Shen's liquid-metal form).
+
+        Formulation:
+            k = 104 - 0.0466*T
+
+        Valid range:
+            Tm = 371 K to Tb = 1155 K (Sodium.range_k).
+
+        Uncertainty:
+            0 to 8 percent (Sodium.uncert_k).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            kval : thermal conductivity, W/m-K, same type as T
+        """
+        ranges.check("sodium_k", {"T": T}, RANGES["sodium_k"])
         kval = 104-0.0466*T
         return kval
 
+
 class Lead:
-    Tm  = 600.6
-    Tb  = 2021
-    M   = 0.2072
+    Tm = 600.6
+    Tb = 2021
+    M = 0.2072
 
-    # A [T_min, T_max] pair like every other range entry; this was a bare scalar,
-    # so a range check would have compared against the upper bound alone.
-    range_rho = [Tm,Tb]
-    range_cp  = [Tm,1100]
-    range_h   = [Tm,1100]
-    range_mu  = [Tm,1270]
-    range_sig = [Tm,Tb]
-    range_k   = [Tm,1300]
+    range_rho = [Tm, Tb]
+    range_cp = [Tm, 1100]
+    range_h = [Tm, 1100]
+    range_mu = [Tm, 1270]
+    range_sig = [Tm, Tb]
+    range_k = [Tm, 1300]
 
-    uncert_rho = np.array([0.7, 0.8])/100
-    uncert_sig = np.array([0,   5  ])/100
-    uncert_cp  = np.array([5,   7  ])/100
-    uncert_h   = np.array([5,   7  ])/100
-    uncert_mu  = np.array([5,   5  ])/100
-    uncert_k = np.array([0,15])/100
+    uncert_rho = [0.7/100, 0.8/100]
+    uncert_sig = [0/100, 5/100]
+    uncert_cp = [5/100, 7/100]
+    uncert_h = [5/100, 7/100]
+    uncert_mu = [5/100, 5/100]
+    uncert_k = [0/100, 15/100]
 
-    @classmethod
-    def rho(cls,T):
-        Tm = cls.Tm
+    def rho(T):
+        """
+        Lead density.
+
+        Why this model is here:
+            Feeds channel mass-flux and pressure-drop calculations for a lead-cooled
+            channel; per docs/DECISIONS.md the lead/LBE channel in the annular SCA files
+            is a toy, so this is property-library infrastructure rather than an active
+            SCA path today.
+
+        Formulation:
+            rho = rho0 - A0*(T - Tm)
+
+        Valid range:
+            Tm = 600.6 K to Tb = 2021 K (Lead.range_rho).
+
+        Uncertainty:
+            0.7 to 0.8 percent (Lead.uncert_rho).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            val : density, kg/m^3, same type as T
+        """
+        ranges.check("lead_rho", {"T": T}, RANGES["lead_rho"])
+        Tm = Lead.Tm
         rho0, A0 = 10671, 1.2795
         return rho0 - A0*(T-Tm)
 
-    @classmethod
-    def sigma(cls,T):
-        Tm = cls.Tm
+    def sigma(T):
+        """
+        Lead surface tension.
+
+        Why this model is here:
+            Feeds two-phase / boiling-margin calculations for a lead-cooled channel.
+
+        Formulation:
+            sigma = (sig0 - A0*(T - Tm)) * 1e-3
+
+        Valid range:
+            Tm = 600.6 K to Tb = 2021 K (Lead.range_sig).
+
+        Uncertainty:
+            0 to 5 percent (Lead.uncert_sig).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            val : surface tension, N/m, same type as T
+        """
+        ranges.check("lead_sigma", {"T": T}, RANGES["lead_sigma"])
+        Tm = Lead.Tm
         sig0, A0 = 458, 0.113
         return (sig0 - A0*(T-Tm))*1E-3
 
-    @classmethod
-    def cp(cls,T):
-        a,b,c,d = 36.5, -1.020E-2, 3.2E-6,-3.158E5
+    def cp(T):
+        """
+        Lead specific heat capacity.
+
+        Why this model is here:
+            Feeds enthalpy-rise (LMprop_plots.py-style Monte Carlo) and energy-balance
+            calculations for a lead-cooled channel.
+
+        Formulation:
+            Cp = a + b*T + c*T^2 + d*T^(-2), molar; divided by molar mass M for the
+            per-kg value returned.
+
+        Valid range:
+            Tm = 600.6 K to 1100 K (Lead.range_cp).
+
+        Uncertainty:
+            5 to 7 percent (Lead.uncert_cp).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            val : specific heat capacity, J/kg-K, same type as T
+        """
+        ranges.check("lead_cp", {"T": T}, RANGES["lead_cp"])
+        a, b, c, d = 36.5, -1.020E-2, 3.2E-6, -3.158E5
         Cp = a + b*T + c*T**2 + d*T**(-2)
-        return Cp/cls.M
+        return Cp/Lead.M
 
-    @classmethod
-    def h(cls,T):
-        Tm = cls.Tm
-        a,b,c,d = 36.5, -1.020E-2, 3.2E-6,-3.158E5
+    def h(T):
+        """
+        Lead specific enthalpy, referenced to the melting point.
+
+        Why this model is here:
+            The analytic integral of Lead.cp from Tm to T, used for channel
+            enthalpy-rise calculations (see figures/liquid_metal_uncertainty.py).
+
+        Formulation:
+            h = [a*(T-Tm) + (b/2)*(T^2-Tm^2) + (c/3)*(T^3-Tm^3) + d*(1/T - 1/Tm)] / M
+
+        Valid range:
+            Tm = 600.6 K to 1100 K (Lead.range_h).
+
+        Uncertainty:
+            5 to 7 percent (Lead.uncert_h).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            hout : specific enthalpy, J/kg, same type as T
+        """
+        ranges.check("lead_h", {"T": T}, RANGES["lead_h"])
+        Tm = Lead.Tm
+        a, b, c, d = 36.5, -1.020E-2, 3.2E-6, -3.158E5
         hout = a*(T-Tm) + (b/2)*(T**2-Tm**2) + (c/3)*(T**3-Tm**3) + d*(1/T-1/Tm)
-        return hout/cls.M
+        return hout/Lead.M
 
-    @classmethod
-    def mu(cls,T):
+    def mu(T):
+        """
+        Lead dynamic viscosity.
+
+        Why this model is here:
+            Feeds Reynolds-number and pressure-drop calculations (see liqprops.RePr),
+            and correlations/htc.py::Lead.Shen's Peclet number.
+
+        Formulation:
+            mu = mu0 * exp(E0/(R*T))
+
+        Valid range:
+            Tm = 600.6 K to 1270 K (Lead.range_mu).
+
+        Uncertainty:
+            5 percent (Lead.uncert_mu).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            val : dynamic viscosity, Pa-s, same type as T
+        """
+        ranges.check("lead_mu", {"T": T}, RANGES["lead_mu"])
         mu0, E0 = 0.455E-3, 8888
-        X = lib(T)
-        return mu0 * X.exp(E0/(R*T))
-    
-    @classmethod
-    def k(cls,T):
-        Tm = cls.Tm
+        xp = backend.lib(T)
+        return mu0 * xp.exp(E0/(R*T))
+
+    def k(T):
+        """
+        Lead thermal conductivity.
+
+        Why this model is here:
+            Feeds Prandtl-number and heat-transfer-coefficient calculations (see
+            liqprops.RePr and correlations/htc.py::Lead.Shen).
+
+        Formulation:
+            k = 15.8 + 0.011*(T - Tm)
+
+        Valid range:
+            Tm = 600.6 K to 1300 K (Lead.range_k).
+
+        Uncertainty:
+            0 to 15 percent (Lead.uncert_k).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            kval : thermal conductivity, W/m-K, same type as T
+        """
+        ranges.check("lead_k", {"T": T}, RANGES["lead_k"])
+        Tm = Lead.Tm
         kval = 15.8 + 0.011*(T-Tm)
         return kval
 
-class LBE:
-    Tm  = 398
-    Tb  = 1927
-    M   = 0.20818
 
-    range_rho = [Tm,Tb]
-    range_cp  = [Tm,1100]
-    range_h   = [Tm,1100]
-    range_mu  = [Tm, 1180]
-    range_sig = [Tm,Tb]
+class LBE:
+    Tm = 398
+    Tb = 1927
+    M = 0.20818
+
+    range_rho = [Tm, Tb]
+    range_cp = [Tm, 1100]
+    range_h = [Tm, 1100]
+    range_mu = [Tm, 1180]
+    range_sig = [Tm, Tb]
     range_k = [Tm, 1100]
 
-    uncert_rho = np.array([0.7, 0.8])/100
-    uncert_sig = np.array([0, 0.3])/100
-    uncert_cp = np.array([5, 7])/100
-    uncert_h = np.array([5, 7])/100
-    uncert_mu = np.array([7, 10])/100
-    uncert_k = np.array([10,15])/100
+    uncert_rho = [0.7/100, 0.8/100]
+    uncert_sig = [0/100, 0.3/100]
+    uncert_cp = [5/100, 7/100]
+    uncert_h = [5/100, 7/100]
+    uncert_mu = [7/100, 10/100]
+    uncert_k = [10/100, 15/100]
 
-    @classmethod
-    def rho(cls,T):
-        Tm = cls.Tm
+    def rho(T):
+        """
+        Lead-bismuth eutectic (LBE) density.
+
+        Why this model is here:
+            Feeds channel mass-flux and pressure-drop calculations for an LBE-cooled
+            channel.
+
+        Formulation:
+            rho = rho0 - A0*(T - Tm)
+
+        Valid range:
+            Tm = 398 K to Tb = 1927 K (LBE.range_rho).
+
+        Uncertainty:
+            0.7 to 0.8 percent (LBE.uncert_rho).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            val : density, kg/m^3, same type as T
+        """
+        ranges.check("lbe_rho", {"T": T}, RANGES["lbe_rho"])
+        Tm = LBE.Tm
         rho0, A0 = 10550, 1.293
         return rho0 - A0*(T-Tm)
 
-    @classmethod
-    def sigma(cls,T):
-        Tm = cls.Tm
+    def sigma(T):
+        """
+        LBE surface tension.
+
+        Why this model is here:
+            Feeds two-phase / boiling-margin calculations for an LBE-cooled channel.
+
+        Formulation:
+            sigma = (sig0 - A0*(T - Tm)) * 1e-3
+
+        Valid range:
+            Tm = 398 K to Tb = 1927 K (LBE.range_sig).
+
+        Uncertainty:
+            0 to 0.3 percent (LBE.uncert_sig).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            val : surface tension, N/m, same type as T
+        """
+        ranges.check("lbe_sigma", {"T": T}, RANGES["lbe_sigma"])
+        Tm = LBE.Tm
         sig0, A0 = 416.7, 0.0799
         return (sig0 - A0*(T-Tm))*1E-3
 
-    @classmethod
-    def cp(cls,T):
-        a,b,c,d = 34.3, -8.2E-3, 2.6E-6,-9.5E4
+    def cp(T):
+        """
+        LBE specific heat capacity.
+
+        Why this model is here:
+            Feeds enthalpy-rise and energy-balance calculations for an LBE-cooled
+            channel.
+
+        Formulation:
+            Cp = a + b*T + c*T^2 + d*T^(-2), molar; divided by molar mass M for the
+            per-kg value returned.
+
+        Valid range:
+            Tm = 398 K to 1100 K (LBE.range_cp).
+
+        Uncertainty:
+            5 to 7 percent (LBE.uncert_cp).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            val : specific heat capacity, J/kg-K, same type as T
+        """
+        ranges.check("lbe_cp", {"T": T}, RANGES["lbe_cp"])
+        a, b, c, d = 34.3, -8.2E-3, 2.6E-6, -9.5E4
         Cp = a + b*T + c*T**2 + d*T**(-2)
-        print('Cp val is',Cp)
-        return Cp/cls.M
+        return Cp/LBE.M
 
-    @classmethod
-    def h(cls,T):
-        Tm = cls.Tm
-        a,b,c,d = 34.3, -8.2E-3, 2.6E-6,-9.5E4
-        hout = a*(T-Tm) + (b/2)*(T**2-Tm**2) + (c/3)*(T**3-Tm**3) + d*(1/T-1/Tm) 
-        return hout/cls.M
+    def h(T):
+        """
+        LBE specific enthalpy, referenced to the melting point.
 
-    @classmethod
-    def mu(cls,T):
+        Why this model is here:
+            The analytic integral of LBE.cp from Tm to T, used for channel
+            enthalpy-rise calculations.
+
+        Formulation:
+            h = [a*(T-Tm) + (b/2)*(T^2-Tm^2) + (c/3)*(T^3-Tm^3) + d*(1/T - 1/Tm)] / M
+
+        Valid range:
+            Tm = 398 K to 1100 K (LBE.range_h).
+
+        Uncertainty:
+            5 to 7 percent (LBE.uncert_h).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            hout : specific enthalpy, J/kg, same type as T
+        """
+        ranges.check("lbe_h", {"T": T}, RANGES["lbe_h"])
+        Tm = LBE.Tm
+        a, b, c, d = 34.3, -8.2E-3, 2.6E-6, -9.5E4
+        hout = a*(T-Tm) + (b/2)*(T**2-Tm**2) + (c/3)*(T**3-Tm**3) + d*(1/T-1/Tm)
+        return hout/LBE.M
+
+    def mu(T):
+        """
+        LBE dynamic viscosity.
+
+        Why this model is here:
+            Feeds Reynolds-number and pressure-drop calculations (see liqprops.RePr).
+
+        Formulation:
+            mu = mu0 * exp(E0/(R*T))
+
+        Valid range:
+            Tm = 398 K to 1180 K (LBE.range_mu).
+
+        Uncertainty:
+            7 to 10 percent (LBE.uncert_mu).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            val : dynamic viscosity, Pa-s, same type as T
+        """
+        ranges.check("lbe_mu", {"T": T}, RANGES["lbe_mu"])
         mu0, E0 = 0.494E-3, 6270
-        X = lib(T)
-        return mu0 * X.exp(E0/(R*T))
-    
-    @classmethod
-    def k(cls,T):
-        Tm = cls.Tm
+        xp = backend.lib(T)
+        return mu0 * xp.exp(E0/(R*T))
+
+    def k(T):
+        """
+        LBE thermal conductivity.
+
+        Why this model is here:
+            Feeds Prandtl-number and heat-transfer-coefficient calculations (see
+            liqprops.RePr).
+
+        Formulation:
+            k = lam + A*(T - Tm) + B*(T - Tm)^2
+
+        Valid range:
+            Tm = 398 K to 1100 K (LBE.range_k).
+
+        Uncertainty:
+            10 to 15 percent (LBE.uncert_k).
+
+        Reference:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+
+        Inputs:
+            T : temperature (float, numpy array, or torch tensor), K
+        Returns:
+            kval : thermal conductivity, W/m-K, same type as T
+        """
+        ranges.check("lbe_k", {"T": T}, RANGES["lbe_k"])
+        Tm = LBE.Tm
         lam, A, B = 9.35, 0.01434, 2.305E-6
         kval = lam + A*(T-Tm) + B*(T-Tm)**2
         return kval
-    
-'''
-def Props(mat,T,props):
-    props={
-        'rho':mat.rho(),
-        'sigma':mat.sigma(),
-        'cp':mat.cp(),
-        'h':mat.h(),
-        'k':mat.k()
-    }
-    prop = []
-    for pr in props:
-        out.append()
-    return props
-'''
 
-def Props(mat,T):
-    props={
-        'rho':mat.rho(T),
-        'sigma':mat.sigma(T),
-        'cp':mat.cp(T),
-        'h':mat.h(T),
-        'mu':mat.mu(T),
-        'k':mat.k(T)
+
+# Built directly from the range_* attributes each class already carries (the values
+# D11/docs/DUPLICATES.md audited and, where wrong, already corrected) rather than
+# inventing anything new -- one plain dictionary per CLAUDE.md section 7, keyed by the
+# name each property's ranges.check() call above already uses.
+RANGES = {
+    "sodium_rho":   {"T": tuple(Sodium.range_rho)},
+    "sodium_sigma": {"T": tuple(Sodium.range_sig)},
+    "sodium_cp":    {"T": tuple(Sodium.range_cp)},
+    "sodium_h":     {"T": tuple(Sodium.range_h)},
+    "sodium_mu":    {"T": tuple(Sodium.range_mu)},
+    "sodium_k":     {"T": tuple(Sodium.range_k)},
+    "lead_rho":     {"T": tuple(Lead.range_rho)},
+    "lead_sigma":   {"T": tuple(Lead.range_sig)},
+    "lead_cp":      {"T": tuple(Lead.range_cp)},
+    "lead_h":       {"T": tuple(Lead.range_h)},
+    "lead_mu":      {"T": tuple(Lead.range_mu)},
+    "lead_k":       {"T": tuple(Lead.range_k)},
+    "lbe_rho":      {"T": tuple(LBE.range_rho)},
+    "lbe_sigma":    {"T": tuple(LBE.range_sig)},
+    "lbe_cp":       {"T": tuple(LBE.range_cp)},
+    "lbe_h":        {"T": tuple(LBE.range_h)},
+    "lbe_mu":       {"T": tuple(LBE.range_mu)},
+    "lbe_k":        {"T": tuple(LBE.range_k)},
+}
+
+
+def Props(mat, T):
+    """
+    Bundle a liquid metal's full property set at one temperature into a dict.
+
+    Why this model is here:
+        The single entry point correlations/friction.py and correlations/htc.py expect
+        (a 'Props' dict of rho/mu/k/cp, plus here sigma and h) -- called from
+        properties/getprop.py for the "Lead"/"Pb"/"Sodium"/"Na" substance names.
+
+    Formulation:
+        Calls mat.rho(T), mat.sigma(T), mat.cp(T), mat.h(T), mat.mu(T), mat.k(T) and
+        collects the results.
+
+    Valid range:
+        Whatever the weakest of the six per-property ranges on `mat` covers -- see that
+        class's own range_* attributes.
+
+    Uncertainty:
+        Not applicable -- a dict assembly, not a correlation.
+
+    Reference:
+        Not applicable.
+
+    Inputs:
+        mat : one of Sodium, Lead, LBE (the class itself, not an instance)
+        T   : temperature (float, numpy array, or torch tensor), K
+    Returns:
+        props : dict with keys 'rho', 'sigma', 'cp', 'h', 'mu', 'k', each the same type
+                as T
+    """
+    props = {
+        'rho': mat.rho(T),
+        'sigma': mat.sigma(T),
+        'cp': mat.cp(T),
+        'h': mat.h(T),
+        'mu': mat.mu(T),
+        'k': mat.k(T)
     }
     return props
 
-def RePr(G,D,prop):
+
+def RePr(G, D, prop):
+    """
+    Reynolds and Prandtl numbers from a mass flux, hydraulic diameter and Props dict.
+
+    Why this model is here:
+        The shared Re/Pr calculation used ahead of a liquid-metal heat-transfer
+        correlation (e.g. correlations/htc.py::Lead.Shen).
+
+    Formulation:
+        Re = G*D/mu
+        Pr = mu*cp/k
+
+    Valid range:
+        Not applicable -- a dimensionless-group calculation, not a correlation.
+
+    Uncertainty:
+        Not applicable.
+
+    Reference:
+        Not applicable -- standard definitions.
+
+    Inputs:
+        G    : mass flux, kg/m^2-s (float, numpy array, or torch tensor)
+        D    : hydraulic diameter, m (float, numpy array, or torch tensor)
+        prop : Props dict (see liqprops.Props) with keys 'mu', 'cp', 'k'
+    Returns:
+        (Re, Pr) : Reynolds number, Prandtl number, both dimensionless, same type as G
+    """
     mu, cp, k = prop['mu'], prop['cp'], prop['k']
     Re = G*D/mu
     Pr = mu*cp/k
-    return Re,Pr
+    return Re, Pr
