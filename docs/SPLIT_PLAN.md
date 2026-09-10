@@ -18,13 +18,23 @@ split stops being free.
 ## Proposed packages
 
 ### `pinthac-backend`
-`backend.py`, `ranges.py`, `uncertainty.py`, `paths.py`.
+`backend.py`, `ranges.py`, `uncertainty.py`, `paths.py`, `solvers.py`.
 
 Depends on: numpy, optionally torch.
 
 Small enough that it could stay vendored inside each package instead of being published, but
 then the range and uncertainty tables would fragment, which is exactly what this cleanup was
 undoing. Keep it as one package.
+
+`solvers.py` (added Phase 4: `bisect_newton`, the shared batched bisection-then-Newton
+root finder used by `pin/cylindrical.py::Cyl_T` and `sca/rod.py`) belongs here on import
+direction alone -- `pin` needs it, so it has to sit at or below `pin`'s level, and nothing
+in it reaches upward. One thing worth flagging before it actually ships as part of this
+package: unlike every other module here, it imports `torch` unconditionally at module
+scope (no `try/except ImportError` guard) and has no NumPy fallback path, so it does not
+degrade the way `backend.py` does when torch is absent -- it would need that guard added
+(or `pinthac-backend`'s own "optionally torch" claim would stop being true) before a real
+split, not simply be moved as-is.
 
 ### `iapws-torch`
 `properties/iapws95.py`, `properties/iapws97.py`, `properties/iapws_data/`, and the transport
@@ -66,6 +76,21 @@ above them. It is the one place where the split's seam is visible.
 ### `torchsolve`
 Already a standalone package with its own `pyproject.toml`, README and test suite. It sits
 beside PINTHAC in this repository and is not part of it.
+
+**Found during Phase 8, not fixed (out of this phase's scope -- `torchsolve/` is not
+`README.md`, `examples/` or `docs/`):** `torchsolve/pyproject.toml` declares
+`packages = ["torchsolve"]`, which `setuptools` resolves relative to the project
+directory it is found in -- i.e. it looks for `torchsolve/torchsolve/`, which does not
+exist; the package's actual modules sit directly in `torchsolve/`. `pip install -e
+./torchsolve` fails immediately with "package directory 'torchsolve' does not exist".
+Nothing in this repository currently installs `torchsolve` as a package at all --
+`pinthac/correlations/htc.py`'s unconditional `import torchsolve` only resolves today
+because every consumer (the test suite, and now `examples/`) is run from the repository
+root via `python -m` or `pytest`, both of which put the repository root on `sys.path`.
+This "already a standalone package" characterization needs revisiting before a real
+split: either fix the `pyproject.toml` (move the three `.py` files into a
+`torchsolve/torchsolve/` subdirectory, or change `packages` to point at the flat layout
+it actually has) or publish it some other way.
 
 ## What has to be true first
 
