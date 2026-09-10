@@ -707,7 +707,7 @@ Lyon's boundary condition is the one a fuel pin actually approximates, so it is 
 sensible default for a sodium channel. If you have the Notter-Sleicher reference, it
 drops straight in beside these.
 
-## Q41. Todreas & Kazimi Eq. (10.133) is typographically corrupt in the 3rd edition
+## Q41. RESOLVED -- Todreas & Kazimi Eq. (10.133) is typographically corrupt in the 3rd edition
 
 The Mikityuk (2009) rod-bundle liquid-metal correlation is printed as
 
@@ -717,10 +717,16 @@ The `Pe < 0.77+250` is not a text-extraction artifact -- I rendered PDF page 555
 image to check, and the `<` is set that way in the book. It is a mis-typeset superscript:
 the correlation is almost certainly `(Pe^0.77 + 250)`.
 
-"Almost certainly" is not the standard here, so Mikityuk is **not implemented**. If you
-have Mikityuk's own 2009 paper, or another edition of T&K, that would settle it in one
-line -- it is the correlation T&K themselves recommend as the best fit over
-P/D = 1.1-1.95 and Pe = 30-5000, so it is worth having.
+**Resolved.** The owner supplied `Useful_pdfs/Mikityuk.pdf` -- Mikityuk, K., "Heat
+transfer to liquid metal: Review of data and correlations for tube bundles", *Nuclear
+Engineering and Design* **239** (2009) 680-687. Its Eq. (14) is
+
+    Nu = 0.047*(1 - exp(-3.8*(x - 1)))*(Pe^0.77 + 250)
+
+so the `<` in T&K is indeed a mis-typeset superscript. Implemented as
+`correlations/htc.py::Sodium.Mikityuk`, with the range (Pe 30-5000, P/D 1.1-1.95) and the
+error statistics (mean absolute error -0.1, RMS 1.9, both in Nusselt units rather than
+relative) taken from the paper.
 
 Also noted from the same section, not implemented for the same reason: Graber-Rieger
 (valid only to P/D <= 1.15), Borishanski, Ushakov, Kazimi-Carelli, Schad. T&K discuss

@@ -292,3 +292,78 @@ def test_lyon_backend_contract():
     P = _sodium_props()
     _assert_backend_contract(lambda Props, G, D: htc.Sodium.Lyon(Props, G, D),
                              label="Sodium.Lyon")
+
+
+# ---------------------------------------------------------------------------------------
+# Mikityuk (2009) Eq. (14) -- the liquid-metal rod-bundle correlation.
+# ---------------------------------------------------------------------------------------
+MIKITYUK_CASES = [(1.15, 400.0), (1.15, 3000.0), (1.30, 400.0),
+                  (1.30, 3000.0), (1.60, 400.0), (1.60, 3000.0)]
+
+
+@pytest.mark.parametrize("p_over_d,G", MIKITYUK_CASES)
+def test_mikityuk_matches_the_published_equation(p_over_d, G):
+    """Nu = 0.047*(1 - exp(-3.8*(x-1)))*(Pe^0.77 + 250), written out independently here.
+
+    Worth stating why this is asserted against a restatement rather than a check value:
+    the paper publishes error statistics against 658 experimental points but no worked
+    example, so there is no published number to compare a single evaluation to. What this
+    guards is the transcription -- and specifically the Peclet exponent, which Todreas &
+    Kazimi's Eq. (10.133) mis-typesets as '<' where it should be a superscript 0.77."""
+    P = _sodium_props()
+    D = 0.008
+    Pe = G * D * P['cp'] / P['k']
+    expected_Nu = 0.047 * (1.0 - np.exp(-3.8 * (p_over_d - 1.0))) * (Pe**0.77 + 250.0)
+
+    got = float(htc.Sodium.Mikityuk(P, G, D, p_over_d * D))
+    assert got * D / P['k'] == pytest.approx(expected_Nu, rel=1.0e-12)
+
+
+def test_mikityuk_geometry_factor_saturates():
+    """The property Mikityuk says distinguishes his correlation from the eight he
+    reviewed: Nu approaches a finite asymptote as P/D grows rather than diverging, which
+    is what makes it safe in a transient code that might push the geometry term outside
+    its fitted range."""
+    P = _sodium_props()
+    D = 0.008
+    # Start at P/D = 5, not 3: at 3 the factor is 1 - exp(-7.6) = 0.99950, which is
+    # visibly saturating but still 5e-4 short. By 5 it is 1 - 2.5e-7.
+    wide = [float(htc.Sodium.Mikityuk(P, 1000.0, D, x * D, check_range=False))
+            for x in (5.0, 10.0, 100.0)]
+    assert wide[1] == pytest.approx(wide[0], rel=1.0e-6)
+    assert wide[2] == pytest.approx(wide[0], rel=1.0e-6)
+
+
+def test_mikityuk_keeps_a_conduction_floor():
+    """As Pe -> 0 the second factor tends to 250, not zero."""
+    P = _sodium_props()
+    D, x = 0.008, 1.30
+    Nu = float(htc.Sodium.Mikityuk(P, 1.0e-6, D, x * D, check_range=False)) * D / P['k']
+    assert Nu == pytest.approx(0.047 * (1.0 - np.exp(-3.8 * (x - 1.0))) * 250.0, rel=1.0e-6)
+
+
+def test_mikityuk_rises_with_pitch_to_diameter():
+    """A tighter lattice mixes worse in the gap, so it must transfer heat less well."""
+    P = _sodium_props()
+    D = 0.008
+    values = [float(htc.Sodium.Mikityuk(P, 1000.0, D, x * D)) for x in (1.15, 1.3, 1.6, 1.9)]
+    assert all(a < b for a, b in zip(values, values[1:]))
+
+
+def test_mikityuk_warns_outside_its_fitted_range():
+    P = _sodium_props()
+    D = 0.008
+    with pytest.warns(RangeWarning):
+        htc.Sodium.Mikityuk(P, 1000.0, D, 1.05 * D)      # P/D below 1.1
+    with pytest.warns(RangeWarning):
+        htc.Sodium.Mikityuk(P, 1.0, D, 1.30 * D)          # Pe far below 30
+
+
+def test_mikityuk_backend_contract():
+    P = _sodium_props()
+    # check_range off: the contract helper sweeps G over several decades to exercise the
+    # backend, which walks Pe out of the fitted 30-5000 window. That is a property of the
+    # helper, not of the correlation, and range checking has its own test above.
+    _assert_backend_contract(
+        lambda Props, G, D: htc.Sodium.Mikityuk(Props, G, D, 1.3 * D, check_range=False),
+        label="Sodium.Mikityuk")
