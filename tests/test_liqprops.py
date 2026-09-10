@@ -227,11 +227,17 @@ def test_enthalpy_is_the_integral_of_heat_capacity():
     from scipy.integrate import quad
 
     for metal in (lm.Sodium, lm.Lead, lm.LBE):
-        for offset in (50.0, 200.0, 500.0):
-            T = metal.Tm + offset
+        # Sample inside each metal's own validated enthalpy range rather than at fixed
+        # offsets from Tm. Fixed offsets overshoot: Lead's h is validated only to 1100 K,
+        # so Tm + 500 lands 0.6 K outside it and trips the RangeWarning that
+        # pyproject.toml escalates to an error in tests -- correctly, since that is a bad
+        # test input rather than a bad result.
+        T_lo, T_hi = metal.range_h
+        for frac in (0.1, 0.4, 0.9):
+            T = T_lo + frac * (T_hi - T_lo)
             integrated = quad(
                 lambda t: float(np.atleast_1d(metal.cp(np.array([t])))[0]),
-                metal.Tm, T, limit=200,
+                T_lo, T, limit=200,
             )[0]
             reported = float(np.atleast_1d(metal.h(np.array([T])))[0])
             assert reported == pytest.approx(integrated, rel=1e-9), (
