@@ -851,6 +851,122 @@ class SCW:
         return val
 
 
+class Sodium:
+    """
+    Liquid-metal forced-convection correlations.
+
+    Liquid metals behave unlike water in a way that shows up in the form of the
+    correlation, not just its constants: their Prandtl number is of order 0.005, so
+    molecular conduction carries a large share of the heat and the Nusselt number stays
+    finite as the flow slows. That is why every correlation here is
+    Nu = A + B*Pe^C with a nonzero A, rather than a pure power law in Re and Pr --
+    A is the conduction floor. Todreas & Kazimi make the point explicitly at Eq. (10.125).
+
+    Named `Sodium` to match the manual's section 2.4, but nothing in these correlations
+    is specific to sodium: they apply to any low-Prandtl coolant, lead and LBE included.
+    """
+
+    @staticmethod
+    def Lyon(Props, G, D, check_range=True):
+        """
+        Lyon correlation for liquid-metal heat transfer in a circular tube at constant
+        heat flux.
+
+        Why this model is here:
+            The manual's section 2.4 asks for a sodium correlation, and this is the
+            standard one for the boundary condition a fuel pin actually imposes --
+            constant heat flux along and around the tube, which is what a fuel rod
+            approximates far better than a uniform wall temperature.
+
+            It is here rather than Notter-Sleicher, which section 2.4.1 names, because
+            no source for Notter-Sleicher is available in this repository. Guessing its
+            exponents would be worse than leaving the gap; see docs/OPEN_QUESTIONS.md
+            (Q15).
+
+        Formulation:
+            Pe = Re*Pr = (G*D/mu) * (mu*cp/k) = G*D*cp/k
+            Nu = 7.0 + 0.025*Pe^0.8
+            htc = Nu*k/D
+
+            The constant 7.0 is the conduction floor: heat still crosses a liquid metal
+            by conduction as Pe goes to zero, so unlike Dittus-Boelter this does not
+            collapse to zero at low flow.
+
+        Valid range:
+            Fully developed flow in a circular tube, uniform heat flux. Todreas & Kazimi
+            do not attach a Peclet range to Eq. (10.126a) itself.
+
+        Uncertainty:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q16). T&K quote the
+            correlation without an error band.
+
+        Reference:
+            Lyon, R.N., "Liquid metal heat transfer coefficients", Chem. Eng. Prog.
+            47:75 (1951), as given by Todreas & Kazimi, Nuclear Systems Volume 1, 3rd
+            ed., Eq. (10.126a).
+
+        Inputs:
+            Props : property dict with keys 'mu' (Pa-s), 'cp' (J/kg-K), 'k' (W/m-K)
+            G     : mass flux, kg/m^2-s (float, numpy array, or torch tensor)
+            D     : hydraulic diameter, m
+            check_range : accepted for interface consistency; no range table exists
+        Returns:
+            htc : heat transfer coefficient, W/m^2-K, same type as G
+        """
+        mu, cp, k = Props['mu'], Props['cp'], Props['k']
+        Pr = mu * cp / k
+        Re = G * D / mu
+        Pe = Re * Pr
+        Nu = 7.0 + 0.025 * Pe**0.8
+        htc = Nu * k / D
+        return htc
+
+    @staticmethod
+    def SebanShimazaki(Props, G, D, check_range=True):
+        """
+        Seban and Shimazaki correlation for liquid-metal heat transfer in a circular tube
+        at uniform wall temperature.
+
+        Why this model is here:
+            The companion to Lyon for the other classic boundary condition. Worth having
+            alongside it because the difference between the two is exactly the conduction
+            floor -- 5.0 against 7.0 -- which makes the sensitivity of a liquid-metal
+            channel to its thermal boundary condition visible rather than hidden in a
+            choice of correlation.
+
+        Formulation:
+            Pe = Re*Pr
+            Nu = 5.0 + 0.025*Pe^0.8
+            htc = Nu*k/D
+
+        Valid range:
+            Fully developed flow in a circular tube, uniform axial wall temperature with
+            uniform radial heat flux. No Peclet range attached in the source.
+
+        Uncertainty:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+
+        Reference:
+            Seban, R.A. and Shimazaki, T.T., as given by Todreas & Kazimi, Nuclear
+            Systems Volume 1, 3rd ed., Eq. (10.126b).
+
+        Inputs:
+            Props : property dict with keys 'mu' (Pa-s), 'cp' (J/kg-K), 'k' (W/m-K)
+            G     : mass flux, kg/m^2-s (float, numpy array, or torch tensor)
+            D     : hydraulic diameter, m
+            check_range : accepted for interface consistency; no range table exists
+        Returns:
+            htc : heat transfer coefficient, W/m^2-K, same type as G
+        """
+        mu, cp, k = Props['mu'], Props['cp'], Props['k']
+        Pr = mu * cp / k
+        Re = G * D / mu
+        Pe = Re * Pr
+        Nu = 5.0 + 0.025 * Pe**0.8
+        htc = Nu * k / D
+        return htc
+
+
 class Lead:
     @staticmethod
     def Shen(Props, T, G, D):

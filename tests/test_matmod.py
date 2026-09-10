@@ -331,9 +331,15 @@ def test_ht9_yield_stress_backend_contract():
 
 
 # ------------------------------------------------------------------------------- D9_SS
-def test_d9_ss_k_is_an_honest_stub():
-    with pytest.raises(NotImplementedError):
-        m.D9_SS.k(650.0)
+def test_d9_ss_constant_properties():
+    """D9 is the cladding of the SCWR lattice the supercritical work is built around, and
+    `k` was an unimplemented stub until Phase 4. Both values are single evaluated numbers
+    from Hughes et al. (2014) -- section 4 for the conductivity, Table 1 for the density
+    -- not correlations, so they are asserted exactly."""
+    assert m.D9_SS.k() == 18.9
+    assert m.D9_SS.k(650.0) == 18.9          # T is accepted and ignored, by design
+    assert m.D9_SS.rho() == 8100.0
+
 
 
 # ------------------------------------------------------------------- RANGES (Phase 3)

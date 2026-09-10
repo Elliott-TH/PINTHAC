@@ -2117,38 +2117,81 @@ class HT9:
 
 
 class D9_SS:
-    def k(T):
+    """
+    D9 austenitic stainless steel, the cladding of the SCWR lattice in Hughes et al.
+
+    Constant properties only. PNNL-35702 does not cover D9, and no temperature-dependent
+    conductivity model for it is available in this repository -- per docs/DECISIONS.md
+    that gap stays a gap rather than being filled with something plausible. What is
+    available is a single evaluated conductivity and a density, both from the lattice
+    Hughes et al. (2014) actually modelled, and those are enough for a constant-property
+    clad.
+    """
+
+    @staticmethod
+    def k(T=None):
         """
-        D9 stainless steel cladding thermal conductivity -- not implemented.
+        Thermal conductivity of D9 stainless steel cladding, constant.
 
         Why this model is here:
-            A placeholder only. Per docs/DECISIONS.md, no temperature-dependent D9
-            conductivity model was available at Phase 0; a constant value (k = 18.9 W/m-K
-            at 650 K, Leibowitz & Blomquist 1988, via Hughes et al. 2014 Table 1 -- see
-            docs/PHYSICS_REVIEW.md) is documented as available for a later phase to add,
-            but adding it is a physics addition outside Phase 2's docstring/backend/
-            dead-code scope (Phase 2 changes no physics) and is deferred rather than
-            done here -- see the Phase 2 report.
+            The SCWR lattice this project's supercritical work is built around is clad in
+            D9, not Zircaloy, and until now `k` for it was an unimplemented stub -- so
+            any D9 case had to borrow a Zircaloy number. A single evaluated value is a
+            poor model but an honest one, and it is traceable.
 
         Formulation:
-            Not implemented.
+            k = 18.9 W/m-K, independent of temperature.
+
+            Hughes et al. evaluate it once at 650 K, their average clad temperature, and
+            hold it constant through their single-channel analysis. This reproduces that
+            choice rather than extrapolating it into a temperature dependence the source
+            does not provide.
 
         Valid range:
-            Not applicable.
+            Evaluated at 650 K. Reasonable across the clad temperatures of a
+            supercritical-water channel, which is the range Hughes uses it over; there is
+            no basis in the source for a wider claim. `T` is accepted and ignored, so
+            this stays interchangeable with the temperature-dependent conductivities of
+            the other cladding materials in this module.
 
         Uncertainty:
-            Not applicable.
+            Not established -- see docs/OPEN_QUESTIONS.md (Q16). The source quotes a
+            single value with no band.
 
         Reference:
-            Leibowitz & Blomquist (1988), via Hughes et al. (2014) Table 1 -- for the
-            constant value noted above, not yet wired in.
+            Leibowitz, L. and Blomquist, R.A. (1988), as cited by Hughes, Pelaez,
+            Schubring & Jordan, Nucl. Eng. Des. 270 (2014) 412-420, section 4.
 
         Inputs:
-            T : temperature, K
+            T : temperature, K. Accepted for interface consistency and not used.
         Returns:
-            Does not return; raises NotImplementedError.
+            k : thermal conductivity, 18.9 W/m-K
         """
-        raise NotImplementedError(
-            "D9 stainless steel has no temperature-dependent conductivity model in this "
-            "repository -- see docs/DECISIONS.md ('D9 cladding') and docs/PHYSICS_REVIEW.md."
-        )
+        return 18.9
+
+    @staticmethod
+    def rho():
+        """
+        Density of D9 stainless steel cladding.
+
+        Why this model is here:
+            Needed for any transient or mass-inventory calculation on a D9-clad pin, and
+            it comes from the same lattice definition as the conductivity above.
+
+        Formulation:
+            rho = 8100 kg/m^3, independent of temperature.
+
+        Valid range:
+            As-modelled value for the SCWR lattice of Hughes et al. Table 1.
+
+        Uncertainty:
+            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+
+        Reference:
+            Hughes et al., Nucl. Eng. Des. 270 (2014) 412-420, Table 1
+            ("Clad/water box density").
+
+        Returns:
+            rho : density, 8100 kg/m^3
+        """
+        return 8100.0
