@@ -45,6 +45,7 @@ import torch
 
 from pinthac.solvers import bisect_newton
 
+from pinthac.correlations.bundle import Bundle
 from pinthac.properties.iapws95 import IAPWS95, device
 
 sigma = scipy.constants.sigma  # Stefan-Boltzmann constant
@@ -142,15 +143,28 @@ def Swenson(Property, Tb, Ts, p, G, D):
     return Nu_s * k_s / D
 
 
-def htc_scw(Property, Tm, qp_val, p, G, D):
+def htc_scw(Property, Tm, qp_val, p, G, D, psi=1.0):
+    """
+    Solve Swenson's implicit wall-temperature balance for the rod-bundle heat transfer
+    coefficient, htc_pin = psi * htc_round_tube (Hughes et al. 2014, Eq. 11).
+
+    Why psi is baked into the residual, not multiplied on afterward: the wall
+    temperature itself depends on which htc closes the flux balance --
+    qp_val/(pi*D) = htc_pin*(Tco-Tm) -- so psi has to be inside the equation being
+    solved for Tco, the same way sca/lut.py::htc_and_Tw's `psi*h*(Tw-Tb) - q_solve`
+    residual does it. Multiplying psi onto the *converged uncorrected* htc afterward
+    would evaluate Swenson's temperature-dependent properties at the wrong Tco.
+
+    psi = 1.0 (default) reproduces the previous round-tube-only behaviour exactly.
+    """
     lo = Tm - 50.0
     hi = Tm + 1500.0
 
     def res(Tco):
         htc = Swenson(Property, Tm, Tco, p, G, D)
-        return (Tco - Tm) - qp_val / (math.pi * D * htc)
+        return (Tco - Tm) - qp_val / (math.pi * D * psi * htc)
     Tco = gpu_solve(res, lo, hi)
-    return Swenson(Property, Tm, Tco, p, G, D)
+    return psi * Swenson(Property, Tm, Tco, p, G, D)
 
 
 def gap(qp_val, delta, Tci, rci, rfo):
@@ -253,7 +267,13 @@ def rod_node(Property, Tm, p, qp_val, inputs):
     A_flow = pitch**2 - math.pi * rco**2
     Dh = 4 * A_flow / Cir
 
-    htc_conv = htc_scw(Property, Tm, qp_val, p, G, Dh)
+    # Rod-bundle correction, Hughes et al. (2014) Eq. (11): htc_pin = psi*htc_round_tube.
+    # Presser (Eq. 10 there) is the same psi correlations/bundle.py::Bundle.Presser
+    # already applies to sca/lut.py's rod-bundle channel; this solver had no correction
+    # factor at all before (docs/PHYSICS_REVIEW.md, SCA_IAPWS95_Rod.py gap 1).
+    psi = Bundle.Presser(pitch, d_o)
+
+    htc_conv = htc_scw(Property, Tm, qp_val, p, G, Dh, psi)
     Tco = Tm + qp_val / (math.pi * d_o * htc_conv)
     Tci = Tco + qp_val / (2 * math.pi * kc) * _log(rco / rci)
     Tfo = gap(qp_val, delta, Tci, rci, rfo)
