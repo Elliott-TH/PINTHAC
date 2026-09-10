@@ -223,7 +223,7 @@ def _annular_inputs(geometry, conditions):
 
 
 def run_channel(geometry, conditions, htc="swenson", friction="filonenko",
-                 bundle="presser", fuel_conductivity="klimenko"):
+                 bundle="presser", fuel_conductivity="klimenko", **solver_kwargs):
     """
     Run one single-channel-analysis case, dispatching to sca/rod.py or sca/annular.py.
 
@@ -253,6 +253,12 @@ def run_channel(geometry, conditions, htc="swenson", friction="filonenko",
                      HTC_MODELS/FRICTION_MODELS/BUNDLE_MODELS/FUEL_CONDUCTIVITY_MODELS
                      for the valid names). bundle=None means "apply no bundle
                      correction" and is always accepted.
+        **solver_kwargs : passed straight through to the dispatched solver
+                     (rod.run_SCA's scw_table/device, or annular.solve_field's
+                     q_p/outer_iter/tol/progress) -- e.g. a caller who wants a looser
+                     annular tolerance for a quick exploratory run passes
+                     tol=..., outer_iter=... here rather than run_channel needing to
+                     know every such knob by name.
     Returns:
         dict: result (the underlying run_SCA()/solve_field() output), geom_type,
         requested (the four correlation names as given), notes (list of strings --
@@ -290,12 +296,13 @@ def run_channel(geometry, conditions, htc="swenson", friction="filonenko",
 
     if geom_type == "rod":
         inputs, run_kwargs = _rod_inputs(geom_only, conditions)
+        run_kwargs.update(solver_kwargs)
         result = rod.run_SCA(inputs, **run_kwargs)
         convergence = _scan_for_nonfinite(result, "Z", ("T_i", "T_fuel_max", "dP"))
         notes = _unhonored_notes(requested, _ROD_FIXED)
     else:
         inp = _annular_inputs(geom_only, conditions)
-        result = annular.solve_field(inp)
+        result = annular.solve_field(inp, **solver_kwargs)
         convergence = _scan_for_nonfinite(
             result, "z", ("Tm_i", "Tm_o", "Tfo_i", "Tfo_o", "q_i", "q_o")
         )
