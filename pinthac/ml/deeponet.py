@@ -365,7 +365,10 @@ if __name__ == '__main__':
         # the main loop, and this is a polish pass on an already-converged model.
         print('SSBroyden unavailable (see docs/OPEN_QUESTIONS.md Q24) -- '
               'skipping the polish stage; the SOAP checkpoint is already saved.')
-        return
+        # SystemExit rather than return: this block is the script's __main__ body, not a
+        # function, so `return` is a syntax error here. Exit status 0 because a run that
+        # trained and saved successfully has not failed -- the polish pass is optional.
+        raise SystemExit(0)
     optimizer2 = SSBroyden(model.parameters(), lr=1.0, history_size=40, method='ssbroyden')
 
     def polish_closure():
