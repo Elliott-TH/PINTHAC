@@ -10,10 +10,13 @@ conductivity), different execution strategy -- a Python loop evaluating
 one (T, P) point at a time vs. a single batched call evaluating all of
 them at once as tensor ops on the GPU.
 
-Run: python IAPWS_Benchmark.py
-Produces: IAPWS_Benchmark_results.png, prints a results table to stdout.
+Run (GPU pinned to the discrete card -- device 1 on this machine is integrated
+graphics, and timing it would be meaningless):
+    HIP_VISIBLE_DEVICES=0 python figures/iapws95_benchmark.py
+Produces: figures/output/iapws95-benchmark.svg, prints a results table to stdout.
 """
 
+import os
 import time
 
 import numpy as np
@@ -22,7 +25,10 @@ from iapws import IAPWS95 as RefIAPWS95
 
 from pinthac.properties import iapws95 as gpu
 
+import style
+
 DEVICE = gpu.device
+OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 
 
 # ---------------------------------------------------------------------
@@ -114,8 +120,17 @@ def run_benchmark():
 
     # Sizes run on both libraries -- capped so the pure-Python reference
     # loop finishes in a reasonable time (it costs ~ms per point).
-    shared_sizes = [1, 10, 100, 1_000, 5_000]
-    # Sizes run on the GPU library only, to show throughput at scale.
+    shared_sizes = [1, 10, 100, 1_000, 5_000, 20_000]
+    # Sizes run on the GPU library only, to show throughput at scale -- the
+    # pure-Python reference would take upwards of an hour at these sizes
+    # (its own measured per-point cost, extrapolated, is ~2.6ms/point).
+    # 1e6 is the practical ceiling on this card: a 1e7-point batch was tried
+    # while building this figure and raised torch.OutOfMemoryError (~16GB
+    # HIP allocation) on the RX 7800 XT's 16GB -- the float64 Helmholtz
+    # residual with a 60-iteration Newton solve keeps several same-sized
+    # intermediate tensors alive at once, so memory, not compute, is what
+    # caps the batch size here. Reported as a measured hardware limit, not
+    # papered over -- see docs/FIGURE_CAPTIONS.md.
     gpu_only_sizes = [50_000, 200_000, 1_000_000]
 
     results = []
@@ -148,48 +163,61 @@ def run_benchmark():
 
 
 def plot_results(results, gpu_only_results, out_path):
-    import matplotlib.pyplot as plt
+    """
+    Two-panel log-log figure: wall-clock time and speedup vs. batch size.
 
+    Every (N, reference_time, gpu_time) triple in `results` was actually measured on
+    this machine -- both libraries run at every one of those sizes. `gpu_only_results`
+    points (where the pure-Python reference would take too long to be practical) are
+    drawn with an open marker and connected by a dashed line, and the reference time
+    used for their speedup is the extrapolation run_benchmark() already computed and
+    printed (measured per-point CPU cost at the largest shared size, times N) -- shown
+    as a lighter, dashed reference curve so it cannot be mistaken for a measurement.
+    """
     ns = [r[0] for r in results]
     ref_t = [r[1] for r in results]
     gpu_t = [r[2] for r in results]
     gpu_only_ns = [r[0] for r in gpu_only_results]
     gpu_only_t = [r[1] for r in gpu_only_results]
 
-    all_gpu_ns = ns + gpu_only_ns
-    all_gpu_t = gpu_t + gpu_only_t
+    per_point_ref = ref_t[-1] / ns[-1]
+    gpu_only_ref_est = [per_point_ref * n for n in gpu_only_ns]
 
-    color_ref = "#4C72B0"
-    color_gpu = "#DD8452"
+    fig, (ax_t, ax_s) = style.figure(figsize=(10.5, 4.6), ncols=2)
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    ax_t.loglog(ns, ref_t, "o-", color=style.MUTED, lw=1.6, ms=5,
+                label="iapws (CPU, measured)")
+    ax_t.loglog(gpu_only_ns, gpu_only_ref_est, "o--", color=style.MUTED, lw=1.2, ms=4,
+                alpha=0.55, label="iapws (CPU, extrapolated)")
+    ax_t.loglog(ns, gpu_t, "o-", color=style.ACCENT, lw=1.8, ms=5,
+                label="this library (GPU, measured)")
+    ax_t.loglog(gpu_only_ns, gpu_only_t, "o-", color=style.ACCENT, lw=1.8, ms=5)
+    ax_t.set_xlabel("Batch size (state points)")
+    ax_t.set_ylabel("Wall-clock time [s]")
+    ax_t.legend(frameon=False, fontsize=8, loc="upper left")
 
-    ax = axes[0]
-    ax.loglog(ns, ref_t, "o-", color=color_ref, label="iapws (CPU, per-point)")
-    ax.loglog(all_gpu_ns, all_gpu_t, "o-", color=color_gpu, label="this library (GPU, batched)")
-    ax.set_xlabel("Batch size (number of state points)")
-    ax.set_ylabel("Wall-clock time [s]")
-    ax.set_title("Time to evaluate ρ, h, cp, μ, k")
-    ax.legend(frameon=False)
-    ax.grid(True, which="both", alpha=0.25)
-
-    ax = axes[1]
     ns_speedup = [n for n in ns if n >= 100]
     speedup = [r / g for n, r, g in zip(ns, ref_t, gpu_t) if n >= 100]
-    ax.semilogx(ns_speedup, speedup, "o-", color=color_gpu)
-    ax.set_xlabel("Batch size (number of state points)")
-    ax.set_ylabel("Speedup (×)")
-    ax.set_title("GPU-batched speedup vs. reference")
-    ax.tick_params(top=True, right=True, direction="in")
+    gpu_only_speedup = [r / g for r, g in zip(gpu_only_ref_est, gpu_only_t)]
 
-    fig.suptitle("GPU-parallel IAPWS-95 vs. reference `iapws` package", fontsize=12)
-    fig.tight_layout(rect=[0, 0, 1, 0.94])
-    fig.savefig(out_path, dpi=160)
-    print(f"\nSaved plot to {out_path}")
+    ax_s.semilogx(ns_speedup, speedup, "o-", color=style.ACCENT, lw=1.8, ms=5,
+                  label="measured")
+    ax_s.semilogx(gpu_only_ns, gpu_only_speedup, "o--", color=style.ACCENT, lw=1.4, ms=4,
+                  alpha=0.55, label="extrapolated CPU reference")
+    ax_s.set_xlabel("Batch size (state points)")
+    ax_s.set_ylabel("Speedup (x)")
+    ax_s.legend(frameon=False, fontsize=8, loc="upper left")
+
+    style.finish(fig, out_path)
 
 
 if __name__ == "__main__":
-    print(f"Device: {DEVICE}\n")
+    style.apply()
+    print(f"Device: {DEVICE}")
+    if DEVICE.type == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name(DEVICE)}\n")
+    else:
+        print()
     check_accuracy()
     results, gpu_only_results = run_benchmark()
-    plot_results(results, gpu_only_results, "IAPWS_Benchmark_results.png")
+    plot_results(results, gpu_only_results, os.path.join(OUT_DIR, "iapws95-benchmark.svg"))

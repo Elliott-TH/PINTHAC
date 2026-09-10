@@ -49,6 +49,7 @@ except ImportError:
 from pinthac.sca.rod import build_scw_table, make_Property, interp_sensors
 from pinthac.ml.datagen import (PARAM_BOUNDS, SCALAR_NAMES, N_SHAPE_MODES,
                               build_shapes, legendre_basis, L_FIXED, PVAL_FIXED)
+from pinthac.ml import losses
 
 torch.manual_seed(3472)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -269,9 +270,9 @@ def physics_loss(n_colloc=2048):
     # physics_loss) -- only dTi_dz needs to come from the network here.
     cp_i = Property(['T', Ti.detach().reshape(-1)], 'cp').reshape(-1, 1)
 
-    res = mdot.reshape(-1, 1)*cp_i*dTi_dz - q_z
+    res = losses.coolant_energy_residual_T(mdot.reshape(-1, 1), cp_i, dTi_dz, q_z)
     scale = torch.clamp(q_z.detach().abs(), min=1.0)
-    return torch.mean((res/scale)**2)
+    return losses.normalized_residual_loss(res, scale)
 
 
 @torch.no_grad()
@@ -390,9 +391,9 @@ if __name__ == '__main__':
         mdot = G_c * (pitch_c**2 - np.pi*rco_c**2)
         q_z = interp_sensors(q_sensors_c, sensor_z, z_c.detach().reshape(-1)).reshape(-1, 1)
         cp_i = Property(['T', Ti.detach().reshape(-1)], 'cp').reshape(-1, 1)
-        res = mdot.reshape(-1, 1)*cp_i*dTi_dz - q_z
+        res = losses.coolant_energy_residual_T(mdot.reshape(-1, 1), cp_i, dTi_dz, q_z)
         scale = torch.clamp(q_z.detach().abs(), min=1.0)
-        l_phys = torch.mean((res/scale)**2)
+        l_phys = losses.normalized_residual_loss(res, scale)
 
         loss = w_data*l_data + w_phys_max*l_phys
         loss.backward()

@@ -38,8 +38,18 @@ from pinthac import pin as ht
 from pinthac.correlations import htc as htc
 from pinthac.properties import getprop as gp
 from pinthac.properties import iapws95 as iapws
+from pinthac.ml import losses
 
 dtype = torch.float64
+# CLAUDE.md section 5 forbids a module-level torch.set_default_dtype (it silently
+# promotes every downstream tensor/network in the process to float64) -- flagged, not
+# fixed: PINN.__init__ below builds its nn.Linear layers with no explicit dtype=, so its
+# weights are created in whatever the *global* default is; removing this line without
+# also adding an explicit .to(dtype) at every construction site would build a float32
+# model, and loading the float64 checkpoint (Direct_PINN3_out/model.pt) into it would
+# silently downcast the trained weights on load_state_dict's copy_ -- a numeric change to
+# the trained model this pass is explicitly not allowed to make. Left as-is; see the
+# Phase 6/7 report.
 torch.set_default_dtype(dtype)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -115,6 +125,23 @@ Theta_tab = torch.cat([torch.zeros(1,device=device,dtype=dtype),
                         torch.cumsum(0.5*(kf_tab[1:]+kf_tab[:-1])*torch.diff(Tf_tab),0)])
 
 def interp(x,xp,fp):
+    """
+    Piecewise-linear lookup into a strictly-increasing torch table, held
+    flat past either end (values outside [xp[0],xp[-1]] clamp to that
+    endpoint rather than extrapolating).
+
+    A torch-native equivalent of backend.interp, kept local here rather
+    than imported: this module's tables (h_tab/T_tab/P_tab, Tf_tab/Theta_tab)
+    are always torch tensors already resident on `device`, so there is no
+    numpy branch to dispatch to -- interp() is only ever called on tensors.
+
+    Inputs:
+        x  : query points, torch tensor, any shape
+        xp : table abscissae, 1-D torch tensor, strictly increasing
+        fp : table ordinates, 1-D torch tensor, same length as xp
+    Returns:
+        interpolated values, same shape as x
+    """
     xc = x.reshape(-1).clamp(xp[0],xp[-1]).contiguous()
     j = torch.searchsorted(xp,xc).clamp(1,len(xp)-1)
     x0, x1 = xp[j-1], xp[j]
@@ -122,9 +149,27 @@ def interp(x,xp,fp):
     return (f0 + (f1-f0)*(xc-x0)/(x1-x0)).reshape(x.shape)
 
 def Props(h):
+    """
+    SCW property dict at enthalpy h, by table lookup into P_tab (built at
+    the fixed pressure `p` above from getprop._getprop('SCW', ...)).
+
+    Inputs:
+        h : coolant enthalpy, J/kg, torch tensor, any shape
+    Returns:
+        dict of the same keys as P_tab (density, viscosity, conductivity,
+        cp, ...), each interpolated to h's shape
+    """
     return {key: interp(h,h_tab,val) for key,val in P_tab.items()}
 
 def T_h(h):
+    """
+    SCW bulk temperature at enthalpy h, by table lookup into h_tab/T_tab.
+
+    Inputs:
+        h : coolant enthalpy, J/kg, torch tensor, any shape
+    Returns:
+        T : coolant temperature, K, same shape as h
+    """
     return interp(h,h_tab,T_tab)
 
 def Theta(T):
@@ -134,6 +179,18 @@ def Theta(T):
     return interp(T,Tf_tab,Theta_tab)
 
 def qp(z):
+    """
+    Fixed cosine axial LHGR shape, the same single operating-point power
+    profile every training case in this module is checked against (unlike
+    pinthac/ml/deeponet.py's rod surrogate, which is trained across a
+    family of shapes -- see datagen.py's Fourier/Legendre parameterizations
+    -- this module fixes one shape and instead varies geometry/flow).
+
+    Inputs:
+        z : axial position, m, torch tensor or numpy array, any shape
+    Returns:
+        qp : linear heat generation rate q'(z), W/m, same shape as z
+    """
     return q0*torch.cos(np.pi*z/L)
 
 h_in = interp(torch.tensor([T_in],device=device),T_tab,h_tab)
@@ -188,9 +245,27 @@ def sample_params(n,generator=None):
     return torch.cat([mdot_i,mdot_o,r_i,r_o,tc_i,tc_o,pitch,delta_i,delta_o],1)
 
 def as_dict(P):
+    """
+    PARAMS columns of a (batch, len(PARAMS)) tensor, split back out into a
+    name -> (batch,1) dict -- the inverse of the column layout make_batch
+    builds.
+
+    Inputs:
+        P : (batch, len(PARAMS)) torch tensor, columns in PARAMS order
+    Returns:
+        dict of name -> (batch,1) torch tensor, one entry per PARAMS name
+    """
     return {k: P[:,j:j+1] for j,k in enumerate(PARAMS)}
 
 def nominal(n=1):
+    """
+    The NOM reference pin's parameter row, repeated n times.
+
+    Inputs:
+        n : number of repeated rows to return
+    Returns:
+        (n, len(PARAMS)) torch tensor, columns in PARAMS order, physical units
+    """
     return torch.tensor([[NOM[k] for k in PARAMS]],device=device).repeat(n,1)
 
 # ---------------------------------------------------------------- model
@@ -316,7 +391,23 @@ def chain(h_i,h_o,qp_i,qp_o,P,g):
 # ------------------------------------------------------------- residuals
 
 def state(x):
-    """Everything the residuals and the post-processing both need."""
+    """
+    Everything the residuals and the post-processing both need: geometry,
+    the two coolant-stream enthalpy/heat-rate fields and their axial
+    derivatives, the full resistance-chain temperatures, and both physics
+    residuals (l1, l2), all evaluated at the collocation points x.
+
+    Inputs:
+        x : (batch, Nin) torch tensor, requires_grad=True -- column 0 is
+            zstar in [-1,1], columns 1: are PARAMS in physical units
+            (see make_batch)
+    Returns:
+        dict of (batch,1) torch tensors: P, g (geometry dicts are folded
+        in under 'P'/'g'), z [m], h_i/h_o [J/kg], qp_i/qp_o [W/m],
+        q3 [W/m^3], the chain() resistance temperatures/htc's,
+        res1/res2 [W/m] (raw energy-balance / conduction-consistency
+        residuals), l1/l2 [-] (res1/res2 non-dimensionalized by q0)
+    """
     P = as_dict(x[:,1:])
     g = geometry(P)
     z = x[:,0:1]*L/2
@@ -343,16 +434,45 @@ def state(x):
     C1, C2 = ht.Ann_HT(P['r_i'],P['r_o'],q3,Theta(c['Tfo_i']),Theta(c['Tfo_o']))
     qp_i_ht = -ht.Ann_qpp(P['r_i'],q3,C1)*2*np.pi*P['r_i']
 
-    l1 = (qp_i + qp_o - qp(z))/q0
-    l2 = (qp_i - qp_i_ht)/q0
+    # res1 is the two-stream coolant energy balance,
+    # losses.coolant_energy_residual_h summed over both streams against
+    # their shared target qp(z) (mdot_i*hi_z + mdot_o*ho_z = qp_i + qp_o
+    # already, by construction above -- so this is qp_i + qp_o - qp(z)
+    # written the same way, not a different computation).
+    res1 = qp_i + qp_o - qp(z)
+    # res2: the network's own inner/outer flux split must reproduce the
+    # split PinHT.Ann_HT/Ann_qpp give from the fuel surface temperatures
+    # that same split implies through the resistance chain -- its own
+    # residual, specific to this two-stream annular closure rather than
+    # the shared coolant-energy-balance form in losses.py, though its
+    # final reduction (mean-squared, q0-normalized) is the same shared
+    # losses.normalized_residual_loss() used for res1 in loss() below.
+    res2 = qp_i - qp_i_ht
+    l1 = res1/q0
+    l2 = res2/q0
 
     c.update(P=P, g=g, z=z, h_i=h_i, h_o=h_o, qp_i=qp_i, qp_o=qp_o,
-             q3=q3, C1=C1, C2=C2, l1=l1, l2=l2)
+             q3=q3, C1=C1, C2=C2, res1=res1, res2=res2, l1=l1, l2=l2)
     return c
 
 def loss(x):
+    """
+    The two physics-loss terms used in the training objective below (Ls =
+    L1 + L2): mean-squared, q0-normalized coolant energy balance and
+    fuel-conduction-consistency residuals, via
+    losses.normalized_residual_loss -- algebraically the same
+    mean(l1**2)/mean(l2**2) state() already computes (l1 = res1/q0 exactly,
+    so normalized_residual_loss(res1, q0) recomputes the identical
+    quotient before squaring), just expressed through the shared helper
+    rather than a second hand-written reduction.
+
+    Inputs:
+        x : (batch, Nin) torch tensor, requires_grad=True (see state())
+    Returns:
+        (L1, L2) : two scalar torch tensors
+    """
     s = state(x)
-    return torch.mean(s['l1']**2), torch.mean(s['l2']**2)
+    return losses.normalized_residual_loss(s['res1'], q0), losses.normalized_residual_loss(s['res2'], q0)
 
 def make_batch(nc,nz,generator=None,params=None):
     """(nc*nz, Nin) collocation tensor: nz axial points for each of nc cases."""
