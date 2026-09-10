@@ -26,7 +26,9 @@ class Sodium:
     uncert_cp = np.array([0,1])/100
     uncert_h = np.array([5,7])/100
     uncert_mu = np.array([5,5])/100
-    uncert_k = np.array([0,8])
+    # Every other uncertainty entry in this file is a percentage divided by 100.
+    # Without the /100 this reads as 800 percent rather than 8 percent.
+    uncert_k = np.array([0,8])/100
 
     @classmethod
     def rho(cls,T):
@@ -69,7 +71,9 @@ class Lead:
     Tb  = 2021
     M   = 0.2072
 
-    range_rho = Tb
+    # A [T_min, T_max] pair like every other range entry; this was a bare scalar,
+    # so a range check would have compared against the upper bound alone.
+    range_rho = [Tm,Tb]
     range_cp  = [Tm,1100]
     range_h   = [Tm,1100]
     range_mu  = [Tm,1270]
