@@ -241,3 +241,54 @@ def test_lead_shen_backend_contract():
     assert torch.is_tensor(out_t)
     (grad,) = torch.autograd.grad(out_t.sum(), mu_t, allow_unused=True)
     assert grad is not None and torch.isfinite(grad).all()
+
+
+# =======================================================================================
+# Liquid-metal correlations (manual section 2.4), added in Phase 4.
+# =======================================================================================
+def _sodium_props(T=700.0):
+    from pinthac.properties import liqprops as lm
+    raw = lm.Props(lm.Sodium, np.array([T]))
+    return {k: float(np.ravel(np.asarray(v))[0]) for k, v in raw.items()}
+
+
+def test_lyon_and_seban_shimazaki_are_the_published_forms():
+    """Both are Nu = A + 0.025*Pe^0.8, differing only in the conduction floor: 7.0 for
+    Lyon's constant heat flux, 5.0 for Seban-Shimazaki's uniform wall temperature.
+    T&K Eqs. (10.126a) and (10.126b)."""
+    P = _sodium_props()
+    G, D = 2000.0, 0.008
+    Pe = G * D * P['cp'] / P['k']
+
+    assert float(htc.Sodium.Lyon(P, G, D)) == pytest.approx(
+        (7.0 + 0.025 * Pe**0.8) * P['k'] / D, rel=1.0e-12)
+    assert float(htc.Sodium.SebanShimazaki(P, G, D)) == pytest.approx(
+        (5.0 + 0.025 * Pe**0.8) * P['k'] / D, rel=1.0e-12)
+
+
+def test_liquid_metal_nusselt_keeps_its_conduction_floor():
+    """The physical point of the A + B*Pe^C form: a liquid metal still conducts heat
+    when the flow stops, so Nu must not collapse to zero as Pe does. This is what
+    separates these from Dittus-Boelter and it is worth pinning."""
+    P = _sodium_props()
+    D = 0.008
+    for G in (1.0, 0.01, 0.0001):
+        Nu_lyon = float(htc.Sodium.Lyon(P, G, D)) * D / P['k']
+        Nu_ss = float(htc.Sodium.SebanShimazaki(P, G, D)) * D / P['k']
+        assert Nu_lyon > 7.0
+        assert Nu_ss > 5.0
+    # And at vanishing flow they approach their floors rather than something else.
+    assert float(htc.Sodium.Lyon(P, 1.0e-8, D)) * D / P['k'] == pytest.approx(7.0, abs=1e-3)
+
+
+def test_sodium_prandtl_number_is_liquid_metal_small():
+    """A guard on the property library as much as the correlation: if Pr came out near
+    unity these correlations would be the wrong family entirely."""
+    P = _sodium_props()
+    assert 0.001 < P['mu'] * P['cp'] / P['k'] < 0.02
+
+
+def test_lyon_backend_contract():
+    P = _sodium_props()
+    _assert_backend_contract(lambda Props, G, D: htc.Sodium.Lyon(Props, G, D),
+                             label="Sodium.Lyon")

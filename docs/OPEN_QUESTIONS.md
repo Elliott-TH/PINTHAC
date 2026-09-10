@@ -685,3 +685,49 @@ the same quantity: `eps` itself only spans about 0.79 to 0.82 over the model's 3
 range, so a 0.072 absolute band and a 6.8 percent relative band are not equivalent. The
 old figure's source was never established (Q31); PNNL-35702's is. See `UO2.eps`'s
 docstring.
+
+---
+
+# Round 7 — Phase 4
+
+## Q15 (Notter-Sleicher) stays open, deliberately
+
+The manual's section 2.4.1 names Notter-Sleicher for sodium. It is not in
+`Useful_pdfs/`: Todreas & Kazimi Volume 1 does not mention it, nor do the Cheng SCWR
+review, the Meyer heat-transfer-coefficient review, or the Wu paper. Per your rule --
+implement only what can be implemented accurately -- it is not implemented.
+
+What is implemented instead, from T&K section 10.5.3.1, is the pair of correlations for
+the two classic boundary conditions:
+
+    Lyon             Nu = 7.0 + 0.025*Pe^0.8    constant heat flux      Eq. (10.126a)
+    Seban-Shimazaki  Nu = 5.0 + 0.025*Pe^0.8    uniform wall temp       Eq. (10.126b)
+
+Lyon's boundary condition is the one a fuel pin actually approximates, so it is the
+sensible default for a sodium channel. If you have the Notter-Sleicher reference, it
+drops straight in beside these.
+
+## Q41. Todreas & Kazimi Eq. (10.133) is typographically corrupt in the 3rd edition
+
+The Mikityuk (2009) rod-bundle liquid-metal correlation is printed as
+
+    Nu = 0.047[1 - exp(-3.8(P/D - 1))](Pe < 0.77+250)
+
+The `Pe < 0.77+250` is not a text-extraction artifact -- I rendered PDF page 555 as an
+image to check, and the `<` is set that way in the book. It is a mis-typeset superscript:
+the correlation is almost certainly `(Pe^0.77 + 250)`.
+
+"Almost certainly" is not the standard here, so Mikityuk is **not implemented**. If you
+have Mikityuk's own 2009 paper, or another edition of T&K, that would settle it in one
+line -- it is the correlation T&K themselves recommend as the best fit over
+P/D = 1.1-1.95 and Pe = 30-5000, so it is worth having.
+
+Also noted from the same section, not implemented for the same reason: Graber-Rieger
+(valid only to P/D <= 1.15), Borishanski, Ushakov, Kazimi-Carelli, Schad. T&K discuss
+all of them but prints a formula only for Mikityuk.
+
+## Q13 (Shen) also stays open
+
+Still no source for the Peclet exponent, and the two copies in the repository disagree in
+sign. The new papers do not contain it. `correlations/htc.py::Lead.Shen` keeps the form
+it had, with the disagreement documented in `docs/DUPLICATES.md` D3.
