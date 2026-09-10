@@ -1,0 +1,636 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{parskip}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  breaklines=true,
+  frame=single,
+  columns=fullflexible,
+  language=Python
+}
+
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue}
+
+\title{Annular Single-Channel Analysis: PINN and DeepONet Surrogates\\
+\large Development Report}
+\author{Development session summary}
+\date{September 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Overview}
+
+This report documents a development session that built two machine-learning
+surrogates --- a physics-informed neural network (PINN) and a DeepONet ---
+for an annular fuel single-channel analysis (SCA), and the physics
+infrastructure underneath them. The work went through two major revisions:
+
+\begin{enumerate}
+\item An initial implementation based on
+\texttt{Annular\_Fuel\_Heat\_Transfer\_Derivation.pdf} and
+\texttt{DeepONet\_Plan.pdf}, assuming a bare fuel surface in direct contact
+with the coolant (no cladding or gas gap) and a constant fuel thermal
+conductivity.
+\item A full rebuild based on an updated write-up,
+\texttt{Annular\_Heat\_Transfer\_Final.pdf}, which reformulates the fuel
+conduction problem using a Kirchhoff transform (allowing a
+temperature-dependent fuel conductivity), and which was then further
+extended --- beyond what that PDF asks for --- to add cladding and gas-gap
+layers on both sides of the fuel, single-phase pressure drop, and
+substantial numerical-robustness work so the solver would converge at
+realistic peak powers rather than only over a narrow, artificially low
+range.
+\end{enumerate}
+
+Both derivation PDFs, independently, contained a sign error in the same
+place (the inner-surface boundary condition of the annular conduction
+problem). Both were caught not by inspection but by a direct numerical
+check: iterating the literal scheme from the PDF and observing that it
+violates energy conservation. This report explains those errors, the fix,
+and the substantial numerical engineering that followed --- most of it
+driven by the fact that the supercritical-water heat transfer correlation
+used throughout (Swenson) has a non-monotone, peaked response near the
+pseudocritical temperature, which is exactly the kind of thing that breaks
+naive fixed-point iteration and naive use of general-purpose root-finders.
+
+This report is a narrative account of what was built and why, not just an
+API reference. Section~\ref{sec:map} maps the codebase. Section~\ref{sec:physics}
+covers the physics model and the two derivation errors found in it.
+Section~\ref{sec:cladding} covers the cladding/gas-gap extension.
+Section~\ref{sec:pressure} covers pressure drop.
+Section~\ref{sec:numerics} is the bulk of the report: the iterative closure
+scheme, why a naive version of it fails, and the sequence of fixes that got
+it working robustly and fast enough for machine-learning training loops.
+Section~\ref{sec:ml} covers the PINN and DeepONet themselves.
+Section~\ref{sec:chronology} is a chronological list of issues encountered
+and how each was resolved. Section~\ref{sec:status} gives the current
+status, defaults, and known limitations.
+
+\section{Codebase Map}
+\label{sec:map}
+
+\begin{longtable}{@{}p{0.32\textwidth}p{0.63\textwidth}@{}}
+\toprule
+\textbf{File} & \textbf{Role} \\
+\midrule
+\endhead
+\texttt{SCA\_PDFs/Annular\_Heat\_Transfer\_Final.pdf} &
+The governing derivation (superseded an earlier two-PDF version). Section 1
+derives the Kirchhoff-transformed annular fuel conduction problem; Section 2
+lays out the DeepONet/PINN plan (Fourier-parameterized power profiles,
+model inputs, closure concept). \\
+\texttt{PinHT.py} &
+Shared pin heat-transfer formulas. New in this session:
+\texttt{Ann\_Theta} (builds the Kirchhoff conductivity integral
+$\Theta[k_f]$), \texttt{Ann\_HT} (closed-form 2$\times$2 solve for the
+radial conduction profile), \texttt{Ann\_qpp} (radial heat flux from that
+solve). Pre-existing: \texttt{htc\_gap} (gas-gap conduction+radiation),
+\texttt{T\_ci} (single-layer cladding conduction, used historically for the
+solid-rod case), \texttt{Cyl\_HT}, \texttt{Bundle} correction factors. \\
+\texttt{Mat\_Models.py} &
+Material property models. New in this session: \texttt{Zircalloy.k(T)},
+which was previously an empty stub (\texttt{return} with nothing). Now the
+MATPRO/FRAPCON correlation for unirradiated Zircaloy-4 thermal
+conductivity. Pre-existing: \texttt{UO2.k\_NFI} (the fuel conductivity
+model used through \texttt{Ann\_Theta}), \texttt{Gas.k} (fill-gas
+conductivity, used for the gas gap). \\
+\texttt{HTC.py} &
+Heat transfer correlations, including \texttt{SCW.Swenson} (supercritical
+water, implicit wall-temperature solve) and the internal helper
+\texttt{\_solve\_Tw\_scw}. Substantially modified in this session --- see
+Section~\ref{sec:numerics} --- to fix a batching bug, add a precomputed
+pseudocritical-temperature shortcut, tunable solve tolerances, a tunable
+fallback-branch scan resolution, and a tunable search window. \\
+\texttt{torchsolve/} &
+A pre-existing, general-purpose batched root-finding package (not written
+in this session) used by \texttt{HTC.py} for implicit wall-temperature
+solves. Its README explicitly names the Swenson correlation's
+pseudocritical peak as its motivating non-monotone-residual use case. \\
+\texttt{Ann\_SCA.py} &
+\textbf{New in this session.} The shared annular-channel physics module:
+geometry, the per-axial-location closure (self-consistent split of the
+generated heat between the two coolant streams, all the way from the
+fuel centerline out through cladding and gas gap to the bulk coolant),
+the axial field solve, and pressure drop. This is the module both ML
+scripts train against. \\
+\texttt{SCA\_Annular\_PINN.py} &
+\textbf{New in this session.} Physics-informed neural network for a single
+case: predicts inner/outer coolant enthalpy as a continuous function of
+axial position, trained by enforcing the energy balance ODE against a
+physics-computed source term. \\
+\texttt{SCA\_Annular\_DeepONet.py} &
+\textbf{New in this session.} DeepONet operator surrogate: learns the map
+from a randomized power-profile shape (branch input) and an axial query
+point (trunk input) to the enthalpy solution, trained on a dataset
+generated by \texttt{Ann\_SCA.solve\_field}. \\
+\texttt{FRICT.py} &
+Pre-existing friction-factor correlations (\texttt{f\_SCW.Filonenko},
+\texttt{f\_SCW.Wu}), used unmodified by the new pressure-drop code. \\
+\texttt{getprop.py}, \texttt{IAPWS/} &
+Pre-existing property library (IAPWS-95 formulation for water/supercritical
+water). Not modified, but its performance characteristics drove a
+significant amount of the numerical work in Section~\ref{sec:numerics}. \\
+\bottomrule
+\end{longtable}
+
+\section{Physics Model}
+\label{sec:physics}
+
+\subsection{Geometry}
+
+The problem is an annular fuel pellet: an inner coolant channel occupies
+$0 \le r < r_i$, the fuel occupies $r_i \le r \le r_o$ with volumetric heat
+generation $q'''(z)$, and an outer coolant channel occupies $r > r_o$
+within a square-pitch unit cell. (Section~\ref{sec:cladding} below adds
+cladding and gas-gap layers between the fuel and each coolant stream ---
+the base derivation in the PDF has the coolant directly wetting the fuel
+surface.)
+
+\subsection{Governing equation and the Kirchhoff transform}
+
+The updated derivation writes the radial heat equation allowing a
+temperature-dependent fuel conductivity $k_f(T)$:
+\begin{equation}
+\frac{1}{r}\frac{d}{dr}\!\left[r\,k_f(T)\,\frac{dT}{dr}\right] = -q'''(z).
+\label{eq:heateq}
+\end{equation}
+Integrating twice, using $\Theta[k_f](T) \equiv \int_0^T k_f(T')\,dT'$ (the
+Kirchhoff transform), collapses the nonlinear problem to one that is
+\emph{linear} in $\Theta$:
+\begin{equation}
+\Theta[k_f](T(r)) = -\frac{q'''(z)}{4}r^2 + C_1 \ln(r) + C_2,
+\label{eq:theta}
+\end{equation}
+with radial heat flux $q''(r) = \frac{q'''(z)}{2}r - \frac{C_1}{r}$ (positive
+in the $+r$ direction).
+
+The scheme's appeal is that $\Theta$ only ever needs to be evaluated
+\emph{forward} (given a temperature, integrate $k_f$ up to it) --- never
+inverted. Given a guessed or known surface temperature at $r_i$ and $r_o$
+(from a flux guess and the local convective coefficient), $\Theta_i =
+\Theta[k_f](T(r_i))$ and $\Theta_o$ are just numbers, and $C_1, C_2$ solve
+in closed form from a $2\times2$ linear system (Cramer's rule):
+\begin{equation}
+C_1 = \frac{\alpha_i - \alpha_o}{\ln(r_i) - \ln(r_o)}, \qquad
+\alpha_j \equiv \Theta_j + \frac{q'''(z)}{4}r_j^2.
+\end{equation}
+This is implemented in \texttt{PinHT.Ann\_HT}, with $\Theta$ itself built
+once as a fast interpolant by \texttt{PinHT.Ann\_Theta} (cumulative
+trapezoidal integration of $k_f(T)$ over a fixed grid) --- see
+\texttt{Ann\_SCA.\_Theta\_UO2}, built at import time from
+\texttt{Mat\_Models.UO2.k\_NFI} (the NFI model for fresh UO$_2$, burnup and
+gadolinia fraction zero).
+
+\subsection{The inner-surface sign error}
+\label{sec:signerror}
+
+The PDF's boundary condition, applied identically at both surfaces, is
+\begin{equation}
+T_{fo}(r_j) = T_{m,j} + \frac{q''_j}{htc_j}, \qquad j \in \{i, o\}.
+\label{eq:bc-wrong}
+\end{equation}
+This is correct at the \emph{outer} surface: the outer coolant sits on the
+$+r$ side of the fuel, so heat flowing outward (positive $q''$ in the
+$+r$-direction convention used throughout) raises the surface temperature
+above the coolant temperature, matching Eq.~\ref{eq:bc-wrong} with a plus
+sign.
+
+At the \emph{inner} surface, the coolant sits on the $-r$ side. Heat
+flowing from the (hotter) fuel into the inner coolant flows in the $-r$
+direction, i.e. it is the \emph{negative} of the $+r$-convention $q''(r_i)$
+used to build $\Theta$. Applying Eq.~\ref{eq:bc-wrong} verbatim at the
+inner surface silently gets this backward.
+
+This was not caught by inspection --- it is an easy sign slip to make, and
+it appeared independently in \emph{both} derivation PDFs used in this
+session, in slightly different notation each time. It was caught by
+building the literal scheme from the PDF as a small numerical iteration
+and checking two invariants that must hold at the true solution regardless
+of the correlation details:
+\begin{itemize}
+\item \textbf{Energy balance}: $q_i + q_o = q'''\!\cdot\!\pi(r_o^2-r_i^2)$
+(all the generated heat must leave through the two surfaces).
+\item \textbf{Physical ordering}: both surface temperatures must exceed
+their respective bulk coolant temperatures (a heat source cannot be colder
+than the sink it is heating).
+\end{itemize}
+Iterating Eq.~\ref{eq:bc-wrong} as written converges to a state where the
+inner wall is \emph{colder} than the inner coolant and the energy balance
+is violated by a large margin. Replacing it with
+\begin{equation}
+T_{fo}(r_i) = T_{m,i} - \frac{q''_i}{htc_i} \qquad \text{(inner surface, minus sign)}
+\label{eq:bc-fixed}
+\end{equation}
+and re-iterating converges to a solution satisfying both invariants exactly
+(verified against an independent \texttt{sympy} solve of the two Robin
+conditions from first principles). This is implemented in
+\texttt{Ann\_SCA.closure} --- see Section~\ref{sec:closure}.
+
+The earlier (first-revision) derivation had the same issue in a different
+but equivalent form: its governing equation was missing a minus sign on
+the source term (positive $q'''$ acted as a heat \emph{sink}, pulling both
+wall temperatures below the coolant), and its Robin boundary condition had
+the same asymmetric-sign problem described above. Both were fixed the same
+way, by direct numerical/energy-balance verification rather than trusting
+the write-up. \texttt{PinHT.py}'s docstrings for \texttt{Ann\_HT} document
+this history for anyone extending the model further.
+
+\section{Cladding and Gas-Gap Extension}
+\label{sec:cladding}
+
+The base derivation (per its own Section 1.1) treats the coolant as
+directly wetting the fuel surface, with a note that the model
+``can generalize to gas gap and cladding by taking $htc = htc_{conv} +
+htc_{clad} + htc_{gap}$'' (a slightly imprecise way of saying: combine the
+three resistances in series). The user asked for this generalization to
+actually be implemented.
+
+\subsection{Geometry}
+
+Given the fuel surfaces $r_i, r_o$, cladding thicknesses $t_{ci}, t_{co}$,
+and gas gaps $\delta_i, \delta_o$, the four cladding radii are:
+\begin{align}
+R_{clad,i}^{OD} &= r_i - \delta_i, &
+R_{clad,i}^{ID} &= R_{clad,i}^{OD} - t_{ci}, \\
+R_{clad,o}^{ID} &= r_o + \delta_o, &
+R_{clad,o}^{OD} &= R_{clad,o}^{ID} + t_{co}.
+\end{align}
+The \emph{coolant-wetted} channel boundaries are now $R_{clad,i}^{ID}$
+(inner channel) and $R_{clad,o}^{OD}$ (outer channel unit cell), not $r_i$
+and $r_o$ directly --- this changes the hydraulic diameter, wetted
+perimeter, and mass flux used by the convective correlation and by
+pressure drop. This is implemented in \texttt{Ann\_SCA.geometry}.
+
+\subsection{Resistance chain}
+
+Since none of the intermediate layers generate heat, the linear heat rate
+$q_i$ (or $q_o$) is constant across the whole chain from the fuel surface
+to the bulk coolant. Each layer's temperature drop is computed explicitly
+given that $q$ and the layer's own coefficient:
+\begin{itemize}
+\item \textbf{Convection} (coolant $\to$ cladding surface): Swenson
+correlation, as before.
+\item \textbf{Cladding conduction}: standard log-conduction,
+$\Delta T = \dfrac{q}{2\pi k_c}\ln\!\dfrac{R^{OD}}{R^{ID}}$, with $k_c$ from
+the newly-implemented \texttt{Mat\_Models.Zircalloy.k(T)} evaluated at the
+layer's current mean temperature.
+\item \textbf{Gas gap}: \texttt{PinHT.htc\_gap} (already existed, combining
+conduction and radiation across the gap), using
+\texttt{Mat\_Models.Gas.k} for the fill gas (helium by default).
+\end{itemize}
+Given the flux $q$ and the bulk coolant temperature $T_b$, the new fuel
+surface temperature is obtained by summing all three resistances:
+$T_{new} = T_b + q\sum R$. This generalizes, and reduces exactly to, the
+bare-fuel-surface closure when $\delta_i = \delta_o = t_{ci} = t_{co} = 0$.
+
+One subtlety caught during implementation: the flux-to-linear-heat-rate
+conversion (multiplying $q''$ by a circumference to get $q$ in W/m) must
+use the \emph{fuel} surface circumference ($2\pi r_i$, $2\pi r_o$), not
+the channel's wetted perimeter (now at the cladding radii). An early
+version of the code reused the same variable for both, which produced a
+large, silent energy-balance error (caught by the same energy-balance
+check described in Section~\ref{sec:signerror}).
+
+\subsection{Zircaloy conductivity}
+
+\texttt{Mat\_Models.py} had a \texttt{Zircalloy} class with an empty
+\texttt{k(T)} method (just \texttt{return}, no body) prior to this session.
+It now implements the standard MATPRO/FRAPCON correlation for
+as-received Zircaloy-4:
+\begin{equation}
+k_c(T) = 7.51 + 2.09\times10^{-2}T - 1.45\times10^{-5}T^2 +
+7.67\times10^{-9}T^3 \quad [\mathrm{W/m\text{-}K}],\ T\ \mathrm{in\ K},
+\end{equation}
+valid up to roughly the alpha-beta phase transition ($\sim$2098~K). Checked
+against literature values (13--23~W/m-K over typical cladding operating
+temperatures).
+
+\section{Pressure Drop}
+\label{sec:pressure}
+
+Per explicit request, single-phase axial pressure drop is computed for
+both channels, using the same momentum balance as the existing
+cylindrical-pin solver (\texttt{SCA.py}):
+\begin{equation}
+\Delta P = \underbrace{f\,\frac{dz\,G^2\,\bar{v}}{2D}}_{\text{friction}}
+\;+\; \underbrace{g\,\frac{dz}{\bar{v}}}_{\text{gravity}}
+\;+\; \underbrace{G^2(v - v_{prev})}_{\text{acceleration}},
+\end{equation}
+with $\bar v$ the cell-averaged specific volume. The friction correlation
+differs by channel, per the specific request:
+\begin{itemize}
+\item \textbf{Inner channel} (plain circular tube): Filonenko
+(\texttt{FRICT.f\_SCW.Filonenko}).
+\item \textbf{Outer channel} (rod-bundle subchannel): Wu, a correlation
+specifically fitted for supercritical water in rod bundles
+(\texttt{FRICT.f\_SCW.Wu}).
+\end{itemize}
+Both correlations already existed in \texttt{FRICT.py}; only the
+pressure-drop assembly (\texttt{Ann\_SCA.pressure\_drop}) is new. It is
+computed once, after the thermal field has converged --- the single-phase
+momentum balance does not feed back into the thermal solve, so no outer
+iteration is needed for it.
+
+\section{Numerical Method}
+\label{sec:numerics}
+
+This section is the bulk of the engineering effort in this session, and
+the part most worth understanding if extending this code further. The
+short version: the property library (\texttt{getprop.py} /
+\texttt{IAPWS/}) has a large, roughly constant per-call overhead
+independent of how many points are evaluated at once, which makes a
+literal cell-by-cell axial march computationally prohibitive; and the
+Swenson correlation's non-monotone (pseudocritical-peaked) response makes
+naive fixed-point iteration fail above a fairly low power, in a way that
+is specific to this class of correlation and is exactly what the
+pre-existing \texttt{torchsolve} package was built to handle --- but using
+it naively is also too slow for a training loop, so getting good
+performance took several rounds of profiling and targeted fixes.
+
+\subsection{Property-library call overhead}
+
+Early profiling showed a single scalar call to the property library costs
+$\sim$0.1--0.2~s, dominated by fixed overhead (tensor construction, nested
+Newton iterations) rather than the actual computation --- and, critically,
+a \emph{batched} call over 100 points costs almost the same
+($\sim$0.1~s). This has two consequences used throughout:
+\begin{enumerate}
+\item Never call the property library in a per-axial-cell Python loop:
+batch across all axial points and pay the fixed overhead once per
+\emph{iteration}, not once per \emph{cell per iteration}.
+\item \texttt{IAPWS\_95.T\_hp} (enthalpy $\to$ temperature) is
+\emph{extremely} conservative --- 60 outer bisections around a
+60-bisection-plus-6-Newton density solve each, roughly 3960 Helmholtz
+evaluations per call, aimed at safety-analysis precision. That precision
+is unnecessary for a training loop that calls this thousands of times.
+\texttt{Ann\_SCA.\_T\_hp\_fast} reimplements the same bisection with far
+fewer iterations (12 outer, 16+3 inner), trading exactness for roughly
+15$\times$ the speed at $\sim$0.05~K worst-case error.
+\end{enumerate}
+
+\subsection{From a literal march to a vectorized field solve}
+
+The original marching scheme (guess flux at $z_j$, solve, advance to
+$z_{j+1}$ using the result) is a strictly \emph{feed-forward} recursion:
+$h[j]$ depends only on earlier cells. A literal Python loop over $N$ cells,
+each requiring several property-library calls, is $O(N)$ property calls
+per outer iteration --- for $N\sim100$ and a handful of outer iterations,
+minutes per case, which is not viable when both ML scripts need dozens to
+hundreds of such solves.
+
+\texttt{Ann\_SCA.solve\_field} instead alternates a single vectorized march
+over the whole $z$-array (using the previous iteration's flux everywhere
+at once) with a single vectorized \texttt{closure()} call over the whole
+array, repeating (``outer-iterating'') until the enthalpy field stops
+moving. This reproduces the same feed-forward discretization's answer while
+turning $O(N \times \text{iters})$ scalar property calls into
+$O(\text{iters})$ batched ones.
+
+\subsection{The closure iteration}
+\label{sec:closure}
+
+\texttt{Ann\_SCA.closure} is the self-consistent solve, at every axial
+location simultaneously, of: the fuel conduction problem (given the
+current guessed fuel-surface temperatures, via \texttt{Ann\_HT}), the
+resistance chain out through cladding and gas gap
+(Section~\ref{sec:cladding}), and the convective correlation at the
+coolant-wetted surface --- closing the loop back to a new fuel-surface
+temperature guess.
+
+\paragraph{Why a plain fixed point isn't enough.} The Swenson correlation's
+Nusselt number peaks at the pseudocritical temperature ($\sim$658~K at
+25~MPa here). \texttt{torchsolve}'s own README names this correlation by
+name as its motivating case for non-monotone root-finding: depending on
+the target flux, the equation $htc(T_w)(T_w - T_b) = q$ can have zero, one,
+or two roots. A simple ``guess a trial wall temperature, evaluate the
+correlation explicitly, update the guess'' fixed point (what the closure
+started with) is only a contraction --- i.e. only converges --- below some
+power-dependent threshold. Above it, the iteration locks into a small
+limit cycle straddling the peak rather than diverging outright, which is
+easy to mistake for ``basically converged'' if the only check performed is
+the (always-satisfied, algebraic) energy balance rather than the actual
+iterate-to-iterate residual.
+
+\paragraph{Two-phase design.} The closure therefore runs in two phases:
+\begin{enumerate}
+\item \textbf{Fast phase} (explicit, guessed trial $T_w$,
+\texttt{HTC.SCW.Swenson\_dT}): cheap, and a genuine contraction for most
+of the practical operating range (up to roughly 5--8~kW/m peak LHGR for
+the default geometry) --- most calls terminate here.
+\item \textbf{Robust phase} (an actual root-find on the wall temperature
+given the flux, \texttt{HTC.SCW.Swenson}, torchsolve-backed): only run if
+phase 1 does not converge within its iteration budget, warm-started from
+phase 1's (possibly-still-oscillating-but-close) result. This removes the
+power ceiling entirely, at a materially higher per-call cost, so it is
+used only when needed rather than throughout.
+\end{enumerate}
+This combination is what makes the closure both correct at high power
+\emph{and} fast enough to call every PINN training step and once per
+DeepONet-dataset sample.
+
+\subsection{\texttt{torchsolve} / \texttt{HTC.py} fixes}
+
+Making the robust phase practical required several fixes and additions to
+the pre-existing solver plumbing, all backward-compatible (existing
+scalar callers are unaffected):
+
+\begin{itemize}
+\item \textbf{Batching bug}: \texttt{HTC.\_solve\_Tw\_scw} unconditionally
+did \texttt{return float(res.root)}, which only works for a single-element
+result. Any batched (multi-element) call crashed. Fixed to combine,
+per-element, whichever of the primary bracket or the pseudocritical-branch
+fallback converged for that element (\texttt{torch.where} on the
+convergence masks), rather than an all-or-nothing check across the whole
+batch.
+\item \textbf{Precomputed pseudocritical anchor}: the fallback path calls
+\texttt{find\_extremum} (a 33-point coarse scan plus up to 100
+golden-section iterations) to locate the peak, purely to hand it to
+\texttt{bracket\_from\_anchor}. Since the pseudocritical temperature at a
+fixed pressure is cheap to compute once (where $c_p(T)$ peaks, a plain
+NumPy scan done at import time --- \texttt{Ann\_SCA.\_find\_Tpc}), an
+optional \texttt{anchor} parameter was added to skip \texttt{find\_extremum}
+entirely when the caller already knows it.
+\item \textbf{Tunable tolerances and scan resolution}: added
+\texttt{tol\_kw} (override the solve tolerances) and \texttt{branch\_n}
+(override the fallback bracket's scan-point count, default 33) parameters.
+The closure's own outer Picard loop provides further refinement, so the
+robust phase does not need extremely tight per-call tolerances --- loosening
+them (and reducing \texttt{branch\_n} from 33 to 7) cut the fallback path's
+cost roughly in half.
+\item \textbf{Widened search window}: \texttt{Swenson}'s implicit solve
+originally hardcoded a $[T_b, T_b+200\,\mathrm{K}]$ search window. At high
+flux the correlation genuinely needs more than 200~K of superheat to
+satisfy the target --- this is a property of the search window, not of the
+correlation itself, so an optional \texttt{hi} parameter was added; the
+closure calls it with $T_b + 500$~K, extending the verified-working power
+range from $\sim$24~kW/m to $\sim$40~kW/m peak LHGR.
+\end{itemize}
+
+\subsection{Robustness for training}
+
+During early PINN training, the network's essentially-random initial
+output can produce enthalpy guesses far outside any physical range, which
+propagates into bulk temperatures and intermediate wall/cladding/gap
+temperatures the closure cannot solve for (including, in one observed
+failure, a transient state where the fuel would need to receive heat
+\emph{from} the coolant --- a negative flux target the Swenson solve has
+no solution for, since it only searches temperatures above the bulk).
+Two defenses were added:
+\begin{itemize}
+\item Bulk temperatures are clipped to a generous but physically sane band
+(400--900~K) before being passed into the closure.
+\item The PINN's \texttt{physics\_target} function catches any solver
+failure and falls back to the last successfully-computed source term (or,
+on the very first call, a simple flow-capacity split of the total power)
+rather than crashing the training run. A similar retry-on-failure loop was
+added to the DeepONet's dataset generator, directly per the plan PDF's own
+suggestion (Section 2.3 there): ``make data gen routines that toss away
+bad or unconverged inputs.''
+\end{itemize}
+
+\section{Machine Learning Scripts}
+\label{sec:ml}
+
+\subsection{PINN (\texttt{SCA\_Annular\_PINN.py})}
+
+A single-case solve: one MLP maps the axial coordinate $z$ to the inner and
+outer coolant enthalpies $h_i(z), h_o(z)$. The inlet condition is a
+\emph{hard} constraint (the network output is multiplied by $(z - z_{min})$
+and added to the known inlet enthalpy, so $h(z_{min}) = h_{in}$ exactly by
+construction rather than as a soft loss term). Training minimizes the
+residual of the energy balance ODE, $dh/dz = q'(z)/\dot m$, evaluated via
+autograd on the network's own output; the source term $q'_i(z), q'_o(z)$ is
+supplied every step by \texttt{Ann\_SCA.closure}, called on the
+\emph{detached} current enthalpy prediction.
+
+The property library is not autograd-friendly through an implicit wall
+temperature (\texttt{torchsolve}'s own README states this directly: "no
+implicit-function-theorem gradients"), so this is not a PINN that
+differentiates through the physics solver --- it is one that regresses its
+own derivative against a semi-analytic source recomputed from its current
+(detached) state every step, a standard pattern for this class of problem.
+Optimized with SOAP, followed by a short LBFGS refinement phase (with the
+physics target frozen for a few steps at a time, since LBFGS's line search
+would otherwise re-invoke the expensive closure repeatedly per step).
+
+\subsection{DeepONet (\texttt{SCA\_Annular\_DeepONet.py})}
+
+An operator surrogate: the branch network takes a sampled power-profile
+shape (at fixed sensor points along $z$), the trunk network takes a query
+point $z^*$, and their combination (a dot product, matching the classical
+DeepONet architecture) predicts the enthalpy rise at that point, for both
+channels. Per the plan PDF, the power profile is drawn from a family of
+strictly-positive, periodic, Fourier-parameterized shapes:
+\begin{equation}
+F_q(x) = \left(\sum_{n=1}^N \left[a_n\cos(\pi n x) + b_n\sin(\pi n x)\right]\right)^2 + \phi_q,
+\end{equation}
+normalized numerically (rather than via the plan's closed-form Parseval
+identity, which --- like the sign errors above --- did not survive a
+direct check) so any coefficient draw gives a profile with a specified
+average LHGR. Ground truth for training comes from
+\texttt{Ann\_SCA.solve\_field} run on each sampled profile.
+
+\section{Chronology of Issues and Fixes}
+\label{sec:chronology}
+
+\begin{longtable}{@{}p{0.30\textwidth}p{0.65\textwidth}@{}}
+\toprule
+\textbf{Issue} & \textbf{Resolution} \\
+\midrule
+\endhead
+Sign error in the original PDF's governing equation (source term acted as
+a sink) and Robin BC (inner surface reused the outer surface's sign) &
+Re-derived from first principles with \texttt{sympy}; verified via energy
+balance. Documented in \texttt{PinHT.Ann\_HT}'s docstring. \\
+Same class of sign error recurred in the \emph{updated} PDF's inner-surface
+BC & Caught the same way: iterate the literal scheme, check energy balance
+and physical temperature ordering. Fixed with the same minus-sign
+correction, restated for the Kirchhoff-transform formulation. \\
+Naive cell-by-cell march computationally prohibitive (property-library
+fixed overhead $\times$ 400 cells $\times$ iterations) & Reformulated as a
+vectorized whole-field Picard sweep (\texttt{solve\_field}); reduced
+\texttt{IAPWS\_95.T\_hp}'s iteration budget for a $\sim$15$\times$ speedup
+at negligible accuracy cost (\texttt{\_T\_hp\_fast}). \\
+Flux-to-LHGR conversion used the channel's wetted perimeter instead of the
+fuel surface's circumference, once cladding moved the channel boundary &
+Introduced separate \texttt{Per\_fuel\_i/o} and \texttt{Per\_clad\_i/o}
+quantities; caught via the (previously reliable) energy-balance check
+showing a large, non-decreasing error. \\
+\texttt{HTC.\_solve\_Tw\_scw} crashed on any batched (multi-element) call &
+Fixed the unconditional \texttt{float(res.root)} to combine per-element
+results from the primary and fallback solves. \\
+Fallback (pseudocritical-branch) solve path far too slow for a repeated
+training-loop call ($\sim$13~s/call) & Precomputed pseudocritical anchor
+(skips \texttt{find\_extremum}); loosened tolerances; reduced fallback scan
+resolution. Brought it down to $\sim$2--5~s/call. \\
+Even with a faster fallback, calling the robust solve \emph{every} outer
+iteration was still too slow for training ($\sim$20--28~s/closure call) &
+Two-phase design (Section~\ref{sec:closure}): cheap explicit phase first,
+robust phase only if that doesn't converge, warm-started from it. \\
+Robust phase triggering even at low power that should have converged in
+the fast phase alone & Traced to \texttt{relax=0.5} being an
+under-damped choice for this particular coupled (fuel+clad+gap) system ---
+it stalls in a small limit cycle rather than diverging, which looked like
+convergence when checked only via the (trivially-satisfied) energy
+balance. Reverted to \texttt{relax=0.4}, confirmed against the actual
+iterate-to-iterate residual. \\
+High-power cases ($\gtrsim$26~kW/m) failing with ``no bracket'' even in the
+robust phase & The hardcoded $T_b+200$~K search window was too narrow at
+high flux, not a real absence of solution. Widened to $T_b+500$~K,
+verified working up to 40~kW/m. \\
+PINN training crashing on NaN/solver failure from the untrained network's
+wild initial enthalpy guesses & Clipped bulk temperatures to a sane range
+before the closure call; added a try/except fallback to the last
+successful (or a simple flow-split) source term. \\
+DeepONet data generation vulnerable to the same class of failure on a
+randomly-sampled power profile & Added a redraw-on-failure loop in
+\texttt{gen\_dataset}, per the plan PDF's own stated intent. \\
+\bottomrule
+\end{longtable}
+
+\section{Current Status and Known Limitations}
+\label{sec:status}
+
+\begin{itemize}
+\item \texttt{Ann\_SCA.closure} is verified (exact energy balance, and
+result stability under additional robust-phase iterations) from low power
+up through 40~kW/m peak LHGR for the default geometry in
+\texttt{Ann\_SCA.Inputs\_ann}. Above roughly 45~kW/m the search window
+would need widening further --- this is a tunable parameter, not a hard
+limit.
+\item Typical per-call cost: a few seconds when the fast phase alone
+converges (below $\sim$5--8~kW/m peak for the default geometry), roughly
+15--25~s when the robust phase is needed. This directly sets the runtime
+of both training scripts --- expect on the order of tens of minutes for a
+full PINN training run, and a comparable-or-longer time for DeepONet
+dataset generation, depending on \texttt{Nfunc} and the sampled power
+range.
+\item Not implemented (explicitly framed as exploratory/future work in the
+plan PDF's Section 2.3, not requested for this pass): burnup/fluence/dpa
+inputs, fuel swelling and thermal expansion, a cladding conductivity model
+that accounts for irradiation, and the iterative solve for splitting a
+given total inlet mass flux between the two channels to equalize pressure
+drop.
+\item Both ML scripts save their final plots as PNGs
+(\texttt{SCA\_Annular\_PINN\_results.png},
+\texttt{SCA\_Annular\_DeepONet\_results.png}) in addition to displaying
+them, and print a comparison against \texttt{Ann\_SCA.solve\_field}'s
+reference solution for the same case.
+\end{itemize}
+
+\end{document}

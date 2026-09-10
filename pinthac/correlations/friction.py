@@ -1,5 +1,5 @@
 import scipy
-from Arr_Compat import compat
+from pinthac.backend import lib as compat
 
 
 

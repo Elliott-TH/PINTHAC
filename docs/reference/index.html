@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Elliott Hirko — Nuclear Engineering</title>
+<meta name="description" content="Elliott Hirko — computational nuclear engineering: physics-informed neural networks, GPU-accelerated thermal-hydraulics, and fusion hardware." />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<div class="shell">
+
+  <!-- ============================== SIDEBAR ============================== -->
+  <aside class="sidebar">
+    <div class="sidebar-top">
+      <p class="name">Elliott Hirko</p>
+      <p class="role">Nuclear engineering student — physics-informed ML for reactor thermal-hydraulics</p>
+
+      <!-- Reactor cross-section mark, purely decorative, ties to subject matter -->
+      <svg class="reactor-mark" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <circle cx="60" cy="60" r="55" stroke="#232a35" stroke-width="1"/>
+        <circle cx="60" cy="60" r="40" stroke="#232a35" stroke-width="1"/>
+        <circle cx="60" cy="60" r="25" stroke="#6fd3f7" stroke-width="1" opacity="0.55"/>
+        <circle cx="60" cy="60" r="2.5" fill="#6fd3f7"/>
+        <line x1="60" y1="5" x2="60" y2="20" stroke="#232a35" stroke-width="1"/>
+        <line x1="60" y1="100" x2="60" y2="115" stroke="#232a35" stroke-width="1"/>
+        <line x1="5" y1="60" x2="20" y2="60" stroke="#232a35" stroke-width="1"/>
+        <line x1="100" y1="60" x2="115" y2="60" stroke="#232a35" stroke-width="1"/>
+      </svg>
+
+      <nav class="sidebar-nav">
+        <ul>
+          <li><a href="#about" class="active"><span class="tick"></span>About</a></li>
+          <li><a href="#research"><span class="tick"></span>Research</a></li>
+          <li><a href="#projects"><span class="tick"></span>Projects</a></li>
+          <li><a href="#skills"><span class="tick"></span>Skills</a></li>
+          <li><a href="#timeline"><span class="tick"></span>Experience</a></li>
+          <li><a href="#contact"><span class="tick"></span>Contact</a></li>
+        </ul>
+      </nav>
+    </div>
+
+    <div class="sidebar-bottom">
+      <a href="https://github.com/YOUR_GITHUB" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://www.linkedin.com/in/elliott-hirko-0941b22aa" target="_blank" rel="noopener">LinkedIn</a>
+      <a href="mailto:elliott.hirko@ufl.edu">Email</a>
+    </div>
+  </aside>
+
+  <!-- ============================== MAIN ============================== -->
+  <main>
+
+    <!-- ---------- HERO ---------- -->
+    <section class="hero" id="about">
+      <p class="kicker">Gainesville, Florida — University of Florida</p>
+      <h1>Building the computational tools that model how reactors move heat.</h1>
+      <p>
+        I'm an undergraduate nuclear engineer working at the intersection of thermal-hydraulics,
+        GPU computing, and physics-informed machine learning — writing differentiable property
+        libraries, neural surrogates, and solvers that speed up reactor simulation, alongside
+        hands-on work building a fusion device from the ground up.
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="assets/Elliott_Hirko_CV.pdf" target="_blank" rel="noopener">Download CV</a>
+        <a class="btn btn-ghost" href="#projects">View projects</a>
+      </div>
+    </section>
+
+    <!-- ---------- RESEARCH ---------- -->
+    <section id="research">
+      <div class="section-label">
+        <span class="index">01</span>
+        <h2>Research</h2>
+        <span class="rule"></span>
+      </div>
+
+      <div class="research-panel">
+        <span class="lab-tag">McDevitt Group — University of Florida — Jan 2025 – Current</span>
+        <h3>Physics-informed neural networks for runaway electron modeling in tokamaks</h3>
+        <div class="prose">
+          <p>
+            Working under <strong>Dr. Christopher McDevitt</strong>, I build physics-informed
+            neural network solvers for the adjoint drift-kinetic equation, modeling how magnetic
+            trapping affects the probability of electron runaway in tokamak fusion reactors —
+            a key concern for the safety and control of future fusion power plants.
+          </p>
+          <p>
+            <!--
+              PROMPT FOR CLAUDE CODE (run inside the research repo):
+              "Write a plain-language, 3-paragraph explanation of what runaway electrons are,
+              why the adjoint drift-kinetic equation matters for predicting them, and what a
+              physics-informed neural network solver adds over classical numerical methods.
+              Audience: a technically literate person who isn't a plasma physicist. Also generate
+              one simple explanatory diagram (SVG or matplotlib) showing the adjoint solve
+              pipeline, and save it as assets/reactor/adjoint-diagram.svg"
+            -->
+            Replace this paragraph with that generated explanation once you have it — this is the
+            hardest project on the page to make legible, so it's worth the extra pass.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- PROJECTS ---------- -->
+    <section id="projects">
+      <div class="section-label">
+        <span class="index">02</span>
+        <h2>Projects</h2>
+        <span class="rule"></span>
+      </div>
+
+      <!-- Project: GPU IAPWS-95 -->
+      <article class="panel">
+        <div class="panel-head">
+          <h3>GPU-Accelerated IAPWS-95 Steam/Water Property Library</h3>
+          <span class="panel-stat">36×+ speedup</span>
+        </div>
+        <span class="panel-period">February 2026</span>
+        <div class="tag-row">
+          <span class="tag">PyTorch</span>
+          <span class="tag">Autograd</span>
+          <span class="tag">GPU Computing</span>
+          <span class="tag">Thermal-Hydraulics</span>
+        </div>
+
+        <!--
+          PANEL MEDIA — drop a benchmark plot here once generated.
+          PROMPT FOR CLAUDE CODE (run inside this repo):
+          "Generate a log-log plot comparing GPU vs CPU-based IAPWS-95 property lookup
+          runtime across increasing grid sizes (e.g. 10^2 to 10^7 points). Style: dark
+          background (#0a0d12), light gridlines, accent color #6fd3f7 for the GPU line
+          and muted grey (#8b93a1) for the CPU line, no title text baked into the image
+          (caption goes in HTML). Save as SVG to assets/projects/iapws95-benchmark.svg.
+          Also generate a second plot validating autograd-derived property derivatives
+          against finite-difference reference values, same style, saved as
+          assets/projects/iapws95-derivative-validation.svg"
+        -->
+        <figure class="panel-media">
+          <!-- <img src="assets/projects/iapws95-benchmark.svg" alt="GPU vs CPU runtime benchmark, log-log scale" /> -->
+          <figcaption>Runtime benchmark: GPU vs CPU property evaluation across grid size — add plot here</figcaption>
+        </figure>
+
+        <ul>
+          <li>Rebuilt the IAPWS-95 water/steam property formulation as a fully differentiable PyTorch library, exposing property derivatives via autograd instead of finite-difference approximations</li>
+          <li>Achieved 36×+ speedup over existing CPU-based property libraries by vectorizing evaluation across GPU tensors, enabling property lookups over entire spatial/temporal simulation grids in a single call</li>
+          <li>Designed as a drop-in differentiable backend for gradient-based thermal-hydraulic optimization and neural-network surrogate training</li>
+        </ul>
+        <div class="panel-links">
+          <a href="#" target="_blank" rel="noopener">Repository →</a>
+        </div>
+      </article>
+
+      <!-- Project: Liquid Metal Property Library -->
+      <article class="panel">
+        <div class="panel-head">
+          <h3>Liquid Metal Thermophysical Property Library</h3>
+          <span class="panel-stat">Na · Pb · LBE</span>
+        </div>
+        <span class="panel-period">June 2026</span>
+        <div class="tag-row">
+          <span class="tag">Python</span>
+          <span class="tag">PyTorch</span>
+          <span class="tag">Uncertainty Quantification</span>
+          <span class="tag">Thermal-Hydraulics</span>
+        </div>
+
+        <!--
+          PROMPT FOR CLAUDE CODE:
+          "Generate a plot of one representative property (e.g. thermal conductivity)
+          vs. temperature for sodium, lead, and LBE, with shaded Monte Carlo uncertainty
+          bands from the tracked model-form uncertainty. Dark background matching
+          #0a0d12, three distinct but muted line colors plus the #6fd3f7 accent for
+          one highlighted series. Save as assets/projects/liquid-metal-uncertainty.svg"
+        -->
+        <figure class="panel-media">
+          <!-- <img src="assets/projects/liquid-metal-uncertainty.svg" alt="Property uncertainty bands for sodium, lead, and LBE" /> -->
+          <figcaption>Property uncertainty bands (Monte Carlo propagated) — add plot here</figcaption>
+        </figure>
+
+        <ul>
+          <li>Built a PyTorch-compatible library computing fluid and transport properties of liquid sodium, lead, and lead-bismuth eutectic (LBE) — the primary coolant candidates for Generation IV fast reactors</li>
+          <li>Implemented multiple literature-published correlations per property with tracked model-form uncertainty, enabling Monte Carlo error propagation in downstream thermal-hydraulic codes</li>
+          <li>Built to interoperate directly with the IAPWS-95 GPU library and the group's single-channel analysis codes, forming a shared property backbone across projects</li>
+        </ul>
+        <div class="panel-links">
+          <a href="#" target="_blank" rel="noopener">Repository →</a>
+        </div>
+      </article>
+
+      <!-- Project: Single-Channel Analysis Suite -->
+      <article class="panel">
+        <div class="panel-head">
+          <h3>Single-Channel Analysis Suite: FVM, FD &amp; Neural Surrogate Solvers</h3>
+          <span class="panel-stat">10+ inputs → real-time profile</span>
+        </div>
+        <span class="panel-period">October 2025 – Current</span>
+        <div class="tag-row">
+          <span class="tag">Python</span>
+          <span class="tag">PyTorch</span>
+          <span class="tag">Reactor Thermal-Hydraulics</span>
+          <span class="tag">Neural Operators</span>
+        </div>
+
+        <!--
+          PROMPT FOR CLAUDE CODE:
+          "Plot the DeepONet surrogate's predicted axial fuel-pin temperature profile
+          against the ground-truth iterative FVM solve, for 2-3 representative operating
+          points, on one chart. Same dark styling. Also generate a second small chart:
+          inference wall-clock time (surrogate forward pass vs iterative solver) as a
+          bar comparison. Save both to assets/projects/sca-surrogate-validation.svg and
+          assets/projects/sca-inference-speed.svg"
+        -->
+        <figure class="panel-media">
+          <!-- <img src="assets/projects/sca-surrogate-validation.svg" alt="DeepONet surrogate vs ground-truth axial temperature profile" /> -->
+          <figcaption>Surrogate vs iterative-solve axial temperature profile — add plot here</figcaption>
+        </figure>
+
+        <ul>
+          <li>Developed finite-volume single-channel analysis (SCA) codes with two-phase correlations to model PWR and BWR fuel-pin heat transfer, and extended the formulation to annular fuel geometry</li>
+          <li>Wrote finite-difference and physics-informed neural network (PINN) solvers for transient single-channel analysis</li>
+          <li>Trained a DeepONet surrogate that returns the full axial thermal profile of a fuel pin in real time from 10+ operating inputs and an arbitrary axial heating profile, replacing iterative solves with a single forward pass</li>
+        </ul>
+        <div class="panel-links">
+          <a href="#" target="_blank" rel="noopener">Repository →</a>
+        </div>
+      </article>
+
+      <!-- Project: IEC Fusion Reactor -->
+      <article class="panel">
+        <div class="panel-head">
+          <h3>Inertial Electrostatic Confinement (IEC) Fusion Reactor</h3>
+          <span class="panel-stat">In progress</span>
+        </div>
+        <span class="panel-period">July 2022 – Current</span>
+        <div class="tag-row">
+          <span class="tag">High Vacuum</span>
+          <span class="tag">High Voltage</span>
+          <span class="tag">Radiation Detection</span>
+          <span class="tag">Python</span>
+        </div>
+
+        <!--
+          NO CODE PROMPT NEEDED HERE — this project needs real photos, not generated plots.
+          Recommended shots: full vacuum chamber assembly, ConFlat/KF flange detail,
+          the diffusion-pump control stand, He-3 detector setup, any glow-discharge
+          operation photo. Save to assets/reactor/ and swap in below. Consider a small
+          3-4 image gallery if you have enough good shots — duplicate the <figure> block.
+        -->
+        <figure class="panel-media">
+          <!-- <img src="assets/reactor/iec-chamber.jpg" alt="IEC fusion reactor vacuum chamber assembly" /> -->
+          <figcaption>Vacuum chamber assembly — add photo here</figcaption>
+        </figure>
+
+        <ul>
+          <li>Designing and constructing a Farnsworth-Hirsch IEC fusion reactor, including a high-vacuum chamber system built from ConFlat/KF flanges and Viton bell-jar interfaces</li>
+          <li>Designed and built a dedicated diffusion-pump control stand to operate the high-vacuum system</li>
+          <li>Instrumented the device with Ludlum survey meters and a He-3 detector for radiation/neutron measurement, and developed Python models to predict device performance</li>
+        </ul>
+      </article>
+
+      <!-- Project: PINTHAC -->
+      <article class="panel">
+        <div class="panel-head">
+          <h3>Physics Informed Nuclear Thermal-Hydraulic Analysis Code (PINTHAC)</h3>
+          <span class="panel-stat">In progress</span>
+        </div>
+        <span class="panel-period">September 2025 – Current</span>
+        <div class="tag-row">
+          <span class="tag">Python</span>
+          <span class="tag">Thermal-Hydraulics</span>
+          <span class="tag">Data Analysis</span>
+        </div>
+
+        <!--
+          PROMPT FOR CLAUDE CODE:
+          "Generate a simple architecture diagram (Mermaid or hand-drawn-style SVG)
+          showing PINTHAC's module structure and how it imports/depends on the
+          IAPWS-95 GPU library and the liquid-metal property library as shared
+          backends. Keep it minimal — boxes and arrows, dark background, accent
+          color #6fd3f7 for PINTHAC's own modules and muted grey for external deps.
+          Save as assets/projects/pinthac-architecture.svg"
+        -->
+        <figure class="panel-media">
+          <!-- <img src="assets/projects/pinthac-architecture.svg" alt="PINTHAC module architecture diagram" /> -->
+          <figcaption>Module architecture — add diagram here</figcaption>
+        </figure>
+
+        <p>
+          Building a Python library unifying various heat transfer models, machine learning
+          libraries, and GPU-acceleration methods — enabling efficient low-level implementations
+          of simple system analysis codes as well as routines for generating neural surrogates.
+        </p>
+        <div class="panel-links">
+          <a href="#" target="_blank" rel="noopener">Repository →</a>
+        </div>
+      </article>
+
+    </section>
+
+    <!-- ---------- SKILLS ---------- -->
+    <section id="skills">
+      <div class="section-label">
+        <span class="index">03</span>
+        <h2>Skills</h2>
+        <span class="rule"></span>
+      </div>
+
+      <div class="skills-grid">
+        <div class="skill-group">
+          <h4>Programming</h4>
+          <p>Python, Engineering Equation Solver (EES), OpenMC, LaTeX, moderate experience in Fortran and C</p>
+        </div>
+        <div class="skill-group">
+          <h4>Machine learning</h4>
+          <p>Physics-informed neural networks, neural operators (DeepONet), autograd-based differentiable simulation in PyTorch</p>
+        </div>
+        <div class="skill-group">
+          <h4>Scientific writing</h4>
+          <p>Technical procedures, data compilation, and interpretation of results for scientific reports</p>
+        </div>
+        <div class="skill-group">
+          <h4>Lab &amp; analytical equipment</h4>
+          <p>Nicolet iS5 FTIR, standard spectrophotometers, Nanalysis benchtop NMR, gamma spectrometers (NaI(Tl) and HPGe), standard lab equipment, preventative maintenance</p>
+        </div>
+        <div class="skill-group">
+          <h4>Fabrication</h4>
+          <p>Elementary lathe and milling machine operation, basic TIG welding</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- EXPERIENCE / TIMELINE ---------- -->
+    <section id="timeline">
+      <div class="section-label">
+        <span class="index">04</span>
+        <h2>Experience &amp; awards</h2>
+        <span class="rule"></span>
+      </div>
+
+      <div class="timeline">
+        <div class="timeline-item">
+          <span class="when">Jan 2025 – Current</span>
+          <h4>Undergraduate Research Assistant</h4>
+          <p class="where">University of Florida — Gainesville, FL</p>
+          <p class="detail">Physics-informed neural networks for electron runaway modeling in tokamak fusion reactors, under Dr. Christopher McDevitt.</p>
+        </div>
+
+        <div class="timeline-item">
+          <span class="when">Feb 2022 – Dec 2023</span>
+          <h4>Chemistry Lab Assistant</h4>
+          <p class="where">Santa Fe College — Gainesville, FL</p>
+          <p class="detail">Safety management for 50+ students in a dynamic lab environment; equipment setup, maintenance, and inventory.</p>
+        </div>
+
+        <div class="timeline-item award">
+          <span class="when">2024 – Current</span>
+          <h4>Dean's List</h4>
+          <p class="where">UF Wertheim Department of Engineering</p>
+        </div>
+
+        <div class="timeline-item award">
+          <span class="when">2023</span>
+          <h4>US National Chemistry Olympiad Qualifier</h4>
+          <p class="where">American Chemistry Society</p>
+        </div>
+
+        <div class="timeline-item award">
+          <span class="when">2023</span>
+          <h4>MIT THINK Program Finalist</h4>
+          <p class="where">Massachusetts Institute of Technology — $1,000 funding and mentorship for cellulose stereolithography research</p>
+        </div>
+
+        <div class="timeline-item award">
+          <span class="when">2023</span>
+          <h4>Outstanding Innovation in STEM Award</h4>
+          <p class="where">Santa Fe College</p>
+        </div>
+
+        <div class="timeline-item award">
+          <span class="when">2022 – 2023</span>
+          <h4>1st &amp; 3rd place, ILR Research Exhibition</h4>
+          <p class="where">Institute for Learning in Retirement at Oak Hammock, Santa Fe College</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- CONTACT ---------- -->
+    <section id="contact">
+      <div class="section-label">
+        <span class="index">05</span>
+        <h2>Contact</h2>
+        <span class="rule"></span>
+      </div>
+
+      <div class="prose">
+        <p>Reach out about research, internships, or collaboration.</p>
+      </div>
+      <div class="contact-row">
+        <a class="btn btn-primary" href="mailto:elliott.hirko@ufl.edu">elliott.hirko@ufl.edu</a>
+        <a class="btn btn-ghost" href="https://www.linkedin.com/in/elliott-hirko-0941b22aa" target="_blank" rel="noopener">LinkedIn</a>
+        <a class="btn btn-ghost" href="https://github.com/YOUR_GITHUB" target="_blank" rel="noopener">GitHub</a>
+      </div>
+    </section>
+
+    <footer class="page-footer">
+      Elliott Hirko — Gainesville, Florida — built and deployed on GitHub Pages
+    </footer>
+
+  </main>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>

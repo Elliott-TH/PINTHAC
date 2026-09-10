@@ -1,0 +1,22 @@
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Generated data: property tables, training sets, network checkpoints. Large and
+# reproducible from the scripts in pinthac/sca and pinthac/ml -- see pinthac/paths.py
+# for how the library locates them, and set PINTHAC_DATA to move the directory.
+data/
+
+# Figure output. The SVGs committed for the portfolio page live in figures/output/,
+# which is tracked; scratch renders are not.
+figures/*.png
+!figures/output/
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store

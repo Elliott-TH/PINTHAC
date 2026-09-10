@@ -32,3 +32,17 @@ original brief, where the two differ.
 | **D9 cladding** | `MatMod.D9_SS` gets the two constants from Hughes: `k = 18.9 W/m-K` (Leibowitz & Blomquist 1988, at 650 K) and `rho = 8100 kg/m^3`, documented as constant-property only, not a temperature-dependent model. |
 | **Wu friction** | Range-limited to `G <= 1000 kg/m^2-s` in `ranges.py`. Not used in the annulus — Filonenko on both channels. Owner will supply a high-mass-flux correction factor later. |
 | **Power profiles** | Both Legendre (per `SCA_Rod_DataGen.build_shapes`, already correct: 5 % floor above zero, `1/(k+1)` mode decay) and squared-Fourier-with-offset (per the derivation PDF) behind one selector. Fourier gets matching per-mode decay and a strictly positive offset, and uses the analytic mean `<Fq> = 0.5*sum(a_n^2 + b_n^2) + phi_q` for normalization rather than quadrature. |
+
+## Resolved during Phase 1
+
+- **Q26** (which of `SCW_Annular.py` / `SCW_Pb_Ann_SCA.py` is newer) is **moot**: both are
+  superseded by `pinthac/sca/annular.py` and both depend on `scipy.optimize`, which is retired
+  by decision. Both are in `_archive/`, neither is lost. Say the word if one should return.
+- **Q24, partly**: `data/sca_rod_deeponet_best.pth` (1.8 MB) turned up with the file drop, so
+  the trained rod DeepONet checkpoint **does** exist, as does `SCA_Rod_DataGen.py` (now
+  `pinthac/ml/datagen.py`). Only `sca_rod_deeponet_dataset.npz` is still absent, and
+  `datagen.py` regenerates it. `ssbroyden.py` is still missing; its import is now guarded so
+  training falls back to SOAP alone rather than the module being unimportable.
+- **Q20**: `pytest` was installed into the `GenEnv3.12` conda environment during Phase 1 so the
+  test suite could run. `array_api_compat` and `torchquad` are no longer needed by anything and
+  are removed from `requirements.txt`, though they remain installed in the environment.

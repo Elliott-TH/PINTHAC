@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torchsolve"
+version = "0.1.0"
+description = "Batched, bracket-guarded scalar root finding for PyTorch"
+requires-python = ">=3.9"
+dependencies = ["torch>=2.0", "numpy>=1.22"]
+
+[project.optional-dependencies]
+scipy = ["scipy>=1.9"]
+test = ["pytest", "scipy>=1.9"]
+
+[tool.setuptools]
+packages = ["torchsolve"]
