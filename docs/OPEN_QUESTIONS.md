@@ -764,3 +764,60 @@ brief's stated reason for skipping it (that it was already done) does not hold. 
 for the owner: either treat this as a fifth physics fix for `sca/annular.py` (same
 `Bundle.Presser(Pitch, D_o)` pattern now in `sca/rod.py`, applied to the outer channel's
 `htc_conv_o`), or confirm the omission is intentional for some reason not recorded here.
+
+---
+
+## Q43. `pin/annular.py::Ann_flux_split` was not substituted into `sca/annular.py::closure()`
+
+`docs/PHASE5_BRIEF.md` section 2 asks to "replace `closure()`'s inner solve with
+`Ann_flux_split`" and to keep the result only if it is verified unchanged. This was
+investigated but not done, for a structural reason rather than a verification failure --
+there was no substituted version to check numbers against.
+
+`closure()`'s "inner solve" (the block `Theta_i, Theta_o = _Theta_UO2(Tfo_i),
+_Theta_UO2(Tfo_o); C1, C2 = ht.Ann_HT(...); q_i = -ht.Ann_qpp(...)*Per_fuel_i; q_o =
+ht.Ann_qpp(...)*Per_fuel_o`) already calls the same two pin-layer primitives
+(`Ann_HT`/`Ann_qpp`) `Ann_flux_split` is built from -- it is a single, un-iterated pass of
+exactly the update `Ann_flux_split` repeats to convergence. The obstruction is
+`Ann_flux_split`'s calling contract: it takes one already-combined `htc_i`/`htc_o` per
+surface ("Combine convection, gap and clad as series resistances before calling: 1/htc =
+1/htc_conv + 1/htc_gap + 1/htc_clad") and internally converges the flux split for that
+*fixed* htc. `closure()`'s three resistances are not combinable into a fixed htc at the
+point `Ann_flux_split` would need one:
+
+- They are referenced to three different radii (convection at the cladding-ID/OD radius,
+  gap and clad conduction at the fuel radius ri/ro), so combining them into one
+  fuel-surface-referenced htc needs an area-ratio-weighted series formula, e.g. for the
+  inner surface `1/htc_i_eff = (ri/R_clad_i_ID)/htc_conv_i + ri*log_clad_i/kc_i +
+  1/htc_gap_i` (derived from `cladding_gap_step`'s own resistance chain, not from
+  `Ann_flux_split`'s docstring, which states the simpler same-radius case).
+- `kc_i` (`Zircalloy.k`) and `htc_gap_i` are themselves functions of the surface
+  temperatures `Ann_flux_split` is solving for, so `htc_i_eff` can only be built from a
+  *lagged* (previous-Picard-iteration) guess -- exactly the structure `closure()`'s own
+  outer Picard loop already has, and exactly what `Ann_flux_split`'s "fixed htc per call"
+  contract assumes away.
+
+A substitution is possible in principle: build `htc_i_eff`/`htc_o_eff` from the previous
+iteration's `Tcldi_OD`/`Tcldi_ID`/`Tfo_i` guesses at the top of each Picard pass, call
+`Ann_flux_split` (itself iterating up to 60 times) for the flux split at that frozen htc,
+then invert the *same* resistances used to build `htc_i_eff` back through `q_i` to
+recover `Tcldi_ID`/`Tcldi_OD` for the next pass's `Swenson_dT` trial temperature and
+`kc` evaluation. That is a materially different iteration schedule (a 60-iteration inner
+solve nested inside the existing outer Picard loop, rather than one `Ann_HT` pass per
+outer iteration) than `closure()`'s current fast/robust two-phase design, which
+`docs/PHYSICS_REVIEW.md` and the module's own docstring both describe as tuned
+specifically for the Swenson pseudocritical peak (warm starts, a precomputed anchor,
+loosened tolerances). Verifying that a re-derived, differently-scheduled iteration
+converges to the same fixed point as the original (not merely a plausible-looking one) is
+a nontrivial numerical-equivalence exercise, not a formula check -- and per
+`docs/PHASE5_BRIEF.md`'s own instruction ("If they do not [match], report it rather than
+accepting the new numbers"), that verification has to happen *before* the substitution
+is kept, not after. Given the risk of quietly landing on a different converged answer
+under the strict "never assert a self-generated test value" constraint, this was left
+undone and flagged here instead of attempted and asserted without a trustworthy check.
+
+`closure()` is unchanged from Phase 5's other commits (still the original
+`Ann_HT`/`Ann_qpp`-per-iteration Picard scheme); `rod.py`'s equivalent substitution
+(`pin/cylindrical.py::Cyl_T`, see the Phase 5 report) did not have this obstruction --
+the solid-pellet centerline solve has only one resistance-free layer to invert, not three
+temperature-dependent ones at three different radii.
