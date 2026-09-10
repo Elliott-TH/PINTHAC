@@ -459,3 +459,63 @@ Both were real, and one of them is mine.
 Consequence worth stating plainly: **`sca/annular.py::solve_field` has never run
 end-to-end**, so the annular axial solve is unverified. Only its `closure()` has been
 exercised.
+
+---
+
+# Round 5
+
+## Q34 closed — `_T_hp_fast` repaired, and `solve_field` runs
+
+`sca/annular.py::_T_hp_fast` passed `bisect_iters` to `iapws95.rho_Tp`, which has no such
+parameter. It was written against an older two-stage `rho_Tp` that bracketed the density
+globally before polishing it; that bracket was **deliberately removed** (see `rho_Tp`'s own
+docstring: away from the true branch the residual terms stop cancelling in floating point
+and a bracket search locks onto a spurious root near `rho_c`).
+
+Adding `bisect_iters` back was the wrong repair — it would either be a no-op parameter that
+lies about what the function does, or reintroduce the documented failure. Dropping it alone
+was also wrong: with the bracket gone, Newton carries the whole solve, and the inherited
+`newton_iters=3` no longer converges near the pseudocritical point. At 650 K and 25 MPa it
+returned rho = 281 kg/m^3 against a converged 488.8, low by 42 percent.
+
+Fixed by dropping the argument and raising the default to 12. Measured worst-case error
+over the SCW range at 25 MPa fell from 2.931 K to 0.118 K, at 211 ms against the 5101 ms
+reference — still 24x faster than `T_hp`, and 25x more accurate than it was.
+
+**`solve_field` now completes end-to-end for the first time.** 20 nodes at 5 kW/m in 102 s.
+Verified:
+
+- the flux split closes to machine precision: `max |q_i + q_o - q'(z)| / q'(z) = 4.8e-16`
+- the outer radial chain is monotonic inward at every node
+- inner and outer enthalpy rise match integrated power to 1.4 and 0.6 percent, which is
+  the 20-node axial discretization, not a closure error
+
+## Q25 answered by that run — the negative LHGR rows are physical
+
+12 percent of the runs in `data/sca_dataset_annular` contain a negative `q'` somewhere, and
+I had asked whether those were solver artifacts. They are not.
+
+In the `solve_field` run above, exactly one node of twenty has `q_i < 0` — the channel
+exit — and it is exactly the one node where the inner radial chain stops increasing
+outward:
+
+    node   z [m]     q_i [W/m]   Tm_i      Tcldi_ID   Tcldi_OD   Tfo_i
+      19   2.028     -148.01     383.445   383.446    383.132    380.639
+
+The inner channel carries 0.010 kg/s against the outer channel's 0.060, so it heats far
+faster, and near the exit -- where the cosine power shape has fallen off -- the inner
+coolant overtakes the fuel inner surface and starts heating the fuel. The flux reverses
+sign, and the temperature chain reverses with it. Every non-monotonic node in the run has
+`q_i < 0`, and no other node does.
+
+So negative `q'` is a real operating regime of a dual-cooled annular pin with asymmetric
+flow split, not a convergence failure. Data generation should keep those rows. What should
+still be discarded is the 0.3 percent that pin at exactly 1300.00 K, which is `T_hp`'s
+hard bracket limit and a genuine non-convergence.
+
+## New: unit inconsistency in `sca/annular.py`
+
+`Inputs_ann` specifies `Tin_i` and `Tin_o` in **degrees Celsius**, and the solver's
+temperature outputs come back in Celsius, while `CLAUDE.md` requires kelvin everywhere and
+every other module in the library uses it. Flagged rather than changed -- `sca/` is Phase 5
+scope and this touches the correlation call sites.

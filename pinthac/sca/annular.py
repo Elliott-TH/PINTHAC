@@ -43,16 +43,38 @@ _T_PC = _find_Tpc(25.0)   # matches Inputs_ann['Pnom']; re-derive if that change
 _LOOSE_TOL_KW = dict(ftol_rel=1e-2, xtol=0.05, rtol=1e-4, max_iter=25)
 
 
-def _T_hp_fast(h, p, iters=12, bisect_iters=16, newton_iters=3):
+def _T_hp_fast(h, p, iters=12, newton_iters=12):
     """
-    h -> T inversion at fixed p, same bisection as IAPWS_95.T_hp but with
-    far fewer iterations. T_hp defaults to 60 outer bisections around a
-    60-bisection + 6-Newton rho_Tp solve each -- ~3960 Helmholtz
-    evaluations per call, independent of batch size, aimed at safety-
-    analysis precision. That is enormous overkill for an ML training
-    loop that will call this thousands of times: this trades it for
-    ~0.05 K worst-case error (checked against T_hp over the SCW range
-    used here) at roughly 15x the speed.
+    h -> T inversion at fixed p, the same outer bisection IAPWS_95.T_hp
+    uses but with far fewer iterations. T_hp aims at safety-analysis
+    precision -- 60 outer bisections, each wrapping a 60-Newton rho_Tp
+    solve -- which is enormous overkill for an ML training loop that
+    calls this thousands of times.
+
+    On newton_iters: this used to pass bisect_iters through to rho_Tp,
+    back when rho_Tp bracketed the density globally before polishing it.
+    That bisection was deliberately removed (see rho_Tp's docstring: away
+    from the true branch the residual terms stop cancelling in floating
+    point and a bracket search locks onto a spurious root near rho_c), so
+    the argument no longer exists and Newton now carries the whole solve
+    from the ancillary seed. Three iterations were enough alongside a
+    bracket and are not enough alone -- at 650 K and 25 MPa, right at the
+    pseudocritical point where this solver spends its time, rho comes out
+    at 281 kg/m^3 against a converged 488.8, low by 42 percent.
+
+    Measured worst-case error over the SCW range at 25 MPa, against the
+    temperatures that generated the enthalpies:
+
+        newton_iters=3    2.931 K     60.8 ms      <- the old value
+        newton_iters=6    1.080 K
+        newton_iters=12   0.118 K    211.2 ms      <- the default now
+        newton_iters=20   0.118 K    346.4 ms      (no further gain)
+        IAPWS95.T_hp      0.000 K   5100.6 ms      (the reference)
+
+    So 12 keeps this 24x faster than the reference while being 25x more
+    accurate than 3 was. The speed argument for having a fast path at all
+    survives; the 0.05 K accuracy this docstring used to claim did not,
+    and was measured back when the bracket still existed.
 
     h [kJ/kg], p [MPa], both broadcastable numpy arrays.
     """
@@ -60,7 +82,7 @@ def _T_hp_fast(h, p, iters=12, bisect_iters=16, newton_iters=3):
     T_hi = np.full_like(h, 1300.0)
     for _ in range(iters):
         mid = 0.5*(T_lo + T_hi)
-        rho_mid = iapws.IAPWS95.rho_Tp(mid, p, bisect_iters=bisect_iters, newton_iters=newton_iters)
+        rho_mid = iapws.IAPWS95.rho_Tp(mid, p, newton_iters=newton_iters)
         h_mid = iapws.IAPWS95.h(iapws.IAPWS95.helmholtz(rho_mid, mid), units='kJ')
         lt = h_mid < h
         T_lo = np.where(lt, mid, T_lo)
