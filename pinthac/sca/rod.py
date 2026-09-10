@@ -160,7 +160,11 @@ def Swenson(Property, Tb, Ts, p, G, D):
     h_b, cp_b = Property(['T', Tb], 'h'), Property(['T', Tb], 'cp')
     cp_bar = (h_s - h_b) / (Ts - Tb)
     Re_s, Pr_s = G * D / mu_s, mu_s * cp_s / k_s
-    A, B = cp_bar / cp_b, rho_s / rho_b
+    # The averaged heat capacity is referenced to the *wall*, not the bulk: Swenson's
+    # Pr_bar_w is mu_w*cp_bar/k_w, so factoring it as Pr_w*(cp_bar/cp_w) leaves cp_w
+    # underneath. A was cp_bar/cp_b, which leaves a spurious cp_w/cp_b hanging on the
+    # result. See Hughes et al. (2014) Eq. (8).
+    A, B = cp_bar / cp_s, rho_s / rho_b
     Nu_s = 0.00459 * Re_s**0.92 * Pr_s**0.61 * A**0.61 * B**0.23
     return Nu_s * k_s / D
 

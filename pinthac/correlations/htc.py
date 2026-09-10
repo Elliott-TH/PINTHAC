@@ -306,7 +306,13 @@ class SCW:
         Re_w = G * D / mu_w
 
         cp_bar = (h_w - h_b) / (Tw - Tb)
-        c1, c_Re, c_Pr, c_cp, c_rho = 0.00459, 0.923, 0.613, 0.231, 0.231
+        # Swenson's Prandtl number is the *averaged* one, Pr_bar_w = mu_w*cp_bar/k_w, so
+        # splitting it into Pr_w * (cp_bar/cp_w) leaves both halves carrying the same
+        # 0.613 exponent. c_cp was 0.231 -- that is the density-ratio exponent, and it is
+        # also the Prandtl exponent of the neighbouring Bishop correlation, which shares
+        # Swenson's 0.00459 lead constant and sits on the facing column of Hughes et al.
+        # (2014). See that paper's Eq. (8) against its Eq. (1).
+        c1, c_Re, c_Pr, c_cp, c_rho = 0.00459, 0.923, 0.613, 0.613, 0.231
 
         R_rho = rho_w / rho_b
         R_cp = cp_bar / cp_w
