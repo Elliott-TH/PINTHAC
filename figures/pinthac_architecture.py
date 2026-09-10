@@ -147,61 +147,142 @@ LAYOUT = {
 EXTERNAL_X = 9.8
 
 
+def layer_stats():
+    """
+    Module names and line counts per layer, read off the repository.
+
+    Why this is here: the first version of this figure showed only which layer imports
+    which, which is true but tells a reader almost nothing they could not guess from the
+    directory listing. Where the code actually *is* -- that properties is three times the
+    size of pin, that the whole foundation is under 700 lines -- is the part that conveys
+    the shape of the library. These numbers are counted at draw time, so the figure cannot
+    drift out of date the way a hand-written caption would.
+
+    Returns:
+        dict of layer name -> (module name list, file count, total line count)
+    """
+    out = {}
+    for layer in ("properties", "correlations", "pin", "sca", "ml"):
+        d = os.path.join(PKG_ROOT, layer)
+        files = sorted(f for f in os.listdir(d)
+                       if f.endswith(".py") and f != "__init__.py")
+        lines = sum(len(open(os.path.join(d, f), encoding="utf-8").readlines())
+                    for f in files)
+        out[layer] = ([f[:-3] for f in files], len(files), lines)
+
+    root_files = sorted(f for f in os.listdir(PKG_ROOT)
+                        if f.endswith(".py") and f != "__init__.py")
+    root_lines = sum(len(open(os.path.join(PKG_ROOT, f), encoding="utf-8").readlines())
+                     for f in root_files)
+    out["foundation"] = ([f[:-3] for f in root_files], len(root_files), root_lines)
+    return out
+
+
 def draw(internal_edges, external_edges, out_path):
+    """
+    Draw the layer stack, with each layer's contents and size.
+
+    The drawing is deliberately lossy where the printed report is not. Internal edges
+    become the layer chain; anything that skips a layer is still counted and printed by
+    report_layering_violations(), so a genuine violation cannot vanish into "the diagram
+    looked fine". External dependencies are listed beside the layer that pulls them in
+    rather than wired to it -- an earlier version drew one arrow per dependency per
+    package, and forty muted arrows crossing unrelated boxes buried the one thing the
+    figure exists to show.
+
+    Inputs:
+        internal_edges : set of (src_pkg, dst_pkg) inside pinthac
+        external_edges : set of (src_pkg, external_module)
+        out_path       : where to write the SVG
+    Returns:
+        None
+    """
     import matplotlib.patches as mpatches
 
-    external_names = sorted({dst for _, dst in external_edges})
-    fig_height = max(7.0, 0.62 * len(external_names))
-    fig, ax = style.figure(figsize=(9.0, fig_height))
+    stats = layer_stats()
+    stack = ["properties", "correlations", "pin", "sca", "ml"]
+    role = {"properties": "water, liquid metal and solid material properties",
+            "correlations": "heat transfer, friction, rod-bundle factors",
+            "pin": "gap, clad and fuel radial conduction",
+            "sca": "single-channel solvers and the run driver",
+            "ml": "DeepONet surrogate, PINN, training data"}
 
-    y_top = max(y for _, y in LAYOUT.values()) + 0.8
-    y_bot = min(y for _, y in LAYOUT.values()) - 0.8
-    ext_y = {name: y for name, y in zip(
-        external_names, [y_top - i * (y_top - y_bot) / max(1, len(external_names) - 1)
-                          for i in range(len(external_names))])} if len(external_names) > 1 \
-        else {external_names[0]: (y_top + y_bot) / 2} if external_names else {}
-    ext_positions = {name: (EXTERNAL_X, y) for name, y in ext_y.items()}
-
-    ax.set_xlim(-0.3, EXTERNAL_X + 1.3)
-    ax.set_ylim(y_bot - 0.5, y_top + 0.5)
+    fig, ax = style.figure(figsize=(10.2, 6.4))
+    ax.set_xlim(0, 11.4)
+    ax.set_ylim(-0.5, 8.1)
     ax.axis("off")
 
-    def draw_box(xy, label, color, fontsize=10, w=1.15, h=0.32):
-        x, y = xy
-        box = mpatches.FancyBboxPatch((x - w/2, y - h/2), w, h,
-                                       boxstyle="round,pad=0.02,rounding_size=0.05",
-                                       linewidth=1.1, edgecolor=color, facecolor=style.PANEL)
-        ax.add_patch(box)
-        ax.text(x, y, label, ha="center", va="center", color=color, fontsize=fontsize)
+    box_x, box_w, box_h = 0.5, 5.35, 0.82
+    y0, dy = 1.55, 1.16
 
-    for pkg, (x, y) in LAYOUT.items():
-        draw_box((x, y), f"pinthac.{pkg}", style.ACCENT)
+    total_lines = sum(v[2] for v in stats.values())
+    ax.text(box_x, 7.72, "PINTHAC module architecture",
+            ha="left", va="center", color=style.TEXT, fontsize=13, fontweight="bold")
+    ax.text(box_x, 7.36,
+            f"{sum(v[1] for v in stats.values())} modules, {total_lines:,} lines "
+            "\u2014 imports run upward only",
+            ha="left", va="center", color=style.TEXT_DIM, fontsize=8.5)
 
-    for name, (x, y) in ext_positions.items():
-        draw_box((x, y), name, style.MUTED, fontsize=9, w=1.25, h=0.28)
+    for i, pkg in enumerate(stack):
+        y = y0 + i * dy
+        mods, nfile, nline = stats[pkg]
+        ax.add_patch(mpatches.FancyBboxPatch(
+            (box_x, y - box_h / 2), box_w, box_h,
+            boxstyle="round,pad=0.03,rounding_size=0.08",
+            linewidth=1.3, edgecolor=style.ACCENT, facecolor=style.PANEL))
+        ax.text(box_x + 0.26, y + 0.24, pkg, ha="left", va="center",
+                color=style.ACCENT, fontsize=11.5, fontweight="bold")
+        ax.text(box_x + box_w - 0.26, y + 0.24, f"{nline:,} lines",
+                ha="right", va="center", color=style.TEXT_DIM, fontsize=8)
+        ax.text(box_x + 0.26, y - 0.02, role[pkg], ha="left", va="center",
+                color=style.TEXT, fontsize=8.2)
+        ax.text(box_x + 0.26, y - 0.26, "  ".join(mods), ha="left", va="center",
+                color=style.TEXT_DIM, fontsize=7.4, family="monospace")
 
-    for src, dst in internal_edges:
-        if src in LAYOUT and dst in LAYOUT:
-            x0, y0 = LAYOUT[src]
-            x1, y1 = LAYOUT[dst]
-            # Bowed rather than straight for edges that skip a layer (e.g. ml -> properties):
-            # a straight vertical line there would pass directly through the boxes in
-            # between (pin, correlations), which read as false intermediate edges.
-            rad = 0.0 if abs(y0 - y1) <= 1.01 else 0.35
-            up = y1 > y0
-            ax.annotate("", xy=(x1, y1 - 0.17 if up else y1 + 0.17),
-                        xytext=(x0, y0 + 0.17 if up else y0 - 0.17),
-                        arrowprops=dict(arrowstyle="-|>", color=style.ACCENT, lw=1.1,
-                                        alpha=0.85, shrinkA=2, shrinkB=2,
-                                        connectionstyle=f"arc3,rad={rad}"))
+        if i < len(stack) - 1:
+            ax.annotate("", xy=(box_x + box_w / 2, y + dy - box_h / 2 - 0.02),
+                        xytext=(box_x + box_w / 2, y + box_h / 2 + 0.02),
+                        arrowprops=dict(arrowstyle="-|>", color=style.ACCENT,
+                                         lw=1.4, alpha=0.9))
 
+    mods, nfile, nline = stats["foundation"]
+    found_h = 0.72
+    ax.add_patch(mpatches.FancyBboxPatch(
+        (box_x, 0.28), box_w, found_h,
+        boxstyle="round,pad=0.03,rounding_size=0.08",
+        linewidth=1.3, edgecolor=style.ACCENT, facecolor=style.PANEL, linestyle="--"))
+    ax.text(box_x + 0.26, 0.80, "  ".join(mods), ha="left", va="center",
+            color=style.ACCENT, fontsize=8.6, family="monospace")
+    ax.text(box_x + box_w - 0.26, 0.80, f"{nline:,} lines",
+            ha="right", va="center", color=style.TEXT_DIM, fontsize=8)
+    ax.text(box_x + 0.26, 0.50,
+            "float / numpy / torch dispatch, range checks, Monte Carlo, root finding",
+            ha="left", va="center", color=style.TEXT_DIM, fontsize=7.8)
+
+    # External dependencies, against the layer that pulls each one in. Standard-library
+    # imports are filtered out: they are not dependencies in any sense that affects how
+    # this library is installed or run, and listing them crowds out the ones that are.
+    STDLIB = {"math", "os", "time", "warnings", "functools", "ast", "json", "sys",
+              "itertools", "collections", "typing", "pathlib", "random", "copy"}
+    ext_by_pkg = {}
     for src, dst in external_edges:
-        if src in LAYOUT and dst in ext_positions:
-            x0, y0 = LAYOUT[src]
-            x1, y1 = ext_positions[dst]
-            ax.annotate("", xy=(x1 - 0.65, y1), xytext=(x0 + 0.58, y0),
-                        arrowprops=dict(arrowstyle="-|>", color=style.MUTED, lw=0.6,
-                                        alpha=0.45, shrinkA=1, shrinkB=1))
+        if dst not in STDLIB:
+            ext_by_pkg.setdefault(src, set()).add(dst)
+
+    ext_x = box_x + box_w + 0.45
+    ax.text(ext_x, 7.72, "third-party dependencies", ha="left", va="center",
+            color=style.MUTED, fontsize=8.5, fontweight="bold")
+    for i, pkg in enumerate(stack):
+        names = sorted(ext_by_pkg.get(pkg, set()))
+        if names:
+            # One line per layer, not a stacked column: stacking six names vertically
+            # from a box's centre runs straight into the neighbouring layer's list.
+            ax.text(ext_x, y0 + i * dy, "  ".join(names), ha="left", va="center",
+                    color=style.MUTED, fontsize=7.6)
+    found_ext = sorted(set().union(*[ext_by_pkg.get(p, set()) for p in mods] or [set()]))
+    if found_ext:
+        ax.text(ext_x, 0.64, "  ".join(found_ext), ha="left", va="center",
+                color=style.MUTED, fontsize=7.6)
 
     style.finish(fig, out_path)
 

@@ -102,14 +102,42 @@ def time_ref(T, P):
     return time.perf_counter() - t0
 
 
-def time_gpu(T, P):
-    if DEVICE.type == "cuda":
-        torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    gpu_batch_properties(T, P)
-    if DEVICE.type == "cuda":
-        torch.cuda.synchronize()
-    return time.perf_counter() - t0
+def time_gpu(T, P, repeats=5):
+    """
+    Best of `repeats` timed runs of the batched GPU path.
+
+    Why the minimum and not the mean: a single GPU timing is not reproducible on this
+    machine. An earlier version of this benchmark timed each batch size once and recorded
+    2.50 s at 20,000 points but 1.95 s at 50,000 -- a larger problem finishing faster,
+    which is not a property of the code but of whatever the driver was doing at that
+    moment (allocation, clock ramp, another process on the card). That single sample
+    dragged the reported speedup at 20,000 points from about 58x down to 22x across
+    repeated runs of the same script.
+
+    Taking the minimum is the standard fix. Interference can only ever make a run slower,
+    so the fastest of several is the cleanest estimate of what the code actually costs,
+    and it is stable between runs in a way the mean is not.
+
+    Inputs:
+        T, P    : temperature [K] and pressure [MPa] arrays of equal length
+        repeats : number of timed runs
+    Returns:
+        best wall-clock time, seconds
+    """
+    best = float("inf")
+    for _ in range(repeats):
+        # Release the previous repeat's tensors before timing the next one. Without this
+        # the repeats accumulate allocations and the sweep runs the card out of memory
+        # partway through the largest batch sizes.
+        if DEVICE.type == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        gpu_batch_properties(T, P)
+        if DEVICE.type == "cuda":
+            torch.cuda.synchronize()
+        best = min(best, time.perf_counter() - t0)
+    return best
 
 
 def run_benchmark():
@@ -181,29 +209,39 @@ def plot_results(results, gpu_only_results, out_path):
     gpu_only_t = [r[1] for r in gpu_only_results]
 
     per_point_ref = ref_t[-1] / ns[-1]
-    gpu_only_ref_est = [per_point_ref * n for n in gpu_only_ns]
+    # Start the extrapolated series at the last *measured* point rather than at the first
+    # GPU-only batch size, so the dashed line continues the solid one instead of floating
+    # detached from it with a gap in between.
+    ext_ns = [ns[-1]] + list(gpu_only_ns)
+    gpu_only_ref_est = [per_point_ref * n for n in ext_ns]
+    ext_gpu_t = [gpu_t[-1]] + list(gpu_only_t)
 
     fig, (ax_t, ax_s) = style.figure(figsize=(10.5, 4.6), ncols=2)
 
     ax_t.loglog(ns, ref_t, "o-", color=style.MUTED, lw=1.6, ms=5,
                 label="iapws (CPU, measured)")
-    ax_t.loglog(gpu_only_ns, gpu_only_ref_est, "o--", color=style.MUTED, lw=1.2, ms=4,
-                alpha=0.55, label="iapws (CPU, extrapolated)")
+    ax_t.loglog(ext_ns, gpu_only_ref_est, "--", color=style.MUTED, lw=1.2,
+                alpha=0.6, label="iapws (CPU, extrapolated)")
+    ax_t.loglog(ext_ns[1:], gpu_only_ref_est[1:], "o", color=style.MUTED, ms=4, alpha=0.6)
     ax_t.loglog(ns, gpu_t, "o-", color=style.ACCENT, lw=1.8, ms=5,
                 label="this library (GPU, measured)")
-    ax_t.loglog(gpu_only_ns, gpu_only_t, "o-", color=style.ACCENT, lw=1.8, ms=5)
+    ax_t.loglog(ext_ns, ext_gpu_t, "o-", color=style.ACCENT, lw=1.8, ms=5)
     ax_t.set_xlabel("Batch size (state points)")
     ax_t.set_ylabel("Wall-clock time [s]")
     ax_t.legend(frameon=False, fontsize=8, loc="upper left")
 
     ns_speedup = [n for n in ns if n >= 100]
     speedup = [r / g for n, r, g in zip(ns, ref_t, gpu_t) if n >= 100]
-    gpu_only_speedup = [r / g for r, g in zip(gpu_only_ref_est, gpu_only_t)]
+    gpu_only_speedup = [r / g for r, g in zip(gpu_only_ref_est, ext_gpu_t)]
 
     ax_s.semilogx(ns_speedup, speedup, "o-", color=style.ACCENT, lw=1.8, ms=5,
-                  label="measured")
-    ax_s.semilogx(gpu_only_ns, gpu_only_speedup, "o--", color=style.ACCENT, lw=1.4, ms=4,
-                  alpha=0.55, label="extrapolated CPU reference")
+                  label="measured speedup")
+    # Same continuation trick as the left panel: the dashed segment begins at the last
+    # measured point, so the two read as one curve rather than two disconnected ones.
+    ax_s.semilogx(ext_ns, gpu_only_speedup, "--", color=style.ACCENT, lw=1.4, alpha=0.6,
+                  label="extrapolated speedup")
+    ax_s.semilogx(ext_ns[1:], gpu_only_speedup[1:], "o", color=style.ACCENT, ms=4,
+                  alpha=0.6)
     ax_s.set_xlabel("Batch size (state points)")
     ax_s.set_ylabel("Speedup (x)")
     ax_s.legend(frameon=False, fontsize=8, loc="upper left")
