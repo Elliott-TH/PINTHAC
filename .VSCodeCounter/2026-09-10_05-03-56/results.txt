@@ -1,0 +1,30 @@
+Date : 2026-09-10 05:03:56
+Directory : /home/elliott/Codes/Projects/Pinthac/pinthac/properties
+Total : 6 files,  1775 codes, 2502 comments, 328 blanks, all 4605 lines
+
+Languages
++----------+------------+------------+------------+------------+------------+
+| language | files      | code       | comment    | blank      | total      |
++----------+------------+------------+------------+------------+------------+
+| Python   |          6 |      1,775 |      2,502 |        328 |      4,605 |
++----------+------------+------------+------------+------------+------------+
+
+Directories
++---------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| path                                                                | files      | code       | comment    | blank      | total      |
++---------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| .                                                                   |          6 |      1,775 |      2,502 |        328 |      4,605 |
++---------------------------------------------------------------------+------------+------------+------------+------------+------------+
+
+Files
++---------------------------------------------------------------------+----------+------------+------------+------------+------------+
+| filename                                                            | language | code       | comment    | blank      | total      |
++---------------------------------------------------------------------+----------+------------+------------+------------+------------+
+| /home/elliott/Codes/Projects/Pinthac/pinthac/properties/__init__.py | Python   |          0 |          1 |          1 |          2 |
+| /home/elliott/Codes/Projects/Pinthac/pinthac/properties/getprop.py  | Python   |         35 |         50 |         10 |         95 |
+| /home/elliott/Codes/Projects/Pinthac/pinthac/properties/iapws95.py  | Python   |        573 |        150 |        110 |        833 |
+| /home/elliott/Codes/Projects/Pinthac/pinthac/properties/iapws97.py  | Python   |        519 |        167 |        107 |        793 |
+| /home/elliott/Codes/Projects/Pinthac/pinthac/properties/liqprops.py | Python   |        178 |        510 |         39 |        727 |
+| /home/elliott/Codes/Projects/Pinthac/pinthac/properties/matmod.py   | Python   |        470 |      1,624 |         61 |      2,155 |
+| Total                                                               |          |      1,775 |      2,502 |        328 |      4,605 |
++---------------------------------------------------------------------+----------+------------+------------+------------+------------+

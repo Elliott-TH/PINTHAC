@@ -212,3 +212,36 @@ def test_h_is_zero_at_the_melting_point(metal):
     # the 1/T-1/Tm term (whichever sign it carries) vanish at T=Tm regardless of the sign
     # defect documented in Sodium.h's docstring, so this holds independent of that defect.
     assert metal.h(metal.Tm) == pytest.approx(0.0, abs=1.0E-6)
+
+
+# ---------------------------------------------------------------------------------------
+# Internal consistency: h must be the integral of cp.
+#
+# This is the check that caught the sign error on the d/T^2 term. It is worth keeping as a
+# permanent invariant because it needs no external data at all -- it holds the module
+# against itself, so it stays valid even for a metal or a temperature range nobody has
+# published a check value for. scipy's quadrature is the reference here, and it knows
+# nothing about h(); only cp() is passed to it.
+# ---------------------------------------------------------------------------------------
+def test_enthalpy_is_the_integral_of_heat_capacity():
+    from scipy.integrate import quad
+
+    for metal in (lm.Sodium, lm.Lead, lm.LBE):
+        for offset in (50.0, 200.0, 500.0):
+            T = metal.Tm + offset
+            integrated = quad(
+                lambda t: float(np.atleast_1d(metal.cp(np.array([t])))[0]),
+                metal.Tm, T, limit=200,
+            )[0]
+            reported = float(np.atleast_1d(metal.h(np.array([T])))[0])
+            assert reported == pytest.approx(integrated, rel=1e-9), (
+                f"{metal.__name__} at {T} K: h() disagrees with the integral of its own cp()"
+            )
+
+
+def test_enthalpy_is_zero_at_the_melting_point():
+    """h is referenced to the melting point, so h(Tm) = 0 identically. This is what pins
+    the constant of integration, and it is the half of the formula the sign error left
+    intact -- which is why the defect survived any check made at Tm alone."""
+    for metal in (lm.Sodium, lm.Lead, lm.LBE):
+        assert float(np.atleast_1d(metal.h(np.array([metal.Tm])))[0]) == pytest.approx(0.0, abs=1e-12)
