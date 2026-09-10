@@ -441,9 +441,14 @@ class VISC:
 
     @classmethod
     @iapws_input
-    def mu(cls, rho, T):
+    def mu(cls, rho, T, drhodp_T=None, drhodp_TR=None):
         """
-        Dynamic viscosity of water, IAPWS 2008 (mu2=1, no critical enhancement).
+        Dynamic viscosity of water, IAPWS R12-08 Eq. (10).
+
+        Supply drhodp_T and drhodp_TR -- the isothermal compressibility (drho/dp)_T at
+        T and at T_R = 1.5*T* = 970.644 K, both in kg/m^3/MPa -- to include the critical
+        enhancement mu2. Omit them for the industrial simplification mu2 = 1 sanctioned
+        by Sec. 2.8 and Sec. 3.
 
         Args:
             rho : density      [kg/m³]   torch tensor, any shape
@@ -474,10 +479,111 @@ class VISC:
         outer = (t_pows * inner).sum(dim=0)
         mu1   = torch.exp(rho_bar * outer)
 
-        # ── mu2: critical enhancement = 1 outside critical region ─────────────
-        mu2 = torch.ones_like(mu0)
+        # ── mu2: critical enhancement, Eqs. (14)-(21) ─────────────────────────
+        # Omitted (mu2 = 1) unless the caller supplies the two isothermal
+        # compressibilities it needs. That is not a shortcut -- R12-08 Sec. 2.8 and
+        # Sec. 3 explicitly sanction mu2 = 1 for industrial use, and Table 4's check
+        # values are quoted for exactly that simplification. It is also why this
+        # module cannot compute mu2 on its own: Eq. (21) needs (drho/dp)_T from
+        # IAPWS-95, and IAPWS-95 imports this module, so the values have to come
+        # down from the caller rather than be fetched from here.
+        if drhodp_T is None or drhodp_TR is None:
+            mu2 = torch.ones_like(mu0)
+        else:
+            mu2 = cls._mu2(rho_bar, T_bar, drhodp_T, drhodp_TR)
 
         return mu_star * mu0 * mu1 * mu2
+
+    # ── Critical-region constants, R12-08 Table 3 ─────────────────────────────
+    p_star  = 22.064      # MPa, R12-08 Eq. (3) -- module scope carries T*, rho* and mu*
+                          # but not p*, which only the critical enhancement needs
+    x_mu    = 0.068       # critical exponent for viscosity
+    qC_inv  = 1.9e-9      # m
+    qD_inv  = 1.1e-9      # m  (note: R15-11 uses 0.40 nm for conductivity)
+    nu      = 0.630
+    gamma_c = 1.239
+    xi0     = 0.13e-9     # m
+    Gamma0  = 0.06
+    T_R     = 1.5         # dimensionless reference temperature
+
+    @classmethod
+    def _mu2(cls, rho_bar, T_bar, drhodp_T, drhodp_TR):
+        """
+        Critical enhancement of the viscosity, R12-08 Eqs. (14)-(21).
+
+        Why this model is here:
+            The viscosity of water diverges at the critical point, and the dilute-gas
+            and finite-density terms alone miss that entirely. Within roughly
+            645.91 K < T < 650.77 K and 245.8 < rho < 405.3 kg/m^3 the enhancement is
+            worth more than 2 percent (R12-08 Eq. 13); at rho_c on the 647.35 K
+            isotherm it is 9.2 percent. Outside that region it falls below the
+            correlation's own uncertainty, which is why omitting it is a sanctioned
+            simplification rather than an error.
+
+            It also matters well beyond viscosity itself: the thermal-conductivity
+            critical enhancement, R15-11 Eq. (18), divides by this viscosity, so a mu
+            missing its enhancement makes lambda_2 too large by the same proportion.
+
+        Formulation:
+            xi   = xi0 * (dchi/Gamma0)^(nu/gamma),  dchi = rho_bar*(zeta_T - zeta_TR*T_R/T_bar)
+            Y    = Eq. (15) for xi <= 0.3817016416 nm, Eq. (16) above it
+            mu2  = exp(x_mu * Y)
+
+        Inputs (torch tensors, all the same shape):
+            rho_bar   : reduced density rho/rho*, dimensionless
+            T_bar     : reduced temperature T/T*, dimensionless
+            drhodp_T  : (drho/dp)_T at T,   kg/m^3/MPa
+            drhodp_TR : (drho/dp)_T at T_R*T*, kg/m^3/MPa
+        Returns:
+            mu2 : dimensionless enhancement factor, >= 1
+        """
+        # The two compressibilities arrive as keyword arguments, which the iapws_input
+        # decorator does not touch, so they can still be numpy while everything else here
+        # is already a tensor. Normalize them at this boundary rather than leaving a
+        # numpy/torch mix to surface several lines later.
+        drhodp_T  = torch.as_tensor(drhodp_T,  dtype=torch.float64, device=device).reshape(-1)
+        drhodp_TR = torch.as_tensor(drhodp_TR, dtype=torch.float64, device=device).reshape(-1)
+
+        # Eq. (21): dchi from the two compressibilities, made dimensionless by p*/rho*.
+        zeta_T  = drhodp_T  * cls.p_star / rho_star
+        zeta_TR = drhodp_TR * cls.p_star / rho_star
+        dchi = rho_bar * (zeta_T - zeta_TR * cls.T_R / T_bar)
+        dchi = torch.clamp(dchi, min=0.0)          # Eq. (21): dchi < 0 must be set to 0
+
+        # Eq. (20): correlation length. dchi = 0 gives xi = 0, hence Y = 0 and mu2 = 1.
+        xi = cls.xi0 * (dchi / cls.Gamma0) ** (cls.nu / cls.gamma_c)
+
+        qC_xi = xi / cls.qC_inv
+        qD_xi = xi / cls.qD_inv
+
+        # Eq. (15), the small-xi branch: a series that stays well conditioned as xi -> 0,
+        # where the Eq. (16) form would divide by (qC_xi)^3.
+        Y_small = (qC_xi * qD_xi**5 / 5.0
+                   * (1.0 - qC_xi + qC_xi**2 - (765.0/504.0) * qD_xi**2))
+
+        # Eq. (16)-(19), the large-xi branch. Both branches are evaluated everywhere and
+        # selected with `where` rather than an `if`, so this stays batched and
+        # differentiable; the guards below keep the unused branch finite so its NaNs
+        # cannot poison the gradient of the branch that was actually chosen.
+        qC_safe = torch.clamp(qC_xi, min=1.0e-12)
+        psi_D = torch.arccos(torch.clamp((1.0 + qD_xi**2) ** (-0.5), -1.0, 1.0))   # Eq. (17)
+
+        # Eq. (19). The sign of (qC_xi - 1) selects which form of L(w) applies, so take
+        # the magnitude here and branch on qC_xi below.
+        w = torch.sqrt(torch.abs((qC_safe - 1.0) / (qC_safe + 1.0))) * torch.tan(psi_D / 2.0)
+        w_abs = torch.abs(w)
+        L_gt = torch.log((1.0 + w_abs) / torch.clamp(1.0 - w_abs, min=1.0e-15))
+        L_le = 2.0 * torch.arctan(w_abs)
+        L_w = torch.where(qC_safe > 1.0, L_gt, L_le)                                # Eq. (18)
+
+        Y_large = (torch.sin(3.0 * psi_D) / 12.0
+                   - torch.sin(2.0 * psi_D) / (4.0 * qC_safe)
+                   + (1.0 - 1.25 * qC_safe**2) * torch.sin(psi_D) / qC_safe**2
+                   - ((1.0 - 1.5 * qC_safe**2) * psi_D
+                      - torch.abs(qC_safe**2 - 1.0)**1.5 * L_w) / qC_safe**3)
+
+        Y = torch.where(xi <= 0.3817016416e-9, Y_small, Y_large)
+        return torch.exp(cls.x_mu * Y)                                              # Eq. (14)
 
 
 # =============================================================================
