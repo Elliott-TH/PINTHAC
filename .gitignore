@@ -20,3 +20,6 @@ figures/*.png
 .vscode/
 .idea/
 .DS_Store
+
+# Stray figure output at the repo root (scripts default their CWD here)
+/*.png
