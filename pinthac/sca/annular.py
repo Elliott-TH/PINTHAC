@@ -398,6 +398,14 @@ def solve_field(Inputs=Inputs_ann, q_p=None, outer_iter=15, tol=10.0, progress=F
     over an array of z; defaults to Inputs['q0']*cos(pi*z/L).
     tol (float): outer-loop convergence tolerance on enthalpy [J/kg].
 
+    Returns a dict with the axial fields documented at the return statement below, plus
+    three convergence-reporting keys sca/run.py's convergence report reads: outer_converged
+    (bool, whether the enthalpy err fell below tol before outer_iter was exhausted),
+    outer_residual (float, the final max|h_new-h_old| summed over both channels, J/kg),
+    outer_iters_used (int). These do not change any physics -- closure() and the enthalpy
+    march are unchanged -- they only expose the outer loop's own stopping state, which
+    was previously discarded.
+
     A literal cell-by-cell march calls the property library (~0.1-0.2s of
     fixed overhead per call, see profiling in the dev session) once per
     axial cell per closure iteration -- fine for the 400-cell cylindrical
@@ -450,6 +458,8 @@ def solve_field(Inputs=Inputs_ann, q_p=None, outer_iter=15, tol=10.0, progress=F
     h_i, h_o = march(h_i0, q_i, mdot_i), march(h_o0, q_o, mdot_o)
 
     it = tqdm(range(outer_iter), desc='Ann_SCA field solve') if progress else range(outer_iter)
+    outer_err = float('inf')
+    outer_iters_used = 0
     for _ in it:
         T_i = _T_hp_fast(h_i/1000.0, Pnom)
         T_o = _T_hp_fast(h_o/1000.0, Pnom)
@@ -460,6 +470,8 @@ def solve_field(Inputs=Inputs_ann, q_p=None, outer_iter=15, tol=10.0, progress=F
         h_i_new, h_o_new = march(h_i0, q_i, mdot_i), march(h_o0, q_o, mdot_o)
         err = np.max(np.abs(h_i_new - h_i)) + np.max(np.abs(h_o_new - h_o))
         h_i, h_o = h_i_new, h_o_new
+        outer_err = float(err)
+        outer_iters_used += 1
         if err < tol:
             break
 
@@ -490,6 +502,9 @@ def solve_field(Inputs=Inputs_ann, q_p=None, outer_iter=15, tol=10.0, progress=F
         'htc_gap_i': c['htc_gap_i'], 'htc_gap_o': c['htc_gap_o'],
         'q_i': q_i, 'q_o': q_o,
         'dP_i': dP_i, 'dP_o': dP_o,
+        'outer_converged': outer_err < tol,
+        'outer_residual': outer_err,
+        'outer_iters_used': outer_iters_used,
     }
     return results
 
