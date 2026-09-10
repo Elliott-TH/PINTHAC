@@ -125,3 +125,83 @@ def test_wu_matches_filonenko_raised_to_its_own_exponent():
 def test_spacer_blah2_is_an_honest_stub():
     with pytest.raises(NotImplementedError):
         fr.Spacer.blah2()
+
+
+# ---------------------------------------------------------------------------------------
+# Colebrook: implicit, so it gets checked against an independent root solve of the same
+# equation rather than against any value this module produced.
+# ---------------------------------------------------------------------------------------
+COLEBROOK_CASES = [
+    # (G [kg/m2-s], D [m], absolute roughness [m])
+    (1000.0, 0.0106, 0.0),        # smooth wall
+    (1000.0, 0.0106, 1.0e-5),     # drawn tubing
+    (2500.0, 0.0106, 5.0e-5),     # commercial steel
+    (300.0,  0.02,   0.0),
+    (5000.0, 0.005,  2.0e-5),
+]
+
+
+@pytest.mark.parametrize("G,D,roughness", COLEBROOK_CASES)
+def test_colebrook_matches_an_independent_root_solve(G, D, roughness):
+    from scipy.optimize import brentq
+
+    mu = 9.0e-5
+    Re = G * D / mu
+    rel_rough = roughness / D
+
+    def residual(f):
+        return 1.0 / np.sqrt(f) + 2.0 * np.log10(rel_rough / 3.70 + 2.51 / (Re * np.sqrt(f)))
+
+    reference = brentq(residual, 1.0e-4, 1.0, xtol=1.0e-15)
+    got, converged = fr.f_water.Colebrook({'mu': mu}, G, D, roughness=roughness,
+                                        return_convergence=True)
+    assert bool(np.all(converged))
+    assert float(got) == pytest.approx(reference, rel=1.0e-12)
+
+
+def test_colebrook_roughness_increases_friction_monotonically():
+    """Structural, not a fitted number: rougher wall, more friction, always."""
+    mu = 9.0e-5
+    previous = 0.0
+    for roughness in (0.0, 1.0e-6, 1.0e-5, 5.0e-5, 2.0e-4):
+        f = float(fr.f_water.Colebrook({'mu': mu}, 1000.0, 0.0106, roughness=roughness))
+        assert f > previous
+        previous = f
+
+
+def test_colebrook_backend_contract():
+    _assert_backend_contract(lambda P, G, D: fr.f_water.Colebrook(P, G, D, roughness=1.0e-5),
+                             label="fr.f_water.Colebrook")
+
+
+def test_colebrook_warns_below_the_turbulent_range():
+    # Re = 500 * 0.0106 / 9e-5 = 58889 is turbulent; drop G until Re < 4000.
+    with pytest.warns(RangeWarning):
+        fr.f_water.Colebrook({'mu': 9.0e-5}, 30.0, 0.0106)
+
+
+# ---------------------------------------------------------------------------------------
+# Filonenko's optional Petrov-Popov density correction.
+# ---------------------------------------------------------------------------------------
+def test_petrov_popov_correction_is_off_by_default():
+    """A caller that does not ask for the correction must get exactly the isothermal
+    value it got before the option existed."""
+    Props = {'mu': 9.0e-5, 'rho': 257.66}
+    Props_w = {'mu': 4.5e-5, 'rho': 125.09}
+    plain = float(fr.f_SCW.Filonenko(Props, 1000.0, 0.0106))
+    assert float(fr.f_SCW.Filonenko(Props, 1000.0, 0.0106, Props_w=None)) == plain
+
+
+def test_petrov_popov_correction_is_the_published_density_ratio_power():
+    Props = {'mu': 9.0e-5, 'rho': 257.66}
+    Props_w = {'mu': 4.5e-5, 'rho': 125.09}
+    plain = float(fr.f_SCW.Filonenko(Props, 1000.0, 0.0106))
+    corrected = float(fr.f_SCW.Filonenko(Props, 1000.0, 0.0106, Props_w=Props_w))
+    # Hughes et al. (2014) Eq. (9): the factor is exactly (rho_w/rho_b)^0.4.
+    assert corrected / plain == pytest.approx((125.09 / 257.66) ** 0.4, rel=1.0e-12)
+
+
+def test_petrov_popov_correction_vanishes_when_wall_equals_bulk():
+    Props = {'mu': 9.0e-5, 'rho': 257.66}
+    plain = float(fr.f_SCW.Filonenko(Props, 1000.0, 0.0106))
+    assert float(fr.f_SCW.Filonenko(Props, 1000.0, 0.0106, Props_w=Props)) == pytest.approx(plain)
