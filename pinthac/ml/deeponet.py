@@ -358,6 +358,14 @@ if __name__ == '__main__':
 
     branch_phys_c, z_c, q_sensors_c, pitch_c, rco_c, G_c = sample_collocation(polish_colloc)
 
+    if not SSBROYDEN_AVAILABLE:
+        # The import at the top of this module is already guarded, but the use site was
+        # not -- so a full training run completed its SOAP phase and then died here.
+        # Nothing is lost when this stage is skipped: the best checkpoint is saved during
+        # the main loop, and this is a polish pass on an already-converged model.
+        print('SSBroyden unavailable (see docs/OPEN_QUESTIONS.md Q24) -- '
+              'skipping the polish stage; the SOAP checkpoint is already saved.')
+        return
     optimizer2 = SSBroyden(model.parameters(), lr=1.0, history_size=40, method='ssbroyden')
 
     def polish_closure():
