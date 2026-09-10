@@ -95,8 +95,6 @@ def SCA(Inputs):
     G = mdot/Ah                          # mass flux
     psi = ht.Bundle.Weissman(Pitch, D)   # bundle correction factor applied to htc
 
-    htc_obj = htc.SCW()
-
     def q_p(z):  # Linear heat generation rate
         return q0*np.cos(np.pi*z/L)
 
@@ -105,14 +103,14 @@ def SCA(Inputs):
 
     def htc_and_Tw(Props_b, Tb, P_local, qpp):
         """Solve q'' = psi*h_Swenson(Tw)*(Tw-Tb) for Tw by plain bisection.
-        Unlike HTC.py's Swenson() (torchsolve, handles the non-monotone
+        Unlike correlations/htc.py's SCW.Swenson() (torchsolve, handles the non-monotone
         branch near the pseudocritical peak), this assumes a single root
         on [Tb, Tb+200K] -- adequate away from deteriorated heat transfer."""
         q_solve = qpp if abs(qpp) >= QPP_FLOOR else QPP_FLOOR
 
         def resid(Tw):
             Props_w = Props_TP(Tw, P_local)
-            h = htc_obj.Swenson_dT(Props_b, Props_w, Tw, Tb, G, Dh)
+            h = htc.SCW.Swenson_dT(Props_b, Props_w, Tw, Tb, G, Dh)
             return psi*h*(Tw - Tb) - q_solve
 
         lo, hi = Tb + 1e-3, min(Tb + 200.0, _T_MAX)
@@ -131,7 +129,7 @@ def SCA(Inputs):
         Tw = 0.5*(lo + hi)
 
         Props_w = Props_TP(Tw, P_local)
-        htc_val = psi*htc_obj.Swenson_dT(Props_b, Props_w, Tw, Tb, G, Dh)
+        htc_val = psi*htc.SCW.Swenson_dT(Props_b, Props_w, Tw, Tb, G, Dh)
         return htc_val
 
     # Iterative solver for T_fo, cladding-ID -> fuel-OD temperature across the gas gap

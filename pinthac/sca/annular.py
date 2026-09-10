@@ -28,7 +28,7 @@ _Theta_UO2 = ht.Ann_Theta(lambda T: mat.UO2.k_NFI(T))
 def _find_Tpc(Pnom, T_lo=550.0, T_hi=750.0, n=200):
     """Pseudocritical temperature at Pnom [MPa]: where cp(T) peaks. Cheap,
     plain-numpy, done once -- see closure()'s use of the result as
-    HTC.SCW.Swenson's `anchor`."""
+    htc.SCW.Swenson's `anchor`."""
     Ts = np.linspace(T_lo, T_hi, n)
     cp = gp._getprop('SCW', Ts, Pnom)['cp']
     return float(Ts[np.argmax(cp)])
@@ -38,7 +38,7 @@ _T_PC = _find_Tpc(25.0)   # matches Inputs_ann['Pnom']; re-derive if that change
 # Loose tolerances for the pseudocritical-branch (implicit-solve) phase of
 # closure(): that phase is warm-started from a fast explicit pass and
 # itself sits inside closure()'s own Picard loop, so it doesn't need to
-# resolve Tw tighter than a fraction of a Kelvin -- see HTC.Swenson's and
+# resolve Tw tighter than a fraction of a Kelvin -- see htc.SCW.Swenson's and
 # _solve_Tw_scw's tol_kw/branch_n docstrings for why this matters for speed.
 _LOOSE_TOL_KW = dict(ftol_rel=1e-2, xtol=0.05, rtol=1e-4, max_iter=25)
 
@@ -98,7 +98,7 @@ Inputs_ann = {
 # one). Checked up to q0 = 40 kW/m peak with exact energy balance and
 # consistent results under more robust-phase iterations; above ~45 kW/m
 # the required wall superheat exceeds the widened Tb+500 K search window
-# (see HTC.SCW.Swenson's hi parameter) -- push that out further if a
+# (see htc.SCW.Swenson's hi parameter) -- push that out further if a
 # case genuinely needs it, rather than assuming no solution exists.
 # Re-sweep for a different geometry rather than trusting a result
 # without checking err.
@@ -168,15 +168,15 @@ def closure(T_i, T_o, q_tot, inp, geom, props_at, tol=1e-3,
 
     The convective step -- Swenson's htc(Tw), peaked at the pseudocritical
     temperature -- runs in two phases:
-      1. fast_iter passes with a guessed trial Tw (HTC.SCW.Swenson_dT,
+      1. fast_iter passes with a guessed trial Tw (htc.SCW.Swenson_dT,
          explicit): a plain fixed point, only a contraction below some
          power-dependent threshold, but cheap and gets everything except
          elements whose true Tw sits right at the peak close to converged.
       2. robust_iter passes with an actual root-find on the wall
-         temperature given the flux (HTC.SCW.Swenson, torchsolve-backed):
+         temperature given the flux (htc.SCW.Swenson, torchsolve-backed):
          removes that power ceiling since torchsolve's bracket search
          handles the same non-monotone residual on purpose (see
-         torchsolve/README.md and HTC._solve_Tw_scw), at a materially
+         torchsolve/README.md and htc._solve_Tw_scw), at a materially
          higher per-call cost -- so it's warm-started from phase 1's
          result and given a precomputed pseudocritical anchor (_T_PC)
          and loosened tolerances (_LOOSE_TOL_KW) to keep that cost down,
@@ -225,8 +225,6 @@ def closure(T_i, T_o, q_tot, inp, geom, props_at, tol=1e-3,
     Props_o = props_at(T_o)
     q3 = q_tot/(np.pi*(ro**2 - ri**2))
 
-    swen = htc.SCW()
-
     # initial guesses: a 20 K rise split evenly across the 3 layers
     Tfo_i, Tcldi_OD, Tcldi_ID = T_i + 20.0, T_i + 13.3, T_i + 6.7
     Tfo_o, Tcldo_ID, Tcldo_OD = T_o + 20.0, T_o + 13.3, T_o + 6.7
@@ -257,9 +255,9 @@ def closure(T_i, T_o, q_tot, inp, geom, props_at, tol=1e-3,
         q_i = -ht.Ann_qpp(ri, q3, C1)*Per_fuel_i
         q_o = ht.Ann_qpp(ro, q3, C1)*Per_fuel_o
 
-        htc_conv_i = swen.Swenson_dT(Props_i, props_at(Tcldi_ID), Tcldi_ID, T_i, G_i, D_i)
+        htc_conv_i = htc.SCW.Swenson_dT(Props_i, props_at(Tcldi_ID), Tcldi_ID, T_i, G_i, D_i)
         Tcldi_ID = T_i + (q_i/Per_clad_i)/htc_conv_i
-        htc_conv_o = swen.Swenson_dT(Props_o, props_at(Tcldo_OD), Tcldo_OD, T_o, G_o, D_o)
+        htc_conv_o = htc.SCW.Swenson_dT(Props_o, props_at(Tcldo_OD), Tcldo_OD, T_o, G_o, D_o)
         Tcldo_OD = T_o + (q_o/Per_clad_o)/htc_conv_o
 
         Tcldi_OD_new, Tcldo_ID_new, Tfo_i_new, Tfo_o_new, htc_gap_i, htc_gap_o = \
@@ -295,14 +293,14 @@ def closure(T_i, T_o, q_tot, inp, geom, props_at, tol=1e-3,
         # Ann_HT pass still sees the real value. hi=Tb+500 (vs. Swenson's
         # own Tb+200 default) covers high-flux cases that genuinely need
         # more superheat to satisfy Nu*(Tw-Tb) -- checked directly against
-        # HTC.SCW.Swenson in the dev session up to ~600 kW/m^2.
+        # htc.SCW.Swenson in the dev session up to ~600 kW/m^2.
         qpp_i = np.maximum(q_i/Per_clad_i, 1.0)
-        htc_conv_i = _as_numpy(swen.Swenson(Props_i, props_at, G_i, D_i, qpp_i, T_i,
+        htc_conv_i = _as_numpy(htc.SCW.Swenson(Props_i, props_at, G_i, D_i, qpp_i, T_i,
                                              tol_kw=_LOOSE_TOL_KW, anchor=_T_PC, branch_n=7,
                                              hi=T_i + 500))
         Tcldi_ID = T_i + qpp_i/htc_conv_i
         qpp_o = np.maximum(q_o/Per_clad_o, 1.0)
-        htc_conv_o = _as_numpy(swen.Swenson(Props_o, props_at, G_o, D_o, qpp_o, T_o,
+        htc_conv_o = _as_numpy(htc.SCW.Swenson(Props_o, props_at, G_o, D_o, qpp_o, T_o,
                                              tol_kw=_LOOSE_TOL_KW, anchor=_T_PC, branch_n=7,
                                              hi=T_o + 500))
         Tcldo_OD = T_o + qpp_o/htc_conv_o
