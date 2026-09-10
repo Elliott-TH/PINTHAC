@@ -24,10 +24,11 @@ def _assert_backend_contract(fn, *args, label=""):
     """float in -> finite float out; numpy array in -> numpy out; torch tensor in ->
     tensor out with a finite gradient back to every tensor argument that needed one.
 
-    Every numeric positional argument is exercised as a float, then every one of them
-    together as a numpy array, then together as a torch tensor -- the case the original
-    audit caught, where one argument defaults to a plain float and silently breaks a
-    torch call built around a different, tensor-valued argument."""
+    Every numeric positional argument is exercised as a float, then all of them together
+    as numpy arrays, then all of them together as torch tensors -- and finally each one
+    as a tensor on its own while the others stay plain floats. That last pass is the one
+    the original audit cared about: promoting every argument together is exactly the case
+    that does not break."""
     out_f = fn(*args)
     assert np.isfinite(np.asarray(out_f, dtype=float)).all(), label
 
@@ -43,6 +44,23 @@ def _assert_backend_contract(fn, *args, label=""):
         leaves = [a for a in t_args if torch.is_tensor(a) and a.requires_grad]
         grads = torch.autograd.grad(out_t.sum(), leaves, allow_unused=True)
         assert all(g is None or torch.isfinite(g).all() for g in grads), label
+
+    # Mixed: one argument a tensor while the rest stay plain floats. This is the real
+    # call shape -- a whole axial temperature field against a scalar burnup -- and it is
+    # the one that breaks, because a `where` over the scalar argument alone resolves to
+    # numpy and then cannot combine with the tensor. Promoting every argument together,
+    # as the passes above do, is precisely the case that does NOT break, so without this
+    # loop the contract looks satisfied when it is not.
+    numeric = [i for i, a in enumerate(args) if isinstance(a, (int, float))]
+    for i in numeric:
+        mixed = list(args)
+        mixed[i] = torch.tensor([args[i], args[i]], dtype=torch.float64, requires_grad=True)
+        out_m = fn(*mixed)
+        assert torch.is_tensor(out_m), f"{label}: arg {i} as tensor did not return a tensor"
+        assert torch.isfinite(out_m).all(), f"{label}: arg {i} as tensor gave a non-finite result"
+        if out_m.requires_grad:
+            (g,) = torch.autograd.grad(out_m.sum(), mixed[i], allow_unused=True)
+            assert g is None or torch.isfinite(g).all(), f"{label}: arg {i} gradient not finite"
 
 
 # ------------------------------------------------------------------------------- import

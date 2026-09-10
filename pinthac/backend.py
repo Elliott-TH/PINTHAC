@@ -226,3 +226,34 @@ def zeros_like(x):
     if xp is np:
         return np.zeros_like(np.asarray(x, dtype=float))
     return torch.zeros_like(x)
+
+
+def promote_all(*args):
+    """
+    Promote every scalar argument to match whichever argument is an array.
+
+    Why this exists: promote() matches one value against one named reference, which only
+    works when you already know which of the two is the array. In a correlation you often
+    do not. `k_NFI(T, Bu)` is called with a whole axial temperature field and a scalar
+    burnup, and equally with a scalar temperature and a burnup sweep -- so
+    `Bu = promote(Bu, T)` fixes the first call shape and breaks on the second.
+
+    This resolves the array library once across all the arguments, exactly as lib() does,
+    and lifts every scalar to it. Use it at the top of any function whose arguments can
+    independently be scalars or arrays:
+
+        T, sig, t = backend.promote_all(T, sig, t)
+        xp = backend.lib(T, sig, t)
+
+    Inputs:
+        *args : any mix of floats, numpy arrays, or torch tensors
+    Returns:
+        tuple of the same values, with scalars lifted to the dispatched library. Returned
+        unchanged when every argument is already a scalar, since numpy handles those.
+    """
+    xp = lib(*args)
+    if xp is np:
+        return args
+
+    reference = next(a for a in args if isinstance(a, torch.Tensor))
+    return tuple(promote(a, reference) for a in args)
