@@ -5,6 +5,7 @@ from pinthac.correlations import friction as fric
 from pinthac import pin as ht
 from pinthac.properties import matmod as mat
 from pinthac.properties import iapws95 as iapws
+from pinthac.sca import geometry as chan_geom
 from tqdm import tqdm
 
 '''
@@ -148,13 +149,16 @@ def geometry(inp):
     R_clad_o_ID = ro + delta_o
     R_clad_o_OD = R_clad_o_ID + tco
 
-    Per_i = 2*np.pi*R_clad_i_ID
-    Per_o = 2*np.pi*R_clad_o_OD
-    D_i = 2*R_clad_i_ID                             # circular inner channel
-    Ah_o = Pitch**2 - np.pi*R_clad_o_OD**2          # outer channel, square-pitch unit cell
-    D_o = 4*Ah_o/Per_o
-    G_i = inp['mdot_i']/(np.pi*R_clad_i_ID**2)
-    G_o = inp['mdot_o']/Ah_o
+    # Inner channel: circular tube bored through the inner cladding. Outer channel:
+    # square-pitch rod-bundle unit cell around the outer cladding OD. Both geometries
+    # (and sca/rod.py's own single rod-bundle channel) share these two formulas --
+    # factored out to sca/geometry.py rather than written by hand a third time.
+    inner_cell = chan_geom.circular_channel(R_clad_i_ID)
+    outer_cell = chan_geom.square_pitch_cell(Pitch, R_clad_o_OD)
+    Per_i, D_i = inner_cell['Per'], inner_cell['Dh']
+    Per_o, D_o = outer_cell['Per'], outer_cell['Dh']
+    G_i = inp['mdot_i']/inner_cell['A_flow']
+    G_o = inp['mdot_o']/outer_cell['A_flow']
 
     return dict(Per_i=Per_i, Per_o=Per_o, D_i=D_i, D_o=D_o, G_i=G_i, G_o=G_o,
                 R_clad_i_ID=R_clad_i_ID, R_clad_i_OD=R_clad_i_OD,

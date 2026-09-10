@@ -50,6 +50,7 @@ from pinthac.correlations import friction as fric
 from pinthac.pin.cylindrical import Cyl_T
 from pinthac.properties.iapws95 import IAPWS95, device
 from pinthac.properties.matmod import UO2
+from pinthac.sca import geometry
 
 sigma = scipy.constants.sigma  # Stefan-Boltzmann constant
 DTYPE = torch.float64
@@ -229,9 +230,8 @@ def rod_node(Property, Tm, p, qp_val, inputs):
     A_fuel = math.pi * rfo**2
     q_ppp = qp_val / A_fuel
 
-    Cir = 2 * math.pi * rco
-    A_flow = pitch**2 - math.pi * rco**2
-    Dh = 4 * A_flow / Cir
+    cell = geometry.square_pitch_cell(pitch, rco)
+    A_flow, Dh = cell['A_flow'], cell['Dh']
 
     # Rod-bundle correction, Hughes et al. (2014) Eq. (11): htc_pin = psi*htc_round_tube.
     # Presser (Eq. 10 there) is the same psi correlations/bundle.py::Bundle.Presser
@@ -352,7 +352,8 @@ def run_SCA(inputs, pval, Tscw_in, q0, L=3.0, n=400, scw_table=None, device=devi
     def q_p(z):
         return q0 * math.cos(math.pi * z / L)
 
-    A_flow = inputs['pitch']**2 - math.pi * inputs['rco']**2
+    cell = geometry.square_pitch_cell(inputs['pitch'], inputs['rco'])
+    A_flow, Dh = cell['A_flow'], cell['Dh']
     mdot = inputs['G'] * A_flow
 
     Tin_t = torch.tensor(float(Tscw_in), dtype=DTYPE, device=device)
@@ -383,8 +384,6 @@ def run_SCA(inputs, pval, Tscw_in, q0, L=3.0, n=400, scw_table=None, device=devi
     # Pressure drop: a single pass over the converged coolant temperature field, the
     # same decoupled-from-the-thermal-solve structure sca/annular.py::solve_field uses
     # (see pressure_drop's docstring for the Filonenko-not-Wu choice).
-    Cir = 2 * math.pi * inputs['rco']
-    Dh = 4 * A_flow / Cir
     dP = pressure_drop(np.array(T_i_list), inputs['G'], Dh, scw_table, fric.f_SCW.Filonenko, dz)
 
     return {
@@ -457,7 +456,7 @@ def run_SCA_batch(inputs_b, Tscw_in_b, q_sensors_b, sensor_z, pval=25.0,
     def q_p_batch(z_scalar):
         return interp_sensors(q_sensors_b, sensor_z, float(z_scalar))
 
-    A_flow = inputs_b['pitch']**2 - math.pi * inputs_b['rco']**2
+    A_flow = geometry.square_pitch_cell(inputs_b['pitch'], inputs_b['rco'])['A_flow']
     mdot = inputs_b['G'] * A_flow
 
     hin = Property(['T', Tscw_in_b], 'h')
