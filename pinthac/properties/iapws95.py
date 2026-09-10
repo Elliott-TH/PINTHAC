@@ -243,6 +243,21 @@ class IAPWS95:
                        + delta*tau*dEdt)).sum(dim=0)
 
         # ---- Group 4: nonanalytic (critical-region) terms ----
+        # These are singular at delta = 1 exactly, and not removably so in floating point:
+        # d2Delta_dd2 below divides by (delta-1), and carries ((delta-1)^2) raised to
+        # 1/(2*beta) - 2 = -1/3. Both blow up at the critical density, and the resulting
+        # NaN propagates into phi_dd and so into pressure derivatives, cp and the speed of
+        # sound -- IAPWS95.p_rho and cp both returned NaN at exactly rho = 322.0 kg/m^3.
+        #
+        # Nudging delta off exactly 1 by 1e-11 removes it. That is 3.2e-9 kg/m^3 in
+        # density, which is four orders of magnitude inside the region both R12-08 and
+        # R15-11 already flag as unreliable ("approximately within 0.01 kg/m^3 of rho_c on
+        # the critical isotherm"), so it cannot move any physically meaningful result --
+        # it only replaces a NaN with the value from immediately beside it. The shadowed
+        # name applies to this group alone; groups 1 to 3 are analytic at delta = 1 and
+        # keep the exact value.
+        delta = torch.where(torch.abs(delta - 1.0) < 1.0e-11, delta + 1.0e-11, delta)
+
         theta = (1 - tau) + A4_ * ((delta-1)**2) ** (1/(2*beta4_))
         Delta = theta**2 + B4_ * ((delta-1)**2) ** a4_
         psi = torch.exp(-C4_*(delta-1)**2 - D4_*(tau-1)**2)
@@ -458,11 +473,40 @@ class IAPWS95:
     # the whole surface, not just Region 1/2.
     # =========================================
     @classmethod
-    def mu(cls, d):
-        """Dynamic viscosity [Pa.s], IAPWS 2008 formulation (R12-08)."""
+    def mu(cls, d, enhancement=True):
+        """Dynamic viscosity [Pa.s], IAPWS 2008 formulation (R12-08), Eq. (10).
+
+        The critical enhancement mu2 needs the isothermal compressibility at two
+        temperatures -- the state's own T, and the fixed reference T_R = 1.5*Tc =
+        970.644 K -- and R12-08 says both must come from IAPWS-95. VISC lives in the
+        IAPWS-97 module, which this module imports, so it cannot reach back here for
+        them; they are computed on this side and passed down.
+
+        The second one costs an extra Helmholtz evaluation at (rho, T_R), so mu is
+        about twice the price with the enhancement on. That is worth knowing before
+        benchmarking property throughput. Pass enhancement=False for the industrial
+        simplification mu2 = 1, which R12-08 Sec. 2.8 and Sec. 3 sanction outside the
+        near-critical region -- there it agrees with the full form to better than the
+        correlation's own uncertainty.
+
+        Leaving it on by default is deliberate: mu feeds the thermal-conductivity
+        critical enhancement (R15-11 Eq. 18 divides by it), so a mu missing its own
+        enhancement silently inflates lambda near the critical point.
+        """
         rho = rhoc * d['delta']
         T = Tc / d['tau']
-        val = w97.VISC.mu(rho, T)
+        if not enhancement:
+            val = w97.VISC.mu(rho, T)
+            return cls._match_type(val, d['delta'])
+
+        drhodp_T = 1.0 / cls.p_rho(d, units='MPa')            # (drho/dp)_T at T
+        T_R = 1.5 * Tc
+        # rho arrives as whatever the caller passed in -- numpy or torch -- so build the
+        # matching constant array by arithmetic rather than with a library-specific
+        # full_like, which would pin this to one backend.
+        d_R = cls.helmholtz(rho, rho * 0.0 + T_R)
+        drhodp_TR = 1.0 / cls.p_rho(d_R, units='MPa')          # (drho/dp)_T at T_R
+        val = w97.VISC.mu(rho, T, drhodp_T=drhodp_T, drhodp_TR=drhodp_TR)
         return cls._match_type(val, d['delta'])
 
     @classmethod
