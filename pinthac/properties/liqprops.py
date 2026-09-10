@@ -1,11 +1,26 @@
 """
 Liquid-metal (sodium, lead, lead-bismuth eutectic) thermophysical properties.
 
-Moved from Liquid_Metals.py in Phase 1. Phase 2 brings it up to the docstring and
-backend-dispatch standard without changing any formula, constant or exponent. Per
-docs/DECISIONS.md ("Scope: lead is a toy" / "Scope: liquid metals"), no second
+Moved from Liquid_Metals.py in Phase 1. Phase 2 brought it up to the docstring and
+backend-dispatch standard without changing any formula, constant or exponent, but left
+every citation as "Not established" (Q31) -- Sobolev 2020 was not yet in the repository.
+Per docs/DECISIONS.md ("Scope: lead is a toy" / "Scope: liquid metals"), no second
 correlation per property is added here -- this module is supporting infrastructure for
 the property library and the Phase 7 uncertainty figure, not an active SCA path.
+
+Phase 3 checked every formula and every rho/sigma/cp/h/mu/k coefficient below against
+Useful_pdfs/sobolev2020.pdf (V. Sobolev, "Properties of Liquid Metal Coolants: Na, Pb,
+Pb-Bi", 2020) -- the brief's preferred source for these three coolants -- and every one
+matches exactly (Sobolev's Tables 7, 9, 10, 11 and 13; see each function's own docstring
+for the equation and table number). Two things did not reconcile and are not fixed here,
+per CLAUDE.md ("change no physics"; a genuine defect is reported, not silently patched):
+
+  - Every h() function's last term has the opposite sign from Sobolev's own Equation 14
+    integral of its own cp -- see Sodium.h's docstring and docs/OPEN_QUESTIONS.md.
+  - Sodium.uncert_k's stated [0, 8%] band does not match Sobolev's text, which instead
+    states an up-to-15% spread for Na; and Lead.uncert_sig / LBE.uncert_sig do not match
+    the single collective "(3-6)%" figure Sobolev states for surface tension across all
+    three coolants -- see those functions' docstrings and docs/OPEN_QUESTIONS.md.
 
 Each class carries its own melting/boiling points, per-property validated temperature
 range (range_rho, range_cp, ...) and per-property relative uncertainty band
@@ -56,10 +71,13 @@ class Sodium:
             Tm = 371 K to Tb = 1155 K (Sodium.range_rho).
 
         Uncertainty:
-            0.3 to 3 percent (Sodium.uncert_rho).
+            0.3 to 3 percent (Sodium.uncert_rho), matching Sobolev (2020) section 4.1's
+            stated "0.3-3% for Na".
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 4.1,
+            Equation [4], Table 7 (rho0=927.0, A0=0.235, Tm=371.0 -- match exactly).
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -85,10 +103,17 @@ class Sodium:
             Tm = 371 K to Tb = 1155 K (Sodium.range_sig).
 
         Uncertainty:
-            3 to 6 percent (Sodium.uncert_sig).
+            3 to 6 percent (Sodium.uncert_sig). Sobolev (2020) section 4.3 states a
+            variation of "(3-6)%" between sources for surface tension, but as one
+            collective figure covering Na, Pb and Pb-Bi(e) together, not broken out per
+            metal -- so this is consistent with, but not independently confirmed
+            specifically for, sodium. See docs/OPEN_QUESTIONS.md (Q31).
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 4.3,
+            Equation [11], Table 9 (sigma0=195e-3, A0=0.0966e-3, Tm=371.0 -- match
+            exactly).
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -116,10 +141,14 @@ class Sodium:
             Tm = 371 K to Tb = 1155 K (Sodium.range_cp).
 
         Uncertainty:
-            0 to 1 percent (Sodium.uncert_cp).
+            0 to 1 percent (Sodium.uncert_cp), matching Sobolev (2020) section 4.4's
+            stated "about +/-1% for Na".
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 4.4,
+            Equation [12], Table 10 (a=38.12, b=-1.9493e-2, c=1.024e-5, d=-6.9e4 -- match
+            exactly, molar values divided by Sodium.M here for the per-kg value returned).
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -146,10 +175,23 @@ class Sodium:
             Tm = 371 K to Tb = 1155 K (Sodium.range_h).
 
         Uncertainty:
-            5 to 7 percent (Sodium.uncert_h).
+            5 to 7 percent (Sodium.uncert_h), matching Sobolev (2020) section 4.4's
+            stated "+/-(5-7)%" (given jointly for Pb and Pb-Bi(e) there, but Sodium's own
+            heat-capacity uncertainty in the same section is the tighter +/-1%, so this
+            enthalpy figure is carried over from the source without being independently
+            re-derived from it).
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 4.4,
+            Equation [14]. The a*(T-Tm), (b/2)*(T^2-Tm^2) and (c/3)*(T^3-Tm^3) terms match
+            Equation [14] exactly, but this function's last term is
+            d*(1/T - 1/Tm) where Equation [14] gives d*(1/Tm - 1/T) -- the opposite sign.
+            Independent check: integrating Sodium.cp's own d*T^-2 term from Tm to T gives
+            d*(-1/T) - d*(-1/Tm) = d*(1/Tm - 1/T), i.e. Sobolev's sign, confirming this is
+            a real discrepancy and not a transcription difference in the reference.
+            Not fixed here per CLAUDE.md ("change no physics") -- see
+            docs/OPEN_QUESTIONS.md.
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -176,10 +218,13 @@ class Sodium:
             Tm = 371 K to Tb = 1155 K (Sodium.range_mu).
 
         Uncertainty:
-            5 percent (Sodium.uncert_mu).
+            5 percent (Sodium.uncert_mu), matching Sobolev (2020) section 5.1's stated
+            "does not exceed +/-5%" for the most reliable Na recommendations.
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 5.1,
+            Equation [17], Table 11 (eta_inf=0.0844e-3, E_eta=6500 -- match exactly).
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -206,10 +251,21 @@ class Sodium:
             Tm = 371 K to Tb = 1155 K (Sodium.range_k).
 
         Uncertainty:
-            0 to 8 percent (Sodium.uncert_k).
+            0 to 8 percent (Sodium.uncert_k). This does not match Sobolev (2020) section
+            5.3, which instead reports that Fink and Leibowitz's examination of the Na
+            thermal-conductivity literature found differences of "up to +/-15%" over
+            371-1500 K -- a wider band than this module states, from an examination
+            rather than a single recommended sigma. Not adjusted to match; see
+            docs/OPEN_QUESTIONS.md (Q31).
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 5.3,
+            Equation [22], Table 13. The formula here (kval = 104 - 0.0466*T) is Table
+            13's lambda_M,0 + A_lambda,0*(T-Tm) with Bl,0=0 for Na (lambda_M,0=86.7,
+            A_lambda,0=-0.0466, Tm=371.0), algebraically simplified to a single line --
+            86.7 - 0.0466*(T-371) = 103.99 - 0.0466*T, matching the "104" constant here
+            to within rounding.
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -257,10 +313,13 @@ class Lead:
             Tm = 600.6 K to Tb = 2021 K (Lead.range_rho).
 
         Uncertainty:
-            0.7 to 0.8 percent (Lead.uncert_rho).
+            0.7 to 0.8 percent (Lead.uncert_rho), matching Sobolev (2020) section 4.1's
+            stated "0.7-0.8% for Pb and Pb-Bi(e)".
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 4.1,
+            Equation [4], Table 7 (rho0=10671, A0=1.2795, Tm=600.6 -- match exactly).
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -286,10 +345,16 @@ class Lead:
             Tm = 600.6 K to Tb = 2021 K (Lead.range_sig).
 
         Uncertainty:
-            0 to 5 percent (Lead.uncert_sig).
+            0 to 5 percent (Lead.uncert_sig). Sobolev (2020) section 4.3 gives only a
+            collective "(3-6)%" spread across Na, Pb and Pb-Bi(e) together, not a
+            per-metal number -- this module's [0, 5%] is not independently confirmable
+            from that single combined figure. See docs/OPEN_QUESTIONS.md (Q31).
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 4.3,
+            Equation [11], Table 9 (sigma0=458e-3, A0=0.113e-3, Tm=600.6 -- match
+            exactly).
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -317,10 +382,14 @@ class Lead:
             Tm = 600.6 K to 1100 K (Lead.range_cp).
 
         Uncertainty:
-            5 to 7 percent (Lead.uncert_cp).
+            5 to 7 percent (Lead.uncert_cp), matching Sobolev (2020) section 4.4's stated
+            "+/-(5-7)% for Pb and Pb-Bi(e)".
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 4.4,
+            Equation [12], Table 10 (a=36.50, b=-1.020e-2, c=3.2e-6, d=-3.158e5 -- match
+            exactly, molar values divided by Lead.M here for the per-kg value returned).
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -347,10 +416,17 @@ class Lead:
             Tm = 600.6 K to 1100 K (Lead.range_h).
 
         Uncertainty:
-            5 to 7 percent (Lead.uncert_h).
+            5 to 7 percent (Lead.uncert_h), matching Sobolev (2020) section 4.4's stated
+            "+/-(5-7)% for Pb and Pb-Bi(e)" heat-capacity uncertainty, carried over to the
+            enthalpy this integrates.
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 4.4,
+            Equation [14]. Same sign discrepancy in the last term as Sodium.h -- see that
+            function's docstring for the derivation. Equation [14] gives
+            d*(1/Tm - 1/T); this function computes d*(1/T - 1/Tm). Not fixed here per
+            CLAUDE.md ("change no physics") -- see docs/OPEN_QUESTIONS.md.
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -378,10 +454,13 @@ class Lead:
             Tm = 600.6 K to 1270 K (Lead.range_mu).
 
         Uncertainty:
-            5 percent (Lead.uncert_mu).
+            5 percent (Lead.uncert_mu), matching Sobolev (2020) section 5.1's stated
+            "+/-5%" for Pb over TM,0 to 1270 K.
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 5.1,
+            Equation [17], Table 11 (eta_inf=0.455e-3, E_eta=8888 -- match exactly).
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -408,10 +487,15 @@ class Lead:
             Tm = 600.6 K to 1300 K (Lead.range_k).
 
         Uncertainty:
-            0 to 15 percent (Lead.uncert_k).
+            0 to 15 percent (Lead.uncert_k), matching Sobolev (2020) section 5.3's stated
+            "maximum difference of +/-15%" for the recommended Pb correlation over
+            TM,0-1300 K.
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 5.3,
+            Equation [22], Table 13 (lambda_M,0=15.8, A_lambda,0=0.011, Bl,0=0,
+            Tm=600.6 -- match exactly).
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -458,10 +542,13 @@ class LBE:
             Tm = 398 K to Tb = 1927 K (LBE.range_rho).
 
         Uncertainty:
-            0.7 to 0.8 percent (LBE.uncert_rho).
+            0.7 to 0.8 percent (LBE.uncert_rho), matching Sobolev (2020) section 4.1's
+            stated "0.7-0.8% for Pb and Pb-Bi(e)".
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 4.1,
+            Equation [4], Table 7 (rho0=10550, A0=1.293, Tm=398 -- match exactly).
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -487,10 +574,16 @@ class LBE:
             Tm = 398 K to Tb = 1927 K (LBE.range_sig).
 
         Uncertainty:
-            0 to 0.3 percent (LBE.uncert_sig).
+            0 to 0.3 percent (LBE.uncert_sig). As with Lead.sigma, Sobolev (2020) section
+            4.3 gives only a collective "(3-6)%" spread across all three coolants, not a
+            per-metal number, so this module's much tighter [0, 0.3%] is not
+            independently confirmable from that figure. See docs/OPEN_QUESTIONS.md (Q31).
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 4.3,
+            Equation [11], Table 9 (sigma0=416.7e-3, A0=0.0799e-3, Tm=398 -- match
+            exactly).
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -518,10 +611,14 @@ class LBE:
             Tm = 398 K to 1100 K (LBE.range_cp).
 
         Uncertainty:
-            5 to 7 percent (LBE.uncert_cp).
+            5 to 7 percent (LBE.uncert_cp), matching Sobolev (2020) section 4.4's stated
+            "+/-(5-7)% for Pb and Pb-Bi(e)".
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 4.4,
+            Equation [12], Table 10 (a=34.30, b=-8.20e-3, c=2.6e-6, d=-9.5e4 -- match
+            exactly, molar values divided by LBE.M here for the per-kg value returned).
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -548,10 +645,17 @@ class LBE:
             Tm = 398 K to 1100 K (LBE.range_h).
 
         Uncertainty:
-            5 to 7 percent (LBE.uncert_h).
+            5 to 7 percent (LBE.uncert_h), matching Sobolev (2020) section 4.4's stated
+            "+/-(5-7)% for Pb and Pb-Bi(e)" heat-capacity uncertainty, carried over to
+            the enthalpy this integrates.
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 4.4,
+            Equation [14]. Same sign discrepancy in the last term as Sodium.h -- see that
+            function's docstring for the derivation. Equation [14] gives
+            d*(1/Tm - 1/T); this function computes d*(1/T - 1/Tm). Not fixed here per
+            CLAUDE.md ("change no physics") -- see docs/OPEN_QUESTIONS.md.
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -578,10 +682,13 @@ class LBE:
             Tm = 398 K to 1180 K (LBE.range_mu).
 
         Uncertainty:
-            7 to 10 percent (LBE.uncert_mu).
+            7 to 10 percent (LBE.uncert_mu), matching Sobolev (2020) section 5.1's stated
+            "higher variation (7-10%)" for Pb-Bi(e) viscosity recommendations.
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 5.1,
+            Equation [17], Table 11 (eta_inf=0.494e-3, E_eta=6270 -- match exactly).
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -608,10 +715,15 @@ class LBE:
             Tm = 398 K to 1100 K (LBE.range_k).
 
         Uncertainty:
-            10 to 15 percent (LBE.uncert_k).
+            10 to 15 percent (LBE.uncert_k), matching Sobolev (2020) section 5.3's stated
+            "uncertainty of 10-15%" for the Pb-Bi(e) parabolic thermal-conductivity fit
+            up to 1100 K.
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
+            Reference Module in Materials Science and Materials Engineering, section 5.3,
+            Equation [22], Table 13 (lambda_M,0=9.35, A_lambda,0=0.01434,
+            Bl,0=2.305e-6, Tm=398 -- match exactly).
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
