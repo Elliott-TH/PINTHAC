@@ -336,7 +336,7 @@ def pressure_drop(T, G, D, props_at, fric_func, dz, g=9.81):
     T (array): bulk coolant temperature along z [K].
     G, D: mass flux [kg/m^2-s] and hydraulic diameter [m] for this channel.
     fric_func(Props, G, D): friction-factor correlation, e.g.
-        FRICT.f_SCW().Filonenko (inner channel) or .Wu (outer channel,
+        friction.f_SCW.Filonenko (inner channel) or .Wu (outer channel,
         rod-bundle-fitted).
 
     Returns cumulative dP [Pa] along z, dP[0] = 0 (no drop across the
@@ -443,9 +443,8 @@ def solve_field(Inputs=Inputs_ann, q_p=None, outer_iter=15, tol=10.0, progress=F
     # above (this single-phase momentum balance doesn't feed back into
     # the enthalpy/htc closure), so a single pass on the converged field
     # is enough; no outer iteration needed.
-    fric_obj = fric.f_SCW()
-    dP_i = pressure_drop(T_i, G_i, D_i, props_at, fric_obj.Filonenko, dz)
-    dP_o = pressure_drop(T_o, G_o, D_o, props_at, fric_obj.Wu, dz)
+    dP_i = pressure_drop(T_i, G_i, D_i, props_at, fric.f_SCW.Filonenko, dz)
+    dP_o = pressure_drop(T_o, G_o, D_o, props_at, fric.f_SCW.Wu, dz)
 
     results = {
         'z': Z,
