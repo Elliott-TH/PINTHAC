@@ -1,0 +1,960 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{longtable}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\notimpl}{\textbf{Not implemented.}}
+\newcommand{\notest}{\textit{Not established --- see \code{docs/OPEN\_QUESTIONS.md}.}}
+
+\title{PINTHAC Code Summary}
+\author{Elliott Hirko}
+\date{Phase 8 revision}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This is the model manual for PINTHAC (\emph{Physics Informed Nuclear
+Thermal-Hydraulic Analysis Code}). It keeps the section numbering of the original
+project table of contents, \code{docs/reference/PINTHA\_Code\_Summary.pdf}, and fills
+every section from the docstrings that now live in \code{pinthac/}. Nothing in this
+document was re-derived: every formula, valid range, uncertainty figure and reference
+below is transcribed from the corresponding function's docstring in the code, which is
+itself traced to \code{docs/reference/} or reported as \notest{} where no source
+document supplies it. A section left blank in the original PDF and still blank here
+means the model is not implemented; that is stated explicitly rather than silently
+omitted. See \code{docs/FINAL\_REPORT.md} for what changed, phase by phase, and
+\code{docs/OPEN\_QUESTIONS.md} for everything still open.
+
+Sections and functions the PDF's table of contents did not anticipate, but that exist
+in the code and are worth documenting, are added as lettered sub-subsections (e.g.
+Zircaloy under Steels, Mikityuk under Liquid Sodium) rather than renumbering anything
+the PDF already had.
+\end{abstract}
+
+\tableofcontents
+
+% =====================================================================================
+\section{Properties}
+% =====================================================================================
+
+Material and fluid property models. Every function is a flat-namespace class member
+(\code{UO2.k\_Klimenko(T)}, no \code{self}), accepting a Python float, a NumPy array, or
+a PyTorch tensor and returning the same type, per \code{CLAUDE.md} section 5.
+
+\subsection{Water Properties}
+
+Implemented in \code{pinthac/properties/iapws95.py} (the 1995 equation of state) and
+\code{pinthac/properties/iapws97.py} (the 1997 industrial formulation, and the
+viscosity/thermal-conductivity release formulations \code{iapws95.py} calls into).
+Every function in these two modules that touches core Helmholtz-energy arithmetic has a
+thin docstring (a one-line description, no formulation/range/uncertainty block) --- the
+physics is instead verified directly against 41 published IAPWS check values in
+\code{tests/test\_iapws\_verification.py}, which is the authoritative statement of what
+is and is not correct in this implementation. This section summarizes that verification
+rather than re-deriving the (very long) Helmholtz free-energy expansions themselves.
+
+\subsubsection{IAPWS 1995 Equation of State}
+
+\code{properties/iapws95.py::IAPWS95}. The full Helmholtz free-energy formulation
+(ideal-gas part \code{Phi0} plus residual part \code{Phir}), from which pressure,
+entropy, enthalpy, isochoric and isobaric heat capacity, and speed of sound are all
+analytic derivatives (\code{p}, \code{s}, \code{h}, \code{cv}, \code{cp}, \code{c}).
+Built on PyTorch throughout, so every one of those derivatives is available via
+autograd, not finite differences, and every function stays differentiable under a
+batch of tensor inputs.
+
+Two solves sit on top of the analytic core, both implemented as fixed-iteration-count,
+batch-vectorized loops (no \code{scipy.optimize}, per \code{CLAUDE.md} section 5.5):
+\begin{itemize}
+  \item \code{saturation(T)}: the coexisting liquid/vapor state at a given temperature,
+    via Newton's method on the 2$\times$2 Maxwell-construction system (equal pressure,
+    equal Gibbs energy), seeded by the IAPWS-95 ancillary equations and using an
+    autograd-built Jacobian.
+  \item \code{rho\_Tp(T, p)}: density at given temperature and pressure, via damped
+    Newton iteration seeded by a physically motivated initial guess (the saturated-liquid
+    ancillary density for compressed liquid, ideal-gas density otherwise). The
+    docstring is explicit that a global bisection search over the full density range is
+    \emph{not} safe here: away from the true $(T,\rho)$ branch the residual terms (some
+    with $\tau$ exponents up to 50) stop cancelling cleanly in floating point, and a
+    bracket search can lock onto a spurious root near the critical density instead of
+    the physical one.
+  \item \code{T\_hp(h, p)}: temperature at given enthalpy and pressure, via bisection on
+    \code{rho\_Tp}+\code{h}, valid where enthalpy is monotonic in temperature at fixed
+    pressure (true on the supercritical isobars used throughout the SCA solvers; not
+    valid inside the two-phase dome).
+\end{itemize}
+
+\textbf{Valid range / Uncertainty:} not stated per-function in the code; established
+instead by the verification suite below.
+
+\textbf{Reference:} IAPWS R6-95(2018), \emph{Revised Release on the IAPWS Formulation
+1995 for the Thermodynamic Properties of Ordinary Water Substance for General and
+Scientific Use}.
+
+\textbf{Verification (\code{tests/test\_iapws\_verification.py}):} all of R6-95's Table
+7 (single-phase region: $p$, $c_v$, speed of sound, entropy, 11 points spanning
+300--900~K and 0.1--700~MPa) and Table 8 (saturation: $p_{sat}$, $\rho_f$, $\rho_g$,
+$h$, $s$) reproduce the release's own values to its stated nine significant figures.
+This is the core claim of the GPU IAPWS-95 project and it now has an external proof.
+One conditioning limit, not a defect: at $T=647$~K, $\rho=358$~kg/m$^3$ (0.6~K below
+$T_c$, near $\rho_c$), $c_v$ and $s$ remain exact to $5\times10^{-10}$ and
+$8\times10^{-10}$ while pressure is off by $5.3\times10^{-6}$ and speed of sound by
+$4.6\times10^{-4}$ --- first-order quantities exact, second-order quantities degraded,
+the signature of numerical ill-conditioning near the critical point rather than a wrong
+formulation.
+
+\subsubsection{IAPWS 1997 Equation of State}
+
+\code{properties/iapws97.py}. \textbf{Region 1} (subcooled liquid, class \code{R1}) and
+\textbf{Region 2} (superheated steam, class \code{R2}) are implemented, each with the
+forward Gibbs-energy formulation and the backward equations $T(p,h)$ and $T(p,s)$
+(Region 2's backward equations auto-select sub-region 2a/2b/2c). The
+saturation-pressure/temperature relation (class \code{RSAT}) is also implemented.
+\textbf{Region 3} (near-critical) and \textbf{Region 5} (high-temperature steam,
+$>$1073~K) are \notimpl{} No formulation, range or uncertainty is stated in the
+docstrings for these regions; IAPWS-95 (above) is the differentiable, full-range
+equation of state this library actually uses for supercritical-water work, so Regions 1
+and 2 here serve mainly the industrial-formulation call sites that still use them (none
+of the SCA solvers do).
+
+\textbf{Reference:} IAPWS R7-97(2012), \emph{Revised Release on the IAPWS Industrial
+Formulation 1997 for the Thermodynamic Properties of Water and Steam}.
+
+\subsubsection{IAPWS Thermal Conductivity and Viscosity}
+
+\code{properties/iapws97.py::VISC} (R12-08, viscosity) and \code{::COND} (R15-11,
+thermal conductivity), both reached from \code{IAPWS95.mu}/\code{IAPWS95.lam}. Each
+formulation is a sum of a dilute-gas term, a finite-density (``background'') term, and
+a critical-enhancement term active only near the critical point:
+
+\begin{align*}
+  \mu(\rho,T) &= \mu_0(T)\cdot\mu_1(\rho,T)\cdot\mu_2(\rho,T) &\text{(R12-08 Eq. 10)}\\
+  \lambda(\rho,T) &= \lambda_0(T) + \lambda_1(\rho,T) + \lambda_2(\rho,T,\ldots) &\text{(R15-11)}
+\end{align*}
+
+The viscosity's critical enhancement $\mu_2$ needs the isothermal compressibility
+$(\partial\rho/\partial p)_T$ at both the state's own temperature and a fixed reference
+temperature $T_R=1.5\,T_c=970.644$~K; both come from IAPWS-95 itself (computed on the
+\code{iapws95.py} side and passed down), which roughly doubles the cost of a viscosity
+evaluation with the enhancement on. \code{IAPWS95.mu(d, enhancement=False)} gives the
+industrial simplification $\mu_2=1$ that R12-08 sanctions outside the near-critical
+region. The enhancement is left \emph{on} by default because the thermal-conductivity
+critical enhancement divides by $\mu$ (R15-11 Eq. 18), so a $\mu$ missing its own
+enhancement silently inflates $\lambda$ near the critical point.
+
+\textbf{Verification:} R12-08 Table 4 (all 11 points, away from the critical region) to
+$10^{-8}$; R15-11's dilute-gas and dense-liquid end-points of the 647.35~K isotherm.
+\textbf{Three confirmed defects, all confined to the critical-enhancement machinery}
+(full detail and error tables in \code{docs/OPEN\_QUESTIONS.md}, Round 6):
+\begin{enumerate}
+  \item Viscosity $\mu_2$ is under-computed near $\rho_c$: error ranges from
+    $-0.0003\%$ at $\rho=122$~kg/m$^3$ to $-8.42\%$ at $\rho=322$~kg/m$^3$ (the critical
+    density itself), confined to R12-08 Eqs.\ (14)--(19).
+  \item Thermal conductivity $\lambda_2$ is over-computed near $\rho_c$ (the opposite
+    sign) and returns \textbf{NaN exactly at $\rho_c=322$}, confined to R15-11
+    Eqs.\ (17)--(25).
+  \item $\lambda_2$ is not zeroed where $\Delta\chi<0$ as R15-11 Sec.\ 2.7 requires:
+    $-0.094\%$ at 998~kg/m$^3$ and $-0.190\%$ at 1200~kg/m$^3$, both at 298.15~K.
+\end{enumerate}
+\textbf{Consequence:} the supercritical-water work in this library runs at 25~MPa,
+above $p_c$, so it never sits at the critical point itself, but the pseudocritical
+region at 25~MPa is close enough that $\mu$ and $\lambda$ carry some of this error, and
+the NaN is reachable. Nothing downstream should be trusted within a few kg/m$^3$ of the
+critical density until these are fixed. This is flagged, not fixed, here --- fixing it
+touches \code{pinthac/}, out of scope for this phase.
+
+\textbf{Reference:} IAPWS R12-08, \emph{Release on the IAPWS Formulation 2008 for the
+Viscosity of Ordinary Water Substance}; IAPWS R15-11, \emph{Release on the IAPWS
+Formulation 2011 for the Thermal Conductivity of Ordinary Water Substance}.
+
+\subsection{Liquid Metal Properties}
+
+\code{properties/liqprops.py::Sodium}, \code{::Lead}, \code{::LBE}. Each carries six
+properties (density, surface tension, specific heat, specific enthalpy, viscosity,
+thermal conductivity), each with its own validated temperature range
+(\code{range\_rho}, \code{range\_cp}, \ldots) and relative model-form uncertainty band
+(\code{uncert\_rho}, \code{uncert\_cp}, \ldots, each a \texttt{[low, high]} pair) as
+class attributes next to the correlation. \code{Props(mat, T)} bundles all six into the
+uniform dict \code{getprop.py} dispatches to; \code{RePr(G, D, prop)} computes Reynolds
+and Prandtl numbers from that dict.
+
+\begin{longtable}{p{2.1cm}p{4.4cm}p{2.3cm}p{2.3cm}p{3.5cm}}
+\textbf{Property} & \textbf{Formulation} & \textbf{Valid range} & \textbf{Uncertainty} & \textbf{Notes} \\ \hline
+$\rho(T)$ & $\rho_0 - A_0(T-T_m)$ & $T_m$--$T_b$ per metal & 0.3--3\% (Na), 0.7--0.8\% (Pb, LBE) & Sobolev (2020) Eq.\ [4], Table 7 \\
+$\sigma(T)$ & $(\sigma_0 - A_0(T-T_m))\times10^{-3}$ & $T_m$--$T_b$ & 3--6\% (Na); Pb/LBE bands not independently confirmable from Sobolev's single collective figure & Eq.\ [11], Table 9 \\
+$c_p(T)$ & $a+bT+cT^2+dT^{-2}$, molar, $/M$ & metal-specific window & 0--1\% (Na), 5--7\% (Pb, LBE) & Eq.\ [12], Table 10 \\
+$h(T)$ & analytic integral of $c_p$ from $T_m$ & same as $c_p$ & inherited from $c_p$ & Eq.\ [14] --- \textbf{see the sign defect below} \\
+$\mu(T)$ & $\mu_0\exp(E_0/RT)$ & metal-specific window & 5\% (Na, Pb), 7--10\% (LBE) & Eq.\ [17], Table 11 \\
+$k(T)$ & metal-specific (Na, Pb linear in $T$; LBE quadratic) & metal-specific window & 0--8\% (Na, disputed), 0--15\% (Pb), 10--15\% (LBE) & Eq.\ [22], Table 13 \\
+\end{longtable}
+
+\textbf{Reference:} Sobolev, V. (2020), \emph{Properties of Liquid Metal Coolants: Na,
+Pb, Pb-Bi}, Reference Module in Materials Science and Materials Engineering. Every
+coefficient above was checked against this source and matches exactly, with two
+exceptions, both reported rather than silently fixed (\code{CLAUDE.md}: ``change no
+physics''):
+
+\begin{itemize}
+  \item \textbf{$h(T)$'s last term has the wrong sign, in all three metals.} Sobolev's
+    own Eq.\ [14], the analytic integral of his Eq.\ [12] $c_p$, gives
+    $d(1/T_m - 1/T)$ for the $d T^{-2}$ term; this module computes $d(1/T - 1/T_m)$
+    instead, matching the IAEA handbook's form rather than Sobolev's. Confirmed by hand
+    integration of the module's own $c_p$. Magnitude: roughly 1.1\% of Sodium's
+    enthalpy rise at $T=T_b=1155$~K, growing with $|T-T_m|$. See
+    \code{docs/OPEN\_QUESTIONS.md} Q35.
+  \item \textbf{Three uncertainty bands do not match Sobolev's text.} \code{Sodium.uncert\_k
+    = [0, 8\%]} where Sobolev states an examined spread of ``up to $\pm15\%$'';
+    \code{Lead.uncert\_sig = [0, 5\%]} and \code{LBE.uncert\_sig = [0, 0.3\%]} where
+    Sobolev gives only one collective ``(3--6)\%'' figure for all three coolants
+    together. Not adjusted --- may trace to an unpublished-here source. See
+    \code{docs/OPEN\_QUESTIONS.md} Q36.
+\end{itemize}
+
+Per \code{docs/DECISIONS.md} (``Scope: liquid metals''), only one correlation per
+property is implemented; the CV's ``multiple literature-published correlations per
+property'' claim is not supported by this repository.
+
+\subsection{UO2}
+
+\code{properties/matmod.py::UO2}. Fuel conductivity, conductivity integrals,
+emissivity, thermal expansion, densification and swelling.
+
+\subsubsection{Thermal conductivity}
+
+Two models, both implemented.
+
+\textbf{Klimenko-Zorin} (\code{k\_Klimenko}), the fresh-fuel model used through the
+annular and rod SCA solvers:
+\[
+  \tau = T/1000, \qquad
+  k(T) = \frac{100}{7.5408 + 17.692\tau + 3.6142\tau^2} + 6400\,\tau^{-5/2}\exp\!\left(-\frac{16.35}{\tau}\right)
+\]
+Its analytic antiderivative $\Theta_{Klimenko}(T) = \int k\,dT$ (\code{Theta\_Klimenko})
+is also implemented, re-derived and numerically checked against
+\code{scipy.integrate.quad} of \code{k\_Klimenko} itself (this is the function whose
+erf-coefficient defect, D4 below, was fixed in Phase 2). \textbf{Valid range,
+uncertainty and reference: \notest{}} --- checked against both
+\code{docs/reference/MatLib\_Info.pdf} (PNNL-35702) and
+\code{docs/reference/Hughes\_SCWR\_1.pdf} in full; neither names ``Klimenko-Zorin'' or
+contains these coefficients, though Hughes (2014) Eq.\ (14) uses the same functional
+family without naming its own source either.
+
+\textbf{MATPRO / NFI, with burnup and gadolinia dependence} (\code{k\_NFI}):
+\[
+  f_{Bu} = 0.00187\,Bu, \quad g_{Bu} = 0.038\,Bu^{0.28}, \quad
+  h_T = \frac{1}{1+396\exp(-Q/T)}
+\]
+\[
+  k_{95} = \frac{1}{A + \alpha\,f_{gad} + BT + f_{Bu} + (1-0.9e^{-0.04Bu})\,g_{Bu}\,h_T} + \frac{E}{T^2}\exp\!\left(-\frac{F}{T}\right)
+\]
+with $A=0.0452$, $B=2.46\times10^{-4}$, $E=3.5\times10^9$, $F=16361$, $\alpha=1.1599$
+(units as in the PDF). \textbf{Valid range:} $T\in[300,2800]$~K; gadolinia 0--10 wt\%;
+burnup 0--90~GWd/MTU (UO2), 0--50~GWd/MTU (UO2-Gd$_2$O$_3$); density 90--98.6\%TD (not
+itself an argument, so not checkable). \textbf{Uncertainty:} $\sigma=8.3\%$ (UO2),
+$8.8\%$ (UO2-Gd$_2$O$_3$). \textbf{Reference:} Ohira \& Itagaki (1997, NFI model),
+modified for burnup/gadolinia by Lanning et al.\ (2005), via PNNL-35702 section 2.1.1.1,
+Eqs.\ 2-1/2-2. A fixed-step trapezoidal integral \code{Theta\_NFI} is also implemented
+(no closed-form antiderivative exists for this model).
+
+\textit{PDF discrepancy (Q17 item 1, resolved):} the PDF writes Klimenko's second term
+as $6400/\tau^2\cdot\exp(-16.35/\tau)$; the code (and the published Fink/Klimenko-Zorin
+form) has $6400\,\tau^{-5/2}$. The code is correct; this is a PDF transcription slip.
+
+\subsubsection{Emissivity}
+
+\code{eps(T)}: $\varepsilon = 0.7856 + 1.5263\times10^{-5}\,T$. \textbf{Valid range:}
+gadolinia 0--10 wt\%, $T\in[300,2500]$~K. \textbf{Uncertainty:} $\sigma=0.072$,
+absolute (PNNL-35702 section 2.1.5.3) --- this replaces an unsourced ``$\pm6.8\%$''
+this docstring stated before Phase 3. \textbf{Reference:} PNNL-35702 section 2.1.5.1,
+Eq.\ 2-12 (constant $0.78557$ there vs.\ $0.7856$ in the code; matches to the 4th
+decimal, source of the small difference not established, preserved as found).
+
+\textit{PDF discrepancy (Q17 item 2, resolved):} the PDF writes
+$\varepsilon = 0.78557 + 1.5263\times T$, missing the \code{e-5}; without it emissivity
+would exceed 1 at 300~K. The code is correct.
+
+\subsubsection{Thermal Expansion}
+
+\code{thrm\_expan(T)}: $\text{strain} = K_1 T - K_2 + K_3\exp(-E_d/(kT))$.
+\textbf{Valid range:} UO2, UO2-Gd$_2$O$_3$, MOX; gadolinia 0--10 wt\%; $T\ge300$~K (no
+enforced upper bound --- comparison data covers up to $\sim$3000~K).
+\textbf{Uncertainty:} $\sigma=10.3\%$. \textbf{Reference:} PNNL-35702 section 2.1.4.1,
+Eq.\ 2-9, Table 2-2.
+
+\textit{PDF discrepancy (Q17 item 3, resolved):} the PDF's Eq.\ 4 has
+$\exp(+1.32\times10^{-19}/kT)$ (positive exponent, which diverges as $T\to0$); the code
+has $\exp(-E_d/kT)$, the correct MATPRO form.
+
+\subsubsection{Swelling}
+
+\notest{} in the PDF's own text (the PDF's TOC entry has no body); the code is
+\emph{ahead} of the manual here. Four functions implemented:
+\code{swelling\_solid(Bu, gad)} (piecewise linear in burnup, gadolinia branch
+$0.0005\,Bu$; PNNL-35702 section 2.1.8.1, Eqs.\ 2-17/2-18 --- note PNNL-35702 itself
+gives two contradictory uncertainty figures for the same stated burnup condition,
+Q37), \code{swelling\_gas(T, Bu)} (active only for $Bu\ge40$~GWd/MTU and
+$1233\text{--}2105$~K, section 2.1.8.1 Eqs.\ 2-19--2-21), \code{densification(T, Bu,
+rho\_TD, T\_sint)} and its two helpers \code{dens\_max}/\code{dens\_B} (Rolstad et al.\
+1974, via PNNL-35702 section 2.1.7.1, Eqs.\ 2-15/2-16 --- PNNL-35702 itself states
+uncertainty ``could not be meaningfully established'' for this model due to data
+scatter).
+
+\subsection{Steels}
+
+\subsubsection{HT9 Steel Models}
+
+\code{properties/matmod.py::HT9}. Substantial and, before this phase, undocumented in
+the manual (\notest{} in the PDF's own text, same as UO2 swelling above). Thermal
+conductivity ($k=A_0+A_1T$, 293--873~K, Akiyama 1991), specific heat (piecewise linear
+with a break at 800.15~K, 298--873~K, Yamanouchi 1992), melting temperature (constant
+973~K, the HT-9/metallic-fuel eutectic, Baker \& Wilson 1992), density (constant
+7750~kg/m$^3$, Akiyama 1991), emissivity (constant 0.9, Dutt \& Baker 1974), thermal
+expansion ($A_1+A_2T+A_3T^2$, 298.15--1073.15~K, Yamanouchi 1992 --- see the units note
+below), Young's and shear moduli ($E,G = A_0+A_1T$, with \textbf{$T$ in degrees Celsius,
+not kelvin, unlike every other temperature argument in this module} --- confirmed
+against PNNL-35702's own ``Where,'' clause, so this is not a transcription artifact),
+Meyer's hardness (delegates to the zirconium-based correlation below 1235~K, per
+PNNL-35702 section 3.3.9's own instruction), primary/secondary/tertiary thermal creep
+strain rate and irradiation creep strain rate (Akiyama 1991, section 3.3.10, all
+298.15--873.15~K, no stated uncertainty for any of the strain-rate equations), and
+yield stress (cubic in $T$, Akiyama 1991, section 3.3.11).
+
+\textit{Units flag (not resolved, not a code change):} PNNL-35702 labels
+\code{thrm\_expan}'s output ``$\alpha$ = thermal expansion coefficient, K$^{-1}$'', but
+this module's docstring calls it a dimensionless ``strain'', matching how the
+Zircaloy and UO2 expansion functions are used elsewhere. Whether the fitted
+coefficients are actually a CTE or a strain under a borrowed symbol is not resolvable
+from the formula alone; see \code{docs/OPEN\_QUESTIONS.md} Q40.
+
+\textbf{Reference (all of HT9, unless noted otherwise above):} PNNL-35702 (Geelhood et
+al.\ 2024), \emph{MatLib-1.2.1: Nuclear Material Properties Library}, section 3.3.
+
+\subsubsection*{D9 stainless steel (not in the PDF TOC, but a named section 1.4 stub)}
+
+\code{properties/matmod.py::D9\_SS}. Two constants only, deliberately not a
+temperature-dependent model since no source supplies one: $k=18.9$~W/m-K (evaluated
+once at 650~K, Hughes' average clad temperature, held constant; \code{T} is accepted
+and ignored) and $\rho=8100$~kg/m$^3$. \textbf{Reference:} Leibowitz \& Blomquist
+(1988), via Hughes, Pelaez, Schubring \& Jordan, \emph{Nucl.\ Eng.\ Des.} 270 (2014)
+412--420, section 4 and Table 1.
+
+\subsubsection*{Zircaloy (not in the PDF TOC at all)}
+
+\code{properties/matmod.py::Zircalloy}. The largest single block of code in this
+module: thermal conductivity ($k$, cubic below 2098~K then a 36.0~W/m-K phase-transition
+plateau, PNNL-35702 section 3.1.1.1 Eqs.\ 3-1/3-2), specific heat (14-point
+piecewise-linear table, section 3.1.2.1 Table 3-2), melting temperature (constant
+2123.15~K), density (constant 6520~kg/m$^3$), axial and diametral thermal expansion
+(piecewise, with a 21-point table across the alpha-to-beta transition, section 3.1.4.1
+Eqs.\ 3-4/3-5), emissivity (oxide-thickness- and temperature-dependent, section 3.1.5.1
+Eqs.\ 3-6/3-7), Young's and shear moduli (temperature/cold-work/fluence/oxide-dependent,
+section 3.1.7.1 Eqs.\ 3-9/3-10), Meyer's hardness (cubic-in-$T$ below 1235~K then a
+plateau, section 3.1.8.1 Eq.\ 3-11), axial irradiation growth (power-law in fluence,
+alloy-specific coefficients, section 3.1.9.1 Eqs.\ 3-12--3-15), effective (von Mises)
+stress from thick-wall Lam\'e principal stresses (section 3.1.10.1 Eqs.\ 3-23--3-26),
+and a full thermal + irradiation creep-strain-rate model (section 3.1.10.1 Eqs.\
+3-16--3-19) covering Zircaloy-2, Zircaloy-4, M5, ZIRLO and Optimized ZIRLO. All from
+PNNL-35702, filled in during Phase 3.
+
+\textit{Documentation quirks found while filling this section, not code defects (see
+\code{docs/OPEN\_QUESTIONS.md} for detail):} PNNL-35702 states two different
+correlation-family assignments for Optimized ZIRLO's creep in two places in the same
+section (Q38); its irradiation creep-rate flux range is stated four orders of magnitude
+off from its own formula's stated unit (Q39); and its solid-swelling uncertainty
+section states two different sigma values for the same burnup condition (Q37, this
+applies to UO2, listed above, not Zircaloy).
+
+\subsection{Gas}
+
+\subsubsection{Thermal Conductivity}
+
+\code{properties/matmod.py::Gas.k(gas, T)}: $k = A\,T^B$, tabulated per species (He, Ar,
+Kr, Xe, H$_2$, N$_2$, Air). \textbf{Valid range:} He/Ar/N$_2$ 273--2500~K, Kr
+273--2300~K, Xe 273--2200~K, H$_2$ 273--2000~K; \textbf{Air's range and uncertainty are
+\notest{}} --- present in PNNL-35702's fitting-constant table (section 4.1.1) but absent
+from its applicability/uncertainty bullets (section 4.1.3). \textbf{Uncertainty
+(absolute):} He $8.99\times10^{-3}$, Ar $9.66\times10^{-4}$, Kr $8.86\times10^{-4}$, Xe
+$5.34\times10^{-4}$, H$_2$ $1.67\times10^{-2}$, N$_2$ $1.99\times10^{-3}$~W/m-K.
+\textbf{Reference:} PNNL-35702 section 4.1.1, Eq.\ 4-1, Table 4-1. This feeds
+\code{pin/gap.py::htc\_gap}'s fill-gas conductivity; the gap conductance model's
+composite conduction+radiation form itself traces to Von Ubisch et al.\ (1958), per
+\code{docs/PHYSICS\_REVIEW.md}.
+
+\subsection{Future materials}
+
+\notimpl{} A CO$_2$ equation of state and HTGR gaseous-coolant property correlations
+were explicitly future work in the original PDF, and remain unimplemented. Out of
+scope per \code{docs/GAP\_ANALYSIS.md} Part D.
+
+% =====================================================================================
+\section{Heat Transfer Coefficient Models}
+% =====================================================================================
+
+\code{correlations/htc.py}. Flat-namespace classes \code{Water}, \code{SCW},
+\code{Sodium}, \code{Lead}. Every correlation that needs a wall temperature solved from
+a heat flux is wrapped by a torchsolve-backed bracketed root-find
+(\code{\_solve\_Tw}/\code{\_solve\_Tw\_scw}) --- \code{scipy.optimize} is retired from
+this library by decision (\code{docs/DECISIONS.md}, ``Root finding'').
+
+\subsection{Single Phase Water}
+
+\subsubsection{Dittus Boelter}
+
+\code{Water.Dittus(Props, G, D)}:
+\[
+  Pr = \frac{\mu c_p}{k}, \quad Re = \frac{GD}{\mu}, \quad Nu = 0.023\,Re^{0.8}Pr^{0.4},
+  \quad htc = \frac{Nu\,k}{D}
+\]
+This implementation always uses the heating exponent $n=0.4$ (every call site in this
+repository heats the coolant); a cooling variant with $n=0.3$ would be a new capability,
+not a preserved one, and is not added. \textbf{Valid range:} $Re>10{,}000$;
+$0.7<Pr<160$; $L/D>10$; small bulk-to-wall $\Delta T$. \textbf{Uncertainty:} roughly
+$\pm25$--$45\%$. \textbf{Reference:} Dittus, F.W. and Boelter, L.M.K., \emph{Univ.\
+California Publ.\ Eng.}, 2:443 (1930).
+
+\textbf{Physics fix (D1, commit \code{cd9c376}):} before this cleanup, this function
+used a leading constant of \textbf{0.026} (Colburn's constant, which belongs to a
+different, $Pr^{1/3}$-exponent correlation), not the published \textbf{0.023}. At
+$Re=1.11\times10^5$, $Pr=0.825$, that returned 15{,}715~W/m$^2$-K against a correct
+13{,}902~W/m$^2$-K --- \textbf{13.0\% high}, propagating into every single-phase result
+that used it. Corrected to 0.023.
+
+\subsubsection{Petchukov}
+
+\code{Water.Petchukov(Props, G, D)} (Petukhov, spelling preserved from the original
+source throughout):
+\[
+  f = (0.790\ln Re - 1.64)^{-2}, \qquad
+  Nu = \frac{(f/8)\,Re\,Pr}{1.07 + 12.7\sqrt{f/8}\,(Pr^{2/3}-1)}, \qquad htc=\frac{Nu\,k}{D}
+\]
+\textbf{Valid range:} $10^4<Re<5\times10^6$; $0.5<Pr<2000$. \textbf{Uncertainty:}
+$\pm5\%$. \textbf{Reference:} Petukhov, B.S.\ (1970).
+
+\subsubsection{Gnielinski}
+
+\code{Water.Gnielinski(Props, G, D)}:
+\[
+  f = (1.82\log_{10}Re - 1.64)^{-2}, \qquad
+  Nu = \frac{(f/8)(Re-1000)Pr}{1+12.7\sqrt{f/8}(Pr^{2/3}-1)}, \qquad htc=\frac{Nu\,k}{D}
+\]
+\textbf{Valid range:} $2300<Re<5\times10^6$; $0.5<Pr<2000$ --- valid to a lower
+Reynolds number than Petukhov, useful near the laminar-turbulent transition.
+\textbf{Uncertainty:} $\pm10\%$. \textbf{Reference:} Gnielinski, V.\ (1976).
+
+\subsection{Two Phase Water}
+
+\subsubsection{Schrock and Grossman}
+
+\code{Water.SchrockGrossman(Props\_l, Props\_v, htc\_lo, x, G, D, q\_pp)}:
+\[
+  X_{tt} = \left(\frac{\mu_l}{\mu_v}\right)^{0.1}\left(\frac{\rho_v}{\rho_l}\right)^{0.5}\left(\frac{1-x}{x}\right)^{0.9},
+  \qquad h_{tp} = htc_{lo}\left(1.11\,X_{tt}^{-0.66} + \frac{7400\,q''}{G\,h_{fg}}\right)
+\]
+\textbf{Reference:} Schrock, V.E.\ and Grossman, L.M.\ (1959). \textbf{Valid range /
+uncertainty:} \notest{} range; uncertainty $\pm30\%$.
+
+\textit{Documentation fix (D12), not a physics change:} this function's docstring, before
+Phase 2, described a different formula ($h_{tp}=2.5\,h_l(1/X_{tt})^{0.75}$) than the
+body actually computed --- an apparent transcription error copied from a different
+correlation. The body's formula (above) is unchanged and matches
+\code{docs/reference\_code/SCA\_Example.py}'s \code{htc2phi} and the standard published
+Schrock-Grossman form; only the docstring was corrected to describe what the code
+already did.
+
+\subsubsection{Chen}
+
+\code{Water.Chen\_H2O\_dT} (explicit, given $T_w$) and \code{Water.Chen\_H2O} (implicit,
+solves for $T_w$ given a heat flux):
+\[
+  h_{tp} = F h_c + S h_{nb}, \qquad h_c = 0.023\,Re_l^{0.8}Pr_l^{0.4}\frac{k_l}{D}
+\]
+\[
+  F = \begin{cases}1.0 & 1/X_{tt}\le0.1\\ 2.35\,(1/X_{tt}+0.213)^{0.736} & \text{otherwise}\end{cases}
+  \qquad (\text{a batched \code{xp.where}, not a Python \code{if}})
+\]
+\[
+  h_{nb} = 0.00122\,\frac{k_l^{0.79}c_{p,l}^{0.45}\rho_l^{0.49}}{\sigma^{0.5}\mu_l^{0.29}h_{fg}^{0.24}\rho_v^{0.24}}\,\Delta T_{sat}^{0.24}\,\Delta P_{sat}^{0.75},
+  \qquad S = \frac{1}{1+2.53\times10^{-6}Re_{tp}^{1.17}},\ \ Re_{tp}=Re_l F^{1.25}
+\]
+\textbf{Reference:} Chen, J.C.\ (1966). \textbf{Valid range / uncertainty:} \notest{}
+range; uncertainty $\pm30\%$.
+
+\subsubsection{Bjorge}
+
+\code{Water.Bjorge\_dT} / \code{Water.Bjorge}: the same convective/nucleate-boiling
+ingredients as Chen, combined as a root-sum-square (asymptotic) blend instead of Chen's
+suppression-factor superposition:
+\[
+  h_{tp} = \sqrt{h_{fc}^2 + h_{nb}^2}, \qquad h_{fc} = F\,h_l
+\]
+with $F$ and $h_{nb}$ the same functional forms as Chen's above. \textbf{Reference:}
+Bjorge, R.W., Hall, G.R.\ and Rohsenow, W.M.\ (1982). \textbf{Uncertainty:} $\pm25\%$.
+
+\subsection{Supercritical Water}
+
+\subsubsection{Swenson Correlation}
+
+\code{SCW.Swenson\_dT} (explicit) / \code{SCW.Swenson} (implicit, non-monotone-aware
+solve --- \code{htc}$(T_w)$ peaks near the pseudocritical temperature, which
+\code{torchsolve}'s own README names this correlation by name as its motivating case):
+\[
+  \overline{c_p} = \frac{h_w-h_b}{T_w-T_b}, \qquad A = \frac{\overline{c_p}}{c_{p,w}},
+  \qquad B = \frac{\rho_w}{\rho_b}
+\]
+\[
+  Nu_w = 0.00459\,Re_w^{0.923}\,Pr_w^{0.613}\,A^{0.613}\,B^{0.231}, \qquad htc = \frac{Nu_w k_w}{D}
+\]
+\textbf{Valid range / uncertainty:} \notest{} range; $\pm25\%$. \textbf{Reference:}
+Swenson, H.S., Carver, J.R.\ and Kakarala, C.R.\ (1965), per Hughes, Pelaez, Schubring
+\& Jordan, \emph{Nucl.\ Eng.\ Des.} 270 (2014) 412--420, Eq.\ (8).
+
+\textbf{Physics fix (D2, commit \code{7adc1ac}):} before this cleanup, the averaged
+heat-capacity ratio was computed as $\overline{c_p}/c_{p,b}$ (bulk-referenced) with
+exponent \textbf{0.231} on that factor; the published Swenson $Pr_{\overline{bar},w}$
+grouping requires the ratio referenced to the \emph{wall} ($\overline{c_p}/c_{p,w}$,
+as above) with exponent \textbf{0.613}. Bulk-referencing leaves a spurious
+$c_{p,w}/c_{p,b}$ factor in the result. \textbf{14.4\% high at a representative state.}
+Confirmed against Hughes et al.\ (2014) Eq.\ (8) once that source was supplied
+(\code{docs/reference/Hughes\_SCWR\_1.pdf}); the 0.231 that had been on the wrong factor
+is, not coincidentally, the lead constant of the neighboring Bishop correlation on the
+same page of that source (Q29) --- likely the origin of the mix-up. Corrected in both
+live copies (\code{correlations/htc.py} and \code{sca/rod.py::Swenson}).
+
+\subsubsection{Chen et al}
+
+\code{SCW.Chen\_SCW\_dT} / \code{SCW.Chen\_SCW}. Per \code{docs/DECISIONS.md}, promoted
+to a first-class supercritical option and the \textbf{recommended default}
+(Swenson above is retained as the legacy benchmark):
+\[
+  Nu_b = 0.46\,Re_b^{0.16}\left(\frac{Pr_w}{Pr_b}\right)^{0.1}\left(\frac{\nu_w}{\nu_b}\right)^{-0.55}\left(\frac{\overline{c_p}}{c_{p,b}}\right)^{0.88}\left(\frac{Gr_b^*}{Gr_b}\right)^{0.81}
+\]
+where the heat-flux-to-buoyancy Grashof ratio collapses, under the Boussinesq
+approximation $\beta_b=(\rho_b-\rho_w)/(\rho_b(T_w-T_b))$, to $qD/(k_b(T_w-T_b))$ ---
+$g$, $\beta$ and $\nu_b$ all cancel algebraically. \textbf{Valid range:} bulk enthalpy
+278--3169~kJ/kg; $G$ 201--2500~kg/m$^2$-s; $q$ 129--1735~kW/m$^2$; $P$
+22--34.3~MPa (not itself an argument, so not checked); $D$ 6--26~mm.
+\textbf{Uncertainty:} MAD 5.4\%; 95.7\% of the 5366-point regression database within
+$\pm15\%$. \textbf{Reference:} Chen, W.\ and Fang, X.\ (2014), \emph{Int.\ J.\ Heat Mass
+Transfer} 78, 156--160 --- the source PDF is in \code{docs/reference/}, and this
+function's docstring is the most thoroughly documented in the codebase (range, MAD,
+database size, and the Boussinesq derivation, all stated), used as the docstring
+exemplar for the rest of the cleanup.
+
+\subsection{Liquid Sodium}
+
+\subsubsection{Notter-Sleicher correlation}
+
+\notimpl{} No source for the Notter-Sleicher correlation exists anywhere in this
+repository --- checked against \code{docs/reference/MatLib\_Info.pdf}, Todreas \&
+Kazimi Volume 1, the Cheng SCWR review, the Meyer heat-transfer-coefficient review, and
+the Wu paper; none mention it. Per the owner's own rule (implement only what can be
+implemented accurately), it is left as a documented gap rather than guessed. See
+\code{docs/OPEN\_QUESTIONS.md} Q15.
+
+\subsubsection*{What is implemented instead (not in the PDF TOC)}
+
+Two classic sodium correlations for the pair of standard boundary conditions, both from
+Todreas \& Kazimi \emph{Nuclear Systems Volume 1}, 3rd ed., section 10.5.3.1:
+
+\code{Sodium.Lyon} (constant heat flux --- the boundary condition a fuel pin actually
+approximates):
+\[
+  Pe = \frac{GDc_p}{k}, \qquad Nu = 7.0 + 0.025\,Pe^{0.8}, \qquad htc=\frac{Nu\,k}{D}
+\]
+\code{Sodium.SebanShimazaki} (uniform wall temperature): the same form with the
+conduction-floor constant 5.0 in place of 7.0. Neither correlation has a stated Peclet
+range or uncertainty band in T\&K.
+
+\code{Sodium.Mikityuk} --- the rod-\emph{bundle} liquid-metal correlation (distinct from
+the two circular-tube correlations above; it returns a Nusselt number outright rather
+than a tube-to-bundle correction factor, which is why it lives here and not in
+\code{correlations/bundle.py}):
+\[
+  x = \frac{pitch}{D}, \qquad Nu = 0.047\left(1-e^{-3.8(x-1)}\right)\left(Pe^{0.77}+250\right), \qquad htc=\frac{Nu\,k}{D}
+\]
+\textbf{Valid range:} $30\le Pe\le5000$; $1.1\le pitch/D\le1.95$. \textbf{Uncertainty:}
+MAE $-0.1$, RMS $1.9$ (absolute Nusselt-number units, not relative). \textbf{Reference:}
+Mikityuk, K.\ (2009), \emph{Nucl.\ Eng.\ Des.} 239, 680--687, Eq.\ (14). T\&K's own
+Eq.\ (10.133) mis-typesets the Peclet exponent as ``$(Pe<0.77+250)$'' --- confirmed by
+rendering the source page as an image; the ``$<$'' is a mis-typeset superscript. Resolved
+against Mikityuk's own paper once supplied; see \code{docs/OPEN\_QUESTIONS.md} Q41.
+
+\subsection{Liquid Lead and Lead-Bismuth Eutectic}
+
+\subsubsection{Shen}
+
+\code{Lead.Shen(Props, T, G, D)}:
+\[
+  Pe = Re\,Pr, \qquad Nu = 10.287\,Pe^{+0.1175} + \frac{0.0599}{2.5}\,Pe^{0.7575}, \qquad htc=\frac{Nu\,k}{D}
+\]
+\textbf{Valid range / uncertainty / reference: \notest{}.} \textbf{Unresolved sign
+(D3):} the pre-cleanup codebase had three copies of this correlation, and two of the
+three used a \emph{negative} exponent on the leading Peclet term
+($Nu=10.287\,Pe^{-0.1175}+\ldots$) --- at $Pe=500$ that is $Nu=24.0$ vs.\ $Nu=7.6$, a
+substantial difference. No source document in this repository resolves which sign is
+correct. This module keeps the positive-exponent form it already had; per
+\code{docs/DECISIONS.md} (``Scope: lead is a toy''), the lead channel in the annular SCA
+files is an experiment, not an active path, so this is property-library infrastructure
+and the Phase 7 uncertainty figure only. See \code{docs/OPEN\_QUESTIONS.md} Q13.
+
+% =====================================================================================
+\section{Friction Models}
+% =====================================================================================
+
+\code{correlations/friction.py}. Flat-namespace classes \code{f\_water}, \code{f\_SCW},
+\code{Spacer}.
+
+\subsection{Single Phase Water}
+
+\subsubsection{McAdams}
+
+\code{f\_water.McAdams(Props, G, D)}: $Re=GD/\mu$, $f=0.184\,Re^{-0.2}$.
+\textbf{Valid range:} $30{,}000<Re<1{,}000{,}000$ (as stated in the original source).
+\textbf{Uncertainty / reference: \notest{}.}
+
+\subsubsection*{Blasius (not in the PDF TOC)}
+
+\code{f\_water.Blasius(Props, G, D)}: $f=0.316\,Re^{-0.25}$. \textbf{Valid range:}
+$Re<10^5$. The lower-Reynolds-number companion to McAdams. \textbf{Uncertainty /
+reference: \notest{}.}
+
+\subsubsection{Colebrook}
+
+\code{f\_water.Colebrook(Props, G, D, roughness, n\_iter, tol, return\_convergence,
+check\_range)} --- \notimpl{} before Phase 4, now implemented:
+\[
+  \frac{1}{\sqrt{f}} = -2\log_{10}\left(\frac{roughness/D}{3.70} + \frac{2.51}{Re\sqrt{f}}\right)
+\]
+Solved by a fixed-iteration-count \emph{fixed-point} substitution $x=1/\sqrt f$ (not
+Newton): the map is strongly contracting for turbulent $x$ (contraction factor roughly
+0.07--0.17), branch-free, and keeps every iterate positive because of the logarithm,
+whereas Newton could leave the physical branch on a bad initial guess. Seeded from the
+Haaland approximation (within 2\% of Colebrook per T\&K), so the loop starts close.
+Vectorized over the whole batch with a fixed iteration count, differentiable end to
+end. \textbf{Valid range:} turbulent flow, $Re\gtrsim4000$. \textbf{Uncertainty:}
+Colebrook is itself the reference the explicit fits (McAdams, Blasius) are measured
+against, so no percentage uncertainty is stated. \textbf{Reference:} Colebrook, C.F.\
+(1939), \emph{J.\ Inst.\ Civ.\ Eng.}, as given by Todreas \& Kazimi \emph{Nuclear
+Systems Volume 1}, 3rd ed., Eq.\ (9.89), in this module's Darcy convention throughout.
+
+\subsection{Supercritical Water}
+
+\subsubsection{Filoneko Correlation}
+
+\code{f\_SCW.Filonenko(Props, G, D, Props\_w=None)} (Filonenko, spelling as in the PDF):
+\[
+  f = \frac{1}{(1.82\log_{10}Re - 1.64)^2}
+\]
+Algebraically the isothermal part of Hughes et al.\ (2014) Eq.\ (9) (Petrov \& Popov
+1988): $1.82\log_{10}Re - 1.6437$ there vs.\ $-1.64$ here. An optional Petrov-Popov
+supercritical density correction is available, \textbf{defaulting off} so existing call
+sites keep the isothermal behavior they were validated with (\code{docs/DECISIONS.md}):
+supplying \code{Props\_w} (wall-state properties) multiplies in
+$(\rho_w/\rho_b)^{0.4}$. This runs on both channels of the annular SCA per
+\code{docs/DECISIONS.md} (``Wu friction''). \textbf{Valid range / uncertainty:}
+\notest{}. \textbf{Reference:} Petrov \& Popov (1988), as cited by Hughes et al.\ (2014)
+Eq.\ (9), for the isothermal form implemented here.
+
+\subsubsection{Wu Correlation for Rod Bundles}
+
+\code{f\_SCW.Wu(Props, G, D)}:
+\[
+  f = 0.014\,f_{Filonenko}^{-0.12}\,Pr^{-0.23}
+\]
+\textbf{Not used in the annular SCA path today} (Filonenko runs on both channels per
+owner instruction); range-limited to $G\le1000$~kg/m$^2$-s in \code{ranges.py} pending
+the owner's own high-mass-flux correction factor. \textbf{Uncertainty / reference:
+\notest{}} --- the negative exponent on the isothermal friction factor is unusual for a
+bundle correction and is unconfirmed against any source. See
+\code{docs/OPEN\_QUESTIONS.md} Q14.
+
+\subsubsection*{Spacer-grid loss (not in the PDF TOC)}
+
+\code{Spacer.blah2()}: \notimpl{}, and honestly so --- converted from a bare
+\code{return} (which silently did nothing) to \code{raise NotImplementedError}. No
+formula, source, or even a description of what this stub was meant to compute survives
+anywhere in the repository beyond the class/method name suggesting a spacer-grid
+friction or mixing correction. See \code{docs/OPEN\_QUESTIONS.md} Q33.
+
+% =====================================================================================
+\section{Fuel Pin Heat Transfer Models/Routines}
+% =====================================================================================
+
+\code{pinthac/pin/}: \code{gap.py}, \code{clad.py}, \code{cylindrical.py},
+\code{annular.py}.
+
+\subsection{Gap Heat Transfer}
+
+\code{pin/gap.py::htc\_gap(Tfo, Tci, delta, kgas, eps\_c=1.0, eps\_f=1.0, units='J')}:
+conduction plus radiation across an open (not mechanically closed) gas gap, treated as a
+plane layer (valid when the diametral gap is small compared to the fuel radius):
+\[
+  T_{ave} = \tfrac12(T_{fo}+T_{ci}), \qquad h_{cond} = \frac{k_{gas}(T_{ave})}{\delta}
+\]
+\[
+  h_{rad} = \frac{\sigma}{\varepsilon_f^{-1}+\varepsilon_c^{-1}-1}\,(T_{fo}^2+T_{ci}^2)(T_{fo}+T_{ci})
+\]
+(algebraically $\sigma(T_{fo}^4-T_{ci}^4)/(\varepsilon^{-1}\text{-sum}\cdot(T_{fo}-T_{ci}))$,
+factored to stay finite as $T_{fo}\to T_{ci}$), $h_{gap}=h_{cond}+h_{rad}$. Does NOT
+include mechanical contact-closure conductance. \textbf{Valid range / uncertainty /
+reference for the composite form: \notest{}}; the gas conductivity usually passed in
+(\code{MatMod.Gas.k}) is Von Ubisch et al.\ (1958), per \code{docs/PHYSICS\_REVIEW.md}.
+
+\textbf{Physics fix (D5, commit \code{7f42d80}):} a duplicate hand-rolled copy of this
+formula inside \code{SCW\_Pb\_Ann\_SCA.py} used gas conductivity
+$k_{gas}=15.8\times10^{-4}\,T^{-0.79}$ --- a \textbf{negative} exponent, where the other
+two copies (including this one) used $+0.79$. At 600~K that puts $k_{gas}$ at
+$\sim10^{-5}$~W/m-K instead of $\sim0.25$~W/m-K, four orders of magnitude low, which
+effectively zeroes conduction across the gap and leaves radiation to carry the whole
+transfer alone. Corrected to $+0.79$; \code{pin/gap.py::htc\_gap} (this function, which
+already had the correct sign and additionally carries the emissivity factor the
+duplicate lacked) is adopted as the one canonical implementation.
+
+\subsection{Clad conduction}
+
+\code{pin/clad.py::T\_ci(Rco, Rci, kc, Tco, qp)}:
+\[
+  T_{ci} = T_{co} + \frac{qp}{2\pi k_c}\ln\!\left(\frac{R_{co}}{R_{ci}}\right)
+\]
+Handles the annulus case, where the \emph{inner} channel's clad has $R_{co}<R_{ci}$ by
+naming convention: the larger of the two radii goes on top of the log ratio either way,
+by flipping the sign rather than the ratio. Assumes constant $k_c$ across the wall step
+(a caller wanting temperature-dependent conductivity evaluates $k_c$ at the layer's mean
+temperature first, as \code{sca/annular.py::closure} does). \textbf{Valid range /
+uncertainty / reference: \notest{}} --- standard steady-state cylindrical (Fourier)
+conduction; no fitted database to be out of range of.
+
+\subsection{Cylindrical Heat transfer}
+
+\code{pin/cylindrical.py}. The manual's description --- ``a numerical solver ... solved
+iteratively for $T$ given the radius'' --- is implemented by \code{Cyl\_T}, with three
+supporting pieces:
+
+\begin{itemize}
+  \item \code{Cyl\_HT(r, q\_vol, kint, C)}: the \textbf{constant-conductivity} special
+    case, $T(r) = C - q_{vol}r^2/(4\,kint)$, sign confirmed against
+    \code{Annular\_Heat\_Transfer\_Final.pdf} Eq.\ (2) with $r_i\to0$ (see also the PDF
+    discrepancy below).
+  \item \code{Cyl\_Theta(r, rfo, q3, Theta\_fo)}: the conductivity-integral value at
+    radius $r$, given its value at the pellet surface --- exact and non-iterative for a
+    solid pellet, since the general annular two-constant solution's $\ln(r)$ term
+    diverges at the centerline and forces that constant to zero: $\Theta(r) = \Theta_{fo}
+    + \tfrac{q_3}{4}(r_{fo}^2-r^2)$.
+  \item \code{Cyl\_qpp(r, q3)} and \code{Cyl\_qlin(r, q3)}: the radial heat flux
+    ($q_3 r/2$) and linear heat rate inside radius $r$ ($\pi q_3 r^2$), from geometry
+    alone, needing no conductivity model.
+  \item \code{Cyl\_T(r, rfo, q3, Theta\_fo, Theta\_func, k\_func, T\_lo, T\_hi)}: the
+    actual iterative solve --- computes the target $\Theta$ via \code{Cyl\_Theta}, then
+    inverts $\Theta_{func}(T)=\Theta_{target}$ for $T$ by bisection-then-Newton
+    (\code{pinthac.solvers.bisect\_newton}, not \code{torchsolve}'s bracket-guarded
+    solver, because $\Theta$ is strictly increasing in $T$ --- $d\Theta/dT=k(T)>0$ for
+    any physical conductivity, so the root is unique and there is no non-monotone
+    branch to guard against).
+\end{itemize}
+
+\textbf{Valid range / uncertainty:} not applicable to the geometric identities
+(\code{Cyl\_qpp}/\code{Cyl\_qlin}, exact); inherited from the conductivity model for
+\code{Cyl\_T}. \textbf{Reference:} this section of the manual itself, and
+\code{Annular\_Heat\_Transfer\_Final.pdf} Eq.\ (2) with $r_i\to0$.
+
+\textit{PDF discrepancy (Q17 item 4, resolved):} the PDF's section 4.3 writes the
+cylindrical solve as $\int k\,dT = +q'''r^2/4+\ldots$; both the code and
+\code{Annular\_Heat\_Transfer\_Final.pdf} Eq.\ 2 have $-q'''r^2/4$. The code is correct.
+
+\subsection{Annular Heat Equation}
+
+\code{pin/annular.py}. Implements the Kirchhoff-transformed radial solve of
+\code{Annular\_Heat\_Transfer\_Final.pdf} section 1.1: substituting
+$\Theta[k_f](T(r))=\int k_f\,dT$ for $T(r)$ linearizes the otherwise-nonlinear annular
+conduction equation.
+
+\textbf{\code{Ann\_Theta}} builds $\Theta[k_f]$ as a cumulative-trapezoid numerical
+integral, returned as a SciPy \code{interp1d} --- \textbf{not differentiable}, a known
+architectural limitation carried over from the pre-cleanup code (silently strips
+gradients from a torch input passed through it, per \code{docs/AUDIT.md}), not fixed in
+this cleanup.
+
+\textbf{\code{Ann\_HT}(ri, ro, q3, Theta\_i, Theta\_o)} solves the closed-form
+two-constant boundary value problem for $r_i\le r\le r_o$ with uniform volumetric
+generation $q_3$:
+\[
+  \Theta[k_f](T(r)) = -\frac{q_3}{4}r^2 + C_1\ln r + C_2
+\]
+\[
+  \alpha_i=\Theta_i+\tfrac{q_3}{4}r_i^2,\quad \alpha_o=\Theta_o+\tfrac{q_3}{4}r_o^2,
+  \qquad C_1=\frac{\alpha_i-\alpha_o}{\ln r_i-\ln r_o},\quad
+  C_2=\frac{(\ln r_i)\alpha_o-(\ln r_o)\alpha_i}{\ln r_i-\ln r_o}
+\]
+\textbf{\code{Ann\_qpp}(r, q3, C1)}: $q''(r)=\tfrac{q_3}{2}r - C_1/r$, in the signed
+$+r$ Fourier convention.
+
+\textbf{Sign convention (Q18, resolved by \code{docs/DECISIONS.md}):} the reference
+PDF's $T_{fo}(r_j)=T_{m,j}+q''_j/htc_j$ is only correct at the \emph{outer} surface. The
+inner coolant sits on the $-r$ side of the fuel, so the physically-outward flux there is
+the \emph{negative} of \code{Ann\_qpp}'s signed function --- verified two ways (the
+energy-balance invariant below, and both walls coming out hotter than their coolants,
+which the PDF's literal convention does not give) plus an independent \code{sympy}
+solve. Callers use $T_{fo}(r_i) = T_{m,i} - q''_i/htc_i$ (a minus) at the inner surface.
+This is a deliberate, documented departure from the PDF's literal wording, approved by
+the owner.
+
+\subsubsection*{The iteration: \code{Ann\_flux\_split} (Figure 2 of the derivation PDF)}
+
+\code{Ann\_flux\_split(ri, ro, q\_lin, Tm\_i, Tm\_o, htc\_i, htc\_o, Theta\_func,
+f\_prev=None, n\_iter, tol)} closes the circular dependency \code{Ann\_HT} leaves open:
+the fuel surface temperatures it needs depend on the surface fluxes, which are what the
+conduction solve produces. Five repeated steps, matching the derivation PDF's Figure 2
+exactly:
+
+\begin{enumerate}
+  \item From the current linear-heat split, surface fluxes:
+    $q''_o = q'_o/(2\pi r_o)$, $\ q''_i = q'_i/(2\pi r_i)$.
+  \item Fuel surface temperatures, across the coolant-to-surface resistance:
+    $T_{fo}(r_o)=T_{m,o}+q''_o/htc_o$, $\ T_{fo}(r_i)=T_{m,i}-q''_i/htc_i$ (the sign
+    convention above).
+  \item The conductivity integral, evaluated \textbf{forward only}:
+    $\Theta_j=\Theta[k_f](T_{fo}(r_j))$ --- never inverted, which is the entire point of
+    the scheme: an inverse would need a Newton solve per surface per iteration per
+    axial node, and $\Theta$ is only available as a forward integral of $k_f$.
+  \item Cramer's rule on the resulting $2\times2$ linear system (this is \code{Ann\_HT}
+    itself): $C_1 = (\alpha_i-\alpha_o)/(\ln r_i - \ln r_o)$.
+  \item Updated fluxes from $C_1$ alone (\code{Ann\_qpp}; $C_2$ is not needed here).
+\end{enumerate}
+
+repeated until the surface fluxes stop moving. An optional warm start
+(\code{f\_prev}, the previous axial node's heat ratio $q'_i/q'_o$) is the option
+described in the PDF's section 1.2 --- since the split varies slowly along a channel,
+starting from the previous node's answer typically needs only a small correction.
+
+\begin{center}
+\begin{tikzpicture}[node distance=1.05cm and 2.6cm, >=Stealth, font=\small]
+  \node (start) [draw, rounded corners, fill=gray!10] {linear-heat split $q'_i, q'_o$};
+  \node (step1) [draw, below=of start] {1. surface fluxes $q''_i, q''_o$};
+  \node (step2) [draw, below=of step1] {2. fuel surface temps $T_{fo}(r_i), T_{fo}(r_o)$};
+  \node (step3) [draw, below=of step2] {3. $\Theta_i, \Theta_o = \Theta[k_f](T_{fo})$ (forward only)};
+  \node (step4) [draw, below=of step3] {4. Cramer's rule $\to C_1$ (\code{Ann\_HT})};
+  \node (step5) [draw, below=of step4] {5. updated $q'_i, q'_o$ from $C_1$ (\code{Ann\_qpp})};
+  \node (check) [draw, diamond, aspect=2.2, below=of step5, fill=gray!10] {converged?};
+  \node (done) [draw, rounded corners, below=of check, fill=gray!10] {return $q_i, q_o, T_{fo,i}, T_{fo,o}$};
+  \draw[->] (start) -- (step1);
+  \draw[->] (step1) -- (step2);
+  \draw[->] (step2) -- (step3);
+  \draw[->] (step3) -- (step4);
+  \draw[->] (step4) -- (step5);
+  \draw[->] (step5) -- (check);
+  \draw[->] (check) -- node[right]{yes} (done);
+  \draw[->] (check.west) to[out=180,in=180] node[left]{no} (step1.west);
+\end{tikzpicture}
+\end{center}
+
+\textbf{Energy balance is exact at every iterate, not just at convergence} ---
+$q'_i+q'_o = \pi q_3 (r_o^2-r_i^2)$ with the $C_1$ terms cancelling identically. This
+iteration never has to converge the total power, only how it splits, which is why an
+unconverged result still conserves energy and is wrong only in the split.
+\textbf{Verified:} closes to $4.8\times10^{-16}$ relative in
+\code{tests/test\_annular.py} (\code{docs/OPEN\_QUESTIONS.md} Round 5).
+
+\subsection{Rod Bundle Correction factors}
+
+\code{correlations/bundle.py::Bundle}. Two interchangeable $\psi$ factors converting a
+round-tube heat transfer coefficient to a rod-bundle one, $htc_{pin}=\psi\cdot
+htc_{round\,tube}$ (Hughes et al.\ 2014, Eq.\ 11):
+
+\textbf{Weissman:} $\psi = c_1 R + c_2$, $c_1=1.826$, $c_2=-1.0430$, $R=P/D$.
+\textbf{Valid range / uncertainty / reference: \notest{}} --- named only as
+``Weissman'' in the original source.
+
+\textbf{Presser:} $\psi = c_1 + c_2 R - c_3 e^{-7(R-1)}$, $c_1=0.9217$, $c_2=0.1478$,
+$c_3=0.1130$. \textbf{Reference:} Presser (1967), via Hughes et al.\ (2014) Eq.\ (10).
+\textbf{Valid range:} \notest{} numerically --- exercised by Hughes at $P/D=1.15$
+($\psi=0.94$) and $1.28$ ($\psi=0.98$); $\psi$ is \emph{not} monotone near unity and
+turns over into a penalty ($\psi<1$) below roughly $P/D=1.05$, which is not itself
+confirmed as a physical effect or an artifact of the fit running out of data (see
+\code{docs/OPEN\_QUESTIONS.md} Q44).
+
+\textbf{Physics fix, applied in two places, one per commit:} Presser was not applied
+anywhere before this cleanup, despite both single-channel solvers using rod-bundle
+geometry on at least one coolant channel.
+\begin{itemize}
+  \item \code{sca/rod.py} (commit \code{8cc40d9}): the whole channel is a square-pitch
+    rod bundle; Presser is now applied to its one convective coefficient.
+  \item \code{sca/annular.py} (commit \code{76d823e}): applied to the \textbf{outer
+    channel only} --- a square-pitch cell around the cladding OD, the bundle geometry
+    Presser was fit for --- and \emph{not} the inner channel, which is a bored tube
+    through the pellet, the geometry Swenson itself was fit on. Measured on the default
+    geometry (5~kW/m, 20 nodes): $htc_{conv,o}$ max $20801.8\to20721.1$~W/m$^2$-K,
+    $T_{fo,o}$ max $677.975\to677.988$~K, flux-split closure unchanged at
+    $4.75\times10^{-16}$. The effect is small only because the default lattice
+    ($P/D=1.048$) sits almost exactly where $\psi\approx1$ (0.996); at a more typical
+    $P/D=1.3$ the correction is $+10\%$.
+\end{itemize}
+
+Neither Weissman nor Presser drifted between the pre-cleanup copies (no numeric defect
+found, D8).
+
+% =====================================================================================
+\section{Monte Carlo Subroutine and Error Propagation}
+% =====================================================================================
+
+\code{pinthac/uncertainty.py}. One mechanism, applied uniformly to both the property
+libraries and the correlation libraries, per the brief's ``keep the API dead simple''
+instruction:
+
+\begin{itemize}
+  \item \code{enable(seed)} / \code{disable()}: a module-level on/off switch with a
+    single seed, so a Monte Carlo study is reproducible without every caller seeding
+    numpy and torch's global generators itself (which would also entangle the
+    library's randomness with, e.g., a training loop's weight initialization). Off by
+    default: a deterministic run must never silently receive a perturbed answer, and
+    must not pay for random-number generation it did not ask for.
+  \item \code{perturb(value, rel\_sigma)}: the single mechanism behind every
+    uncertainty band this library produces,
+    \[
+      value_{perturbed} = value\cdot(1+rel\_sigma\cdot z), \qquad z\sim N(0,1)
+    \]
+    multiplicative (not additive) so a positive quantity stays positive and because
+    correlation uncertainties are published as percentages. One independent $z$ per
+    element, so a batched call is equivalent to many independent Monte Carlo trials at
+    once. The draw is treated as a constant with respect to autograd --- a sample of
+    modelling error, not a differentiable function of the inputs --- so a gradient
+    through a perturbed result is the underlying model's gradient scaled by that trial's
+    realized factor, the correct sensitivity for that trial.
+  \item \code{band(value, rel\_sigma, n\_samples)}: draws \code{n\_samples} independent
+    perturbations of one value, stacked along a new leading axis, for the plotting path
+    (a figure showing an uncertainty band needs many samples of the same curve, which
+    \code{perturb} alone --- one perturbation per element --- cannot give). Works
+    regardless of the module switch, since requesting a band is itself an explicit
+    request for perturbed values.
+\end{itemize}
+
+\textbf{Consumer:} \code{figures/liquid\_metal\_uncertainty.py} --- thermal conductivity
+vs.\ temperature for sodium, lead and LBE, with a 95\% Monte Carlo band (4000 trials per
+temperature) built from each metal's own \code{uncert\_k} (linearly interpolated between
+its stated low/high bound across its valid range, a stated modeling choice, not a value
+given directly by Sobolev). Range checking that feeds the same uncertainty tables lives
+in \code{pinthac/ranges.py::check(model\_name, values, table)}: a shared
+\code{warnings.warn} helper, never an exception, raised at most once per call regardless
+of batch size.
+
+% =====================================================================================
+\section*{What this manual deliberately does not cover}
+% =====================================================================================
+
+Per \code{docs/DECISIONS.md} (``Scope: transient is elsewhere''), transient
+single-channel analysis (both a finite-difference solver and a physics-informed neural
+network over time) lives in a separate repository and is out of scope here; nothing in
+\code{pinthac/sca/} has a time derivative. Every neural surrogate documented above
+(\code{ml/pinn.py}, \code{ml/deeponet.py}) is steady-state, parametrized over axial
+position or operating conditions, not time. Two-phase (PWR/BWR) single-channel
+bookkeeping --- onset-of-nucleate-boiling detection, quality/void-fraction tracking,
+subcooled-boiling closure --- is likewise not implemented in either
+\code{sca/rod.py} or \code{sca/annular.py}, even though the two-phase heat transfer
+\emph{correlations} above (Schrock-Grossman, Chen, Bjorge) are implemented and
+selectable by name.
+
+\end{document}
