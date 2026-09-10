@@ -355,9 +355,10 @@ def pressure_drop(T, G, D, props_at, fric_func, dz, g=9.81):
 
     T (array): bulk coolant temperature along z [K].
     G, D: mass flux [kg/m^2-s] and hydraulic diameter [m] for this channel.
-    fric_func(Props, G, D): friction-factor correlation, e.g.
-        friction.f_SCW.Filonenko (inner channel) or .Wu (outer channel,
-        rod-bundle-fitted).
+    fric_func(Props, G, D): friction-factor correlation. solve_field calls this with
+        friction.f_SCW.Filonenko on both channels -- see the call site for why the
+        outer (rod-bundle) channel is not run with Wu, the rod-bundle-fitted
+        alternative, despite the geometry match.
 
     Returns cumulative dP [Pa] along z, dP[0] = 0 (no drop across the
     already-counted inlet half-cell, matching solve_field's enthalpy
@@ -458,13 +459,21 @@ def solve_field(Inputs=Inputs_ann, q_p=None, outer_iter=15, tol=10.0, progress=F
         if err < tol:
             break
 
-    # Pressure drop, per Filonenko (inner, plain tube) / Wu (outer, rod
-    # bundle) friction correlations -- decoupled from the thermal solve
-    # above (this single-phase momentum balance doesn't feed back into
-    # the enthalpy/htc closure), so a single pass on the converged field
-    # is enough; no outer iteration needed.
+    # Pressure drop, Filonenko on both channels -- decoupled from the thermal
+    # solve above (this single-phase momentum balance doesn't feed back into
+    # the enthalpy/htc closure), so a single pass on the converged field is
+    # enough; no outer iteration needed.
+    #
+    # The outer channel used to run Wu here, a rod-bundle-fitted friction
+    # correlation, but Wu is valid only to G = 1000 kg/m^2-s (docs/DECISIONS.md,
+    # "Wu friction"), and Inputs_ann's default geometry puts G_o at 1244 --
+    # 24 percent over that bound -- with the DeepONet training dataset sampling
+    # G_o up to 2500, 1.5x to 2.5x Wu's range (docs/PHYSICS_REVIEW.md, "Ann_SCA.py
+    # -- three gaps" item 2). Filonenko has no G bound in the source or
+    # docs/reference/ (see correlations/friction.py's RANGES table), so it runs
+    # on both channels per the owner's decision.
     dP_i = pressure_drop(T_i, G_i, D_i, props_at, fric.f_SCW.Filonenko, dz)
-    dP_o = pressure_drop(T_o, G_o, D_o, props_at, fric.f_SCW.Wu, dz)
+    dP_o = pressure_drop(T_o, G_o, D_o, props_at, fric.f_SCW.Filonenko, dz)
 
     results = {
         'z': Z,
