@@ -186,13 +186,17 @@ CONDUCTIVITY_TABLE_5_ENHANCED = [
 ]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "KNOWN DEFECT: R15-11 Sec. 2.7 requires lambda_2 to be forced to zero wherever "
-    "delta-chi from Eq. (23) comes out negative, which is the case at both of these "
-    "298.15 K liquid points. The implementation does not apply that condition, giving "
-    "-0.094 % at 998 kg/m3 and -0.190 % at 1200. strict=True so a fix fails this marker."))
 @pytest.mark.parametrize("T,rho,lam_ref", CONDUCTIVITY_TABLE_4)
 def test_iapws_conductivity_table_4(T, rho, lam_ref):
+    """These two 298.15 K liquid points are the only check values in any of the releases
+    that exercise the i >= 1 rows of the lambda_1 coefficient table.
+
+    On the 647.35 K isotherm, where every other conductivity check value sits, the factor
+    (1/T_bar - 1) is about -3.9e-4, so its second power is ~1.5e-7 and the i = 2 row is
+    invisible. At 298.15 K that factor is 1.17 and every row contributes. A transposed
+    digit in L_22 -- 3.55772244 shipped against 3.55777244 published -- was therefore
+    undetectable anywhere except here, and cost -0.094 % and -0.190 % at these two points.
+    Fixed in the coefficient file; these now reproduce exactly."""
     lam = scalar(IAPWS95.lam(state(rho, T))) * 1.0e3     # W/m/K -> mW/m/K
     assert lam == pytest.approx(lam_ref, rel=1e-6)
 
