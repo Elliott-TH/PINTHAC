@@ -880,3 +880,40 @@ Confirmed. `closure()` already calls `Ann_HT` and `Ann_qpp` directly (lines 280-
 own fixed-point loop around them, and `closure()` already has a Picard loop carrying the
 clad and gap chain outward radius by radius. Not a drop-in, and nothing to gain from
 forcing it.
+
+## Q45. The Fourier power-profile basis in Annular_Heat_Transfer_Final.pdf section 2.1 is not actually orthogonal as written
+
+`pinthac/ml/datagen.py`'s new `build_fourier_shapes`/`fourier_mean` (Phase 6 part A2)
+implement the PDF's squared-Fourier-with-offset axial power shape, including the analytic
+mean `<Fq> = 0.5*sum(a_n^2+b_n^2) + phi_q` docs/DECISIONS.md asks for, "derived in the PDF
+from orthogonality." Verifying that derivation against numerical quadrature (as the brief
+asked) turned up a real inconsistency in the PDF itself, not in the implementation:
+
+The PDF's `S(x) = sum a_n cos(pi n z/L) + b_n sin(pi n z/L)`, integrated over the stated
+domain `z in [-L/2, L/2]`, is claimed to have every cross term (different n, or cos
+against sin) vanish. Checked numerically (`np.trapezoid` at 2,000,001 points, L=1): the
+cos-sin cross terms do vanish (always true on a symmetric domain, cos even * sin odd), and
+same-n cos^2/sin^2 terms do integrate to L/2 as claimed -- but different-n cos*cos cross
+terms only vanish when n and m have the *same parity*. n=1,m=2 (mixed parity) integrates
+to ~0.212*L, not 0. So the analytic mean formula the PDF derives from "all cross terms
+vanishing" is not actually exact for a general multi-mode profile under the literal
+argument `pi*n*z/L`.
+
+The argument that *does* satisfy both the claimed per-mode integral (L/2) and universal
+cross-term cancellation, confirmed against quadrature for every (n,m) pair tried up to
+n,m=4: `2*pi*n*z/L`, equivalently `pi*n*x` in this codebase's `x = 2z/L in [-1,1]`
+convention (the standard textbook Fourier basis on a length-2 interval). This is one full
+period per mode over `[-L/2, L/2]` rather than the literal text's half period -- most
+likely a dropped factor of 2 where the PDF's argument was carried over from the standard
+`[-L, L]`-interval Fourier series formula without adjusting for the half-length domain it
+actually states.
+
+**What was implemented:** `fourier_basis` uses `pi*n*x` (the orthogonal, quadrature-
+verified version), not the PDF's literal `pi*n*z/L`. `test_ml_datagen.py::
+test_fourier_mean_matches_quadrature` checks the analytic mean against trapezoid
+quadrature and passes with this argument; it fails (up to ~26% relative error on some
+draws) with the literal PDF argument, confirmed while debugging this. Not fixed
+unilaterally beyond that -- flagged here per CLAUDE.md ("do not invent physics") since
+this is the owner's own derivation to confirm, not a call to make silently. If the
+intended domain was actually `[-L, L]` (not `[-L/2, L/2]`) the literal argument would be
+correct as written; that would need every call site's `x` convention revisited too.

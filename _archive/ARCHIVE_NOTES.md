@@ -54,3 +54,10 @@ the rod-bundle correction, subcooled boiling and the CHFR check, and Phase 5 wor
 | File | Note |
 |---|---|
 | `SCW_Prop_Table_regenerated.csv` | Not an original. `pinthac/sca/scw_table.py` runs its table generation at module scope, so importing it during the Phase 1 import test regenerated the table into the working directory before the output path had been rewired to `data/`. Kept because the comparison is informative: it matches `data/SCW_Prop_Table.csv` to 13 significant figures but differs in the last one or two on 4213 of 4510 rows -- GPU reduction ordering is not bit-reproducible, so anything table-driven is reproducible in physics but not byte-for-byte. That is worth knowing before any test asserts on an exact table value. It is also a concrete instance of the import-time side effects flagged in `docs/AUDIT.md`; Phase 2 moves this generation behind a `__main__` guard. |
+
+## Phase 7: pre-Phase-7 draft figure scripts superseded
+
+| File | Note |
+|---|---|
+| `liquid_metal_uncertainty_pre_phase7.py` | Pre-Phase-7 version of `figures/liquid_metal_uncertainty.py`: torchquad-based Monte Carlo of the Pb channel's outlet enthalpy only (one species, one script-specific case), producing `outlet_enthalpy_dist.png`. Superseded per the pre-existing note above ("figures/ supersedes them in Phase 7") by the Phase 7 script, which plots all three species' k(T) with a `pinthac.uncertainty.perturb`-based band as the brief specifies. `outlet_enthalpy_dist.png` itself is left in `figures/` (regenerable, not deleted). |
+| `sca_surrogate_validation_pre_phase7.py` | Pre-Phase-7 version of `figures/sca_surrogate_validation.py`: same `predict_rod` consumer pattern, PNG output (`sca_rod_deeponet_eval_profiles.png`, `sca_rod_deeponet_eval_parity.png`), light-background matplotlib default style. Superseded by the Phase 7 script, which uses the shared dark `figures/style.py` and outputs `figures/output/sca-surrogate-validation.svg` per the brief's format. The two PNGs are left in `figures/` (regenerable, not deleted). |
