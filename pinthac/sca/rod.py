@@ -186,7 +186,12 @@ def gap(qp_val, delta, Tci, rci, rfo):
 
     def res(Tfo):
         Tave = (Tfo + Tci) / 2
-        kgas = 15.8E-4 * Tave**(-0.79)
+        # Von Ubisch et al. (1958), as used by Hughes et al. (2014): the gas thermal
+        # conductivity rises with temperature, k = 15.8e-4 * T^0.79. The exponent was
+        # negative here, which puts k at 1.0e-5 W/m-K instead of 0.25 at 600 K -- four
+        # orders of magnitude low, so conduction across the gap effectively vanished
+        # and radiation alone carried it.
+        kgas = 15.8E-4 * Tave**(0.79)
         htc_cond = kgas / delta
         htc_rad = sigma * (Tfo**4 - Tci**4) / (Tfo - Tci)
         htc_net = htc_cond + htc_rad
