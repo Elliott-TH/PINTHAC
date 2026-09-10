@@ -293,3 +293,54 @@ flat `from IAPWS_95 import IAPWS95` import. Which is the newer one? I will archi
 **Q11** annular geometry naming · **Q12→now Q_torchsolve** whether `torchsolve` is a
 dependency · **Q13** Shen source · **Q14** Wu source · **Q16** citations ·
 **Q19** `torch.set_default_dtype` at import · **Q21** the six unused `IAPWS/*.txt` files
+
+---
+
+# Round 3
+
+Closed by `Hughes_SCWR_1.pdf`: **Q5** (Swenson exponent — Eq. 8 confirms 0.61 on `Cp_0/Cp_w`),
+**Q16** in part (Presser, Von Ubisch, Petrov-Popov, Hann, Bishop and Leibowitz now have
+citations), and the Legendre question **Q22** (`SCA_Rod_DataGen.py` supplied).
+Closed by instruction: **Q14** (Filonenko on both annulus channels; Wu range-limited to
+G <= 1000 pending your correction factor).
+
+## Q27. Conductivity-integral constant: `1256e-11` or `6.1256e-11`?
+
+Hughes Eq. (14) gives the UO2 conductivity integral as
+
+```
+int k_f dT = 3824*log(402.4 + T) + 1256e-11 * T^4/4
+```
+
+`SCA_Example.Tmax` uses `c3 = 6.1256E-11` for the same term. These differ by roughly 200x. The
+PDF's text layer may have dropped a leading `6.`. Please check Todreas & Kazimi — I do not
+want to pick one by eye.
+
+## Q28. Should the SCW friction factor carry Petrov-Popov's density correction?
+
+Hughes Eq. (9) is `f = (1.82*log(Re/8))^-2.0 * (rho_w/rho_b)^0.4`. The isothermal part is
+algebraically Filonenko (`1.82*log10(Re) - 1.6437` versus Filonenko's `-1.64`), so what the
+repo currently has is Filonenko *without* the supercritical density correction.
+
+You said to stick with Filonenko on both channels. Do you want the `(rho_w/rho_b)^0.4` factor
+added as an optional argument (defaulting off, so present behaviour is unchanged), or left out
+entirely?
+
+## Q29. Bishop is not implemented and looks like the source of the D2 mix-up
+
+Hughes Eq. (1) is Bishop et al. (1964): `Nu = 0.00459 Re^0.923 Pr^0.613 (rho_w/rho_b)^0.231`
+— same lead constant as Swenson, and the **0.231** that ended up on the wrong factor in
+`HTC.SCW.Swenson_dT`. The two equations are on facing columns of the same page.
+
+Worth implementing Bishop alongside Swenson? It is fully specified in the reference you
+supplied, it is one more supercritical option for the correlation-comparison figures, and
+having both side by side in `htc.py` makes the exponents hard to confuse again.
+
+## Q30. D9 cladding — Hughes does give a value
+
+You said there are no good D9 models. Hughes uses `k = 18.9 W/m-K at 650 K`
+(Leibowitz & Blomquist, 1988) as a constant, and Table 1 lists D9 density at 8100 kg/m^3.
+That is enough for a constant-conductivity clad but not a temperature-dependent model.
+
+Leave `MatMod.D9_SS` empty as you said, or add the two constants with the citation and a
+docstring saying it is constant-property only?
