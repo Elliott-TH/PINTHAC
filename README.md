@@ -53,8 +53,8 @@ T = np.array([573.15])   # K
 p = np.array([15.5])     # MPa
 rho = IAPWS95.rho_Tp(T, p)
 state = IAPWS95.helmholtz(rho, T)
-h = IAPWS95.h(state, units='kJ')
-cp = IAPWS95.cp(state)
+h  = IAPWS95.h(state,  units='kJ')     # kJ/kg
+cp = IAPWS95.cp(state, units='kJ')     # kJ/kg-K
 print(f"rho={rho[0]:.2f} kg/m^3  h={h[0]:.2f} kJ/kg  cp={cp[0]:.3f} kJ/kg-K")
 ```
 
@@ -62,14 +62,18 @@ Real output from this machine (`python -c "<the snippet above>"`, from the repos
 root):
 
 ```
-Using device: cuda
-rho=726.51 kg/m^3  h=1337.86 kJ/kg  cp=5457.864 kJ/kg-K
+rho=726.51 kg/m^3  h=1337.86 kJ/kg  cp=5.458 kJ/kg-K
 ```
 
-The `Using device: cuda` line is printed by `pinthac/properties/iapws95.py` at import
-time -- a real defect against this project's own style contract (CLAUDE.md section 5.6:
-"no `print()` at import time"), left in place because `pinthac/` is out of scope for
-this phase; see "Known issues" below and `docs/FINAL_REPORT.md`.
+Note the explicit `units='kJ'` on both calls. Every property accessor defaults to SI
+joules, so omitting it returns 5457.864 J/kg-K -- the same number, correct, and easy to
+misread as kilojoules. The docstring states the unit on every accessor; the argument is
+there so the call site states it too.
+
+(The property library used to print `Using device: cuda` on import -- a real defect
+against this project's own style contract, CLAUDE.md section 5.6, "no `print()` at import
+time". Removed. `pinthac.properties.iapws95.device` is a module attribute for anything
+that needs to know which device was selected.)
 
 ## What the library covers
 

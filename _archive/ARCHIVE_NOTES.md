@@ -67,3 +67,9 @@ the rod-bundle correction, subcooled boiling and the CHFR check, and Phase 5 wor
 | File | Note |
 |---|---|
 | `iapws95_autograd.py` | The repository's only pre-Phase-8 example script. Runs (verified), but does not meet Phase 8's "small number of clean, runnable scripts" bar: raw debug `print()`s of full tensors, an unused `pytorch_optimizer` import, a `TPb_in` variable that is computed but never used meaningfully, and an SCW enthalpy march mixed into what is nominally an autograd demo, with no docstring explaining any of it. Superseded by `examples/property_lookup.py` (a cleaner IAPWS-95 property lookup, though without this file's autograd-through-`rho_Tp` derivation) and the other three Phase 8 examples. Kept here rather than lost -- the implicit-function-theorem derivation in its comments (reattaching `rho_Tp`'s detached Newton solve to `T` via `F(rho,T)=p(rho,T)-p_target=0`) is the same technique `figures/iapws95_derivative_validation.py` uses and is worth keeping as a reference if a future autograd-through-the-EOS example is wanted. |
+
+## The sca rework reference material
+
+| Path | Note |
+|---|---|
+| `sca_fix_ref/run.py`, `rod_gen.py`, `annular_gen.py` | The owner's starting point for fixing `pinthac/sca/`. Its design was right -- correlation selection by plain dict, an implicit/explicit split, every model threaded into the solver -- but it built `rod_gen.py`/`annular_gen.py` as *siblings* of `rod.py`/`annular.py` rather than replacing them, leaving two copies of each solver. The general versions were merged into the originals instead, so there is one rod solver and one annular solver again. Kept here because it is where the design came from. Note it also omitted `run_SCA_batch`, which the DeepONet data generator runs on; that was restored from the pre-merge `rod.py` and generalized the same way. |

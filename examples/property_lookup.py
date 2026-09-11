@@ -43,7 +43,10 @@ def main():
     rho = IAPWS95.rho_Tp(T, p)
     state = IAPWS95.helmholtz(rho, T)
     h = IAPWS95.h(state, units='kJ')   # kJ/kg
-    cp = IAPWS95.cp(state)             # kJ/kg-K (default units)
+    # units='kJ' explicitly: every accessor defaults to SI joules, so leaving it off
+    # returns 5457.86 J/kg-K -- the same number, correct, and easy to misread as
+    # kilojoules next to an enthalpy that really is in kJ.
+    cp = IAPWS95.cp(state, units='kJ')   # kJ/kg-K
     mu = IAPWS95.mu(state)             # Pa-s
     k = IAPWS95.lam(state)             # W/m-K
 

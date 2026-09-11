@@ -3,7 +3,11 @@ import numpy as np
 import torch
 from pinthac.properties import iapws97 as w97
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+# No print here. CLAUDE.md section 5 rule 6 forbids side effects at import time, and a
+# library that announces itself on import is one whose output a caller cannot control:
+# it lands in the middle of a user's own stdout, in every subprocess, and in the middle
+# of every example's pasted output. `device` is a module attribute -- anything that wants
+# to know which one was chosen can read it.
 
 # ====================
 # Critical Properties
