@@ -1,5 +1,5 @@
 """
-Shared matplotlib style for the Phase 7 portfolio figures (docs/PHASE67_BRIEF.md part B).
+Shared matplotlib style for the Phase 7 portfolio figures (docs/brief/PHASE67_BRIEF.md part B).
 
 Every figures/*.py script imports this module and calls apply() once, then figure() to
 get a dark-background Axes matching docs/reference/index.html's own palette -- the exact

@@ -25,7 +25,7 @@ two-phase flow, and their names are in HTC_MODELS below -- so they are importabl
 selectable through the same mechanism. But neither sca/rod.py nor sca/annular.py is a
 boiling-channel solver: both march a single-phase supercritical-water enthalpy balance
 with no onset-of-nucleate-boiling correlation, no quality/void-fraction tracking, and no
-subcooled-boiling bookkeeping anywhere in pinthac/sca/. Per docs/PHASE5_BRIEF.md's own
+subcooled-boiling bookkeeping anywhere in pinthac/sca/. Per docs/brief/PHASE5_BRIEF.md's own
 instruction ("if subcooled-boiling bookkeeping is not already present somewhere, say so
 rather than inventing it"), run_channel() raises NotImplementedError for a two-phase htc
 selection rather than pretending to run a boiling channel that does not exist.
@@ -45,7 +45,7 @@ from pinthac.sca import annular, rod
 # fuel_conductivity, a (k_func, Theta_func) pair -- pin.cylindrical.Cyl_T and
 # pin.annular.Ann_flux_split both need the conductivity and its integral together).
 # No plugin registry, no entry points, no auto-discovery, no DSL, no config parser --
-# docs/PHASE5_BRIEF.md forbids all of these by name. This is the whole mechanism.
+# docs/brief/PHASE5_BRIEF.md forbids all of these by name. This is the whole mechanism.
 # =============================================================================
 HTC_MODELS = {
     "swenson": htc.SCW.Swenson_dT,
@@ -98,7 +98,7 @@ def _select(name, table, category):
 
     Why this model is here:
         The single point every correlation-selection keyword in this module passes
-        through -- the entire "selection by name" mechanism docs/PHASE5_BRIEF.md asks
+        through -- the entire "selection by name" mechanism docs/brief/PHASE5_BRIEF.md asks
         for, and nothing more (no registry, no fallback guessing, no partial matching).
 
     Inputs:
@@ -123,7 +123,7 @@ def _scan_for_nonfinite(result, z_key, fields):
     Find the first axial node where any tracked field is non-finite (NaN or +/-inf).
 
     Why this model is here:
-        docs/PHASE5_BRIEF.md section 4 asks for "a known-bad case produces a readable
+        docs/brief/PHASE5_BRIEF.md section 4 asks for "a known-bad case produces a readable
         convergence report rather than a silent NaN". Neither sca/rod.py's bisect_newton
         solves nor sca/annular.py's closure() raise on a physically nonsensical case --
         a bad bracket or a diverging Picard iterate just comes out as NaN or inf in the
@@ -204,7 +204,7 @@ def run_channel(geometry, conditions, htc="swenson", friction="filonenko",
     so every one of the four correlation-selection keywords below actually takes effect.
 
     Why this model is here:
-        The one entry point docs/PHASE5_BRIEF.md section 3 asks for: geometry and
+        The one entry point docs/brief/PHASE5_BRIEF.md section 3 asks for: geometry and
         operating conditions as plain dicts, correlation selection by name, and a
         convergence report a person can read when a case fails.
 
@@ -316,7 +316,7 @@ def run_batch(cases):
     call.
 
     Why this model is here:
-        docs/PHASE5_BRIEF.md section 3 asks for exactly this -- "run many cases, or one
+        docs/brief/PHASE5_BRIEF.md section 3 asks for exactly this -- "run many cases, or one
         case across several correlations, in one call", which is what the comparison
         figures and DeepONet training-data generation both need. One bad case (a typo'd
         correlation name, a geometry missing a required key) is reported and skipped
@@ -359,9 +359,9 @@ def read_cases_csv(path, geom_type):
     docs/reference_code/SCA_Example.py's spreadsheet-driven input.
 
     Why this model is here:
-        docs/PHASE5_BRIEF.md section 3 asks for "a small spreadsheet reader in the
+        docs/brief/PHASE5_BRIEF.md section 3 asks for "a small spreadsheet reader in the
         spirit of docs/reference_code/SCA_Example.py". openpyxl is not installed, and
-        docs/DECISIONS.md/docs/PHASE5_BRIEF.md do not approve adding it, so this reads
+        docs/DECISIONS.md/docs/brief/PHASE5_BRIEF.md do not approve adding it, so this reads
         .csv only (pandas.read_csv) -- an .xlsx file needs to be exported to .csv first,
         or openpyxl added as an explicit, owner-approved dependency before a
         pandas.read_excel path is added here.

@@ -1,6 +1,6 @@
 """
 Validates IAPWS95 autograd derivatives against an independent finite-difference
-reference (docs/PHASE67_BRIEF.md figure 2).
+reference (docs/brief/PHASE67_BRIEF.md figure 2).
 
 rho_Tp() finds the density at fixed (T,p) with a Newton solve and then detaches the
 result (see its own docstring), so a naive torch.autograd.grad(rho_Tp(T,p), T) returns

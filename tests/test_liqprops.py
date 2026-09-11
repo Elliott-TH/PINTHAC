@@ -8,7 +8,7 @@ No number here was obtained by running the code under test -- the range/uncertai
 bounds asserted are literal class attributes (Tm, Tb, range_*, uncert_*) copied straight
 out of the source, not values liqprops itself computed.
 
-Phase 3 (docs/PHASE3_BRIEF.md item 4) adds SOBOLEV_TABLE-anchored tests below: at T = Tm,
+Phase 3 (docs/brief/PHASE3_BRIEF.md item 4) adds SOBOLEV_TABLE-anchored tests below: at T = Tm,
 rho(T) and sigma(T) must equal Sobolev (2020) Table 7's/Table 9's rho_M,0/sigma_M,0
 constant exactly (the (T - Tm) term in both formulas is exactly zero there, so this is
 not a tolerance check -- it is the published table constant itself, read directly out of

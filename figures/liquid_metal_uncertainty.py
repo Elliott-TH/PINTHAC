@@ -1,6 +1,6 @@
 """
 Thermal conductivity vs. temperature for Na, Pb and LBE, with Monte Carlo uncertainty
-bands (docs/PHASE67_BRIEF.md figure 3).
+bands (docs/brief/PHASE67_BRIEF.md figure 3).
 
 k(T) itself is the plain formula each class already documents (Sodium.k / Lead.k /
 LBE.k, from Sobolev 2020 -- see their own docstrings in pinthac/properties/liqprops.py

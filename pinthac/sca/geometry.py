@@ -6,7 +6,7 @@ sca/annular.py's outer (rod-bundle) channel both compute the same square-pitch
 unit-cell hydraulic diameter from a pitch and a rod (or clad) outer radius, by
 hand, in two different files; annular.py's inner channel separately computes
 the same circular-tube hydraulic diameter (its own diameter) from a channel
-radius. docs/PHASE5_BRIEF.md section 3 asks for a shared geometry module --
+radius. docs/brief/PHASE5_BRIEF.md section 3 asks for a shared geometry module --
 this is that module, factored out of the two call sites it replaces rather
 than written from scratch, so it carries no new physics or formula.
 """

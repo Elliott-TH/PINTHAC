@@ -90,14 +90,13 @@ if __name__ == "__main__":
 
 
 """
-Real output (python examples/property_lookup.py, from the repository root, on this
+Real output (python -m examples.property_lookup, from the repository root, on this
 machine, GenEnv3.12, torch 2.9.1+rocm7.2.1):
 
-Using device: cuda
 Water (IAPWS-95), T = 573.15 K, p = 15.5 MPa:
   rho = 726.514 kg/m^3
   h   = 1337.862 kJ/kg
-  cp  = 5457.8635 kJ/kg-K
+  cp  = 5.4579 kJ/kg-K
   mu  = 8.852958e-05 Pa-s
   k   = 0.5640 W/m-K
 
@@ -112,8 +111,8 @@ Sodium (Sobolev 2020 correlations), T = 700.0 K:
   k     = 71.380 W/m-K
   uncert_k (Sodium.uncert_k) = [0.0, 0.08] (relative, [low, high])
 
-The "Using device: cuda" line is printed by pinthac/properties/iapws95.py at import
-time -- a real defect against CLAUDE.md section 5.6 ("no print() at import time"),
-found but not fixed here since pinthac/ is out of scope for this phase. See
-docs/FINAL_REPORT.md.
+Note on the cp line: the value is printed in kJ/kg-K, which for water at 573.15 K and
+15.5 MPa is 5.4579 -- not 5457.86. An earlier version of this file pasted the J/kg-K
+number under a kJ/kg-K label, a unit slip worth remembering: check the magnitude of a
+pasted number against the physics, not just that it came out of a real run.
 """

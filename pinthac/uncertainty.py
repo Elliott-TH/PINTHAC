@@ -65,7 +65,17 @@ def disable():
     ENABLED = False
 
 
-def perturb(value, rel_sigma):
+def _sigma_ln(rel_sigma):
+    """
+    The lognormal width that reproduces a stated relative band.
+
+    sigma_ln = ln(1 + rel_sigma), so a +/- 25 percent band becomes exp(+/-0.2231),
+    i.e. 1.25 high and 0.80 low -- mirror images, and strictly positive.
+    """
+    return backend.np.log(1.0 + rel_sigma)
+
+
+def perturb(value, rel_sigma, lognormal=False):
     """
     Perturb a model output within its documented model-form uncertainty.
 
@@ -79,8 +89,27 @@ def perturb(value, rel_sigma):
         value_perturbed = value * (1 + rel_sigma * z),   z ~ N(0, 1)
 
         Multiplicative rather than additive, because correlation uncertainties are
-        published as percentages, and because it keeps a positive quantity positive for
-        any sensible sigma. One independent z is drawn per element, so a batch of cases
+        published as percentages.
+
+        On positivity, and why `lognormal` exists: (1 + rel_sigma*z) crosses zero at
+        z = -1/rel_sigma, which for a +/- 25 percent band is -4 sigma. That never happens
+        in a few hundred samples and reliably happens in a few hundred thousand: at 500000
+        draws roughly 15 of them come back with a *negative* multiplier, and the ones just
+        above zero are worse than the negative ones because they do not fail loudly -- a
+        heat transfer coefficient near zero simply produces an enormous wall temperature.
+        A Monte Carlo study that grew from 500 trials to 500000 therefore silently
+        acquires physically impossible samples in its tail, which is exactly the tail the
+        study was run to look at.
+
+        Passing lognormal=True draws value*exp(sigma_ln*z) with
+        sigma_ln = ln(1 + rel_sigma) instead. That is strictly positive for every draw,
+        and for small rel_sigma it reproduces the same band: +/- 25 percent becomes
+        exp(+/-0.223) = 1.25 / 0.80. It is also the more defensible model of a
+        multiplicative error -- being "25 percent high" and "25 percent low" are then
+        mirror images of each other, which they are not under the additive form.
+
+        The default stays additive so existing studies and the committed figures remain
+        reproducible; at their sample counts the two are indistinguishable. One independent z is drawn per element, so a batch of cases
         gets a batch of independent perturbations rather than one shared offset -- which
         is what makes a single batched solve equivalent to many Monte Carlo trials.
 
@@ -104,14 +133,18 @@ def perturb(value, rel_sigma):
     if backend.is_torch(value):
         z = backend.torch.randn(value.shape, dtype=value.dtype, device=value.device,
                                 generator=_torch_generator)
+        if lognormal:
+            return value * backend.torch.exp(_sigma_ln(rel_sigma) * z)
         return value * (1.0 + rel_sigma * z)
 
     array = backend.np.asarray(value, dtype=float)
     z = _np_rng.standard_normal(array.shape)
+    if lognormal:
+        return value * backend.np.exp(_sigma_ln(rel_sigma) * z)
     return value * (1.0 + rel_sigma * z)
 
 
-def band(value, rel_sigma, n_samples):
+def band(value, rel_sigma, n_samples, lognormal=False):
     """
     Draw n_samples independent perturbations of a single value.
 
@@ -136,8 +169,12 @@ def band(value, rel_sigma, n_samples):
         shape = (n_samples,) + tuple(value.shape)
         z = backend.torch.randn(shape, dtype=value.dtype, device=value.device,
                                 generator=_torch_generator)
+        if lognormal:
+            return value.unsqueeze(0) * backend.torch.exp(_sigma_ln(rel_sigma) * z)
         return value.unsqueeze(0) * (1.0 + rel_sigma * z)
 
     array = backend.np.asarray(value, dtype=float)
     z = _np_rng.standard_normal((n_samples,) + array.shape)
+    if lognormal:
+        return array[None, ...] * backend.np.exp(_sigma_ln(rel_sigma) * z)
     return array[None, ...] * (1.0 + rel_sigma * z)

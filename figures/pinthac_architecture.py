@@ -1,5 +1,5 @@
 """
-PINTHAC module dependency diagram (docs/PHASE67_BRIEF.md figure 6).
+PINTHAC module dependency diagram (docs/brief/PHASE67_BRIEF.md figure 6).
 
 Parses the actual import statements out of every pinthac/**/*.py source file with the
 `ast` module and draws the resulting package-level graph -- "the real import graph, not

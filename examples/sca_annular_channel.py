@@ -98,28 +98,25 @@ if __name__ == "__main__":
 Real output (python -m examples.sca_annular_channel, from the repository root, on
 this machine, GenEnv3.12, torch 2.9.1+rocm7.2.1):
 
-/home/elliott/Codes/Projects/Pinthac/pinthac/sca/annular.py:27: RangeWarning: uo2_k_nfi: out of validated range -- T = 3600 above the upper bound 2800
-  _Theta_UO2 = ht.Ann_Theta(lambda T: mat.UO2.k_NFI(T))
-Using device: cuda
-Geometry/conditions: default Inputs_ann -- L=4.27 m, N=100 axial nodes, q0=10.0 kW/m peak (cosine shape), Pnom=25.0 MPa, mdot_i=0.01 kg/s, mdot_o=0.06 kg/s
+Geometry/conditions: L=4.27 m, N=100 axial nodes, q0=10.0 kW/m peak (cosine shape), Pnom=25.0 MPa, mdot_i=0.01 kg/s, mdot_o=0.06 kg/s
 
-Solved in 322.8 s (6 outer Picard iterations, converged=True, residual=0 J/kg)
+Solved in 426.7 s (6 outer Picard iterations, converged=True, residual=0 J/kg)
 
 Flux-split energy balance (should equal q0 to within the 100-node axial discretization -- see pinthac/pin/annular.py::Ann_flux_split's docstring):
-  inner channel enthalpy rise: 893.970 kJ/kg
-  outer channel enthalpy rise: 303.973 kJ/kg
+  inner channel enthalpy rise: 893.982 kJ/kg
+  outer channel enthalpy rise: 303.971 kJ/kg
 
-Peak fuel surface temperature, inner side (Tfo_i): 739.90 K
-Peak fuel surface temperature, outer side (Tfo_o): 725.28 K
+Peak fuel surface temperature, inner side (Tfo_i): 739.91 K
+Peak fuel surface temperature, outer side (Tfo_o): 725.29 K
 Outlet inner-channel coolant temperature (Tm_i):   668.88 K
 Outlet outer-channel coolant temperature (Tm_o):   652.84 K
 Total pressure drop, inner channel: 20.59 kPa
 Total pressure drop, outer channel: 45.60 kPa
 
-322.8 s (about 5.4 minutes) is real: each of the 6 outer Picard iterations evaluates
-the IAPWS-95 property library and a torchsolve bracket-guarded wall-temperature solve
-across the whole 100-node axial field several times, and each such call carries fixed
-per-call overhead (see sca/annular.py::_T_hp_fast's docstring) that dominates at this
-problem size on this GPU. This is the module's own default case (Inputs_ann,
-unmodified), the same one pinthac/sca/annular.py's own __main__ block runs.
+The ~7 minute solve time is real, not a hang. Each of the 6 outer Picard iterations
+evaluates the IAPWS-95 property library and a bracket-guarded wall-temperature solve
+across the whole 100-node axial field several times, and each such call carries a
+fixed per-call overhead (see sca/annular.py::_T_hp_fast's docstring) that dominates at
+this problem size on this GPU. The wall-clock number moves by tens of percent between
+runs depending on what else is on the card; the temperatures do not.
 """

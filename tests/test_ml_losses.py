@@ -1,5 +1,5 @@
 """
-Permanent tests for pinthac.ml.losses (Phase 6, docs/PHASE67_BRIEF.md part A1).
+Permanent tests for pinthac.ml.losses (Phase 6, docs/brief/PHASE67_BRIEF.md part A1).
 
 These are the shared physics-residual terms factored out of deeponet.py/pinn.py's
 previously-inline expressions. Checked for algebraic behaviour (residual is zero exactly

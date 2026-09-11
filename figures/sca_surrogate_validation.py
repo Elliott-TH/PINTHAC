@@ -1,13 +1,13 @@
 """
 DeepONet surrogate axial profile vs. ground-truth FVM, for a few held-out operating
-points (docs/PHASE67_BRIEF.md figure 4).
+points (docs/brief/PHASE67_BRIEF.md figure 4).
 
 Uses pinthac.ml.deeponet_predict.predict_rod() -- the pure-inference wrapper around the
 trained checkpoint (data/sca_rod_deeponet_best.pth) -- as a *consumer*, the same way
 sca/rod.py's run_SCA_batch produced the ground truth this compares against. Both the
 surrogate predictions and the "ground truth" curves plotted here come from
 data/sca_rod_deeponet_dataset.npz's stored outputs, which were themselves produced by
-run_SCA_batch when the dataset was generated (see docs/PHASE67_BRIEF.md, "Already done,
+run_SCA_batch when the dataset was generated (see docs/brief/PHASE67_BRIEF.md, "Already done,
 do not redo") -- so the FVM side is not re-run here, only read back, exactly the way the
 brief's own accuracy numbers (MAE 0.113 K / 5.029 K) were obtained.
 

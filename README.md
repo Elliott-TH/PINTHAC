@@ -98,6 +98,35 @@ that needs to know which device was selected.)
 float/numpy/torch dispatch, the shared range-checking helper, and Monte Carlo
 model-form perturbation, respectively.
 
+### How uncertainty is meant to be used
+
+`uncertainty.py` is deliberately **not** wired into every correlation's return path. A
+correlation returns its best estimate; the caller decides whether, where and how to
+perturb it. The reason is that model-form error is systematic, not noise: if Swenson is
+15 percent high for a given geometry and set of conditions, it is 15 percent high at
+every axial node of that run. A perturbation applied inside the correlation would redraw
+at each call, which models the correlation as making an independent mistake every
+centimetre; those mistakes then average out along the channel and produce a confidently
+narrow error band that is an artifact of the sampling scheme rather than a property of
+the correlation. With 100 axial nodes the propagated spread comes out roughly sqrt(100)
+= 10x too small.
+
+So the caller draws once per trial and holds it fixed. `examples/monte_carlo_rod.py` is
+the worked example, and each correlation's documented band is available in the library
+(`correlations/htc.py::UNCERTAINTY`, `properties/liqprops.py::Sodium.uncert_k` and
+friends) rather than retyped at the call site.
+
+`perturb(value, rel_sigma)` and `band(value, rel_sigma, n_samples)` both take
+`lognormal=True`, which is what you want for a multiplicative band. The default
+additive form `value * (1 + rel_sigma*z)` crosses zero at `z = -1/rel_sigma`, which for
+a +/- 25 percent band is -4 sigma -- invisible in a few hundred trials and reliably
+present in a few hundred thousand, where it produces negative heat transfer
+coefficients and fuel temperatures in the hundreds of thousands of kelvin. The lognormal
+form `value * exp(ln(1+rel_sigma)*z)` is strictly positive, spans the same band
+(`exp(+/-0.223)` = 1.25 and 0.80), and makes "25 percent high" and "25 percent low"
+mirror images of each other. The additive form remains the default only so that figures
+committed before the option existed stay reproducible.
+
 ## Validation status
 
 This is the section that matters. Every number below comes from a script or test that
@@ -184,8 +213,8 @@ because the target itself is `sca/rod.py`, an unvalidated-against-experiment sol
 
 ## Examples
 
-`examples/` has four runnable scripts, each with its real output pasted at the bottom
-of the file:
+`examples/` has five runnable scripts, each short enough to read in one sitting and
+each with its real output pasted at the bottom of the file:
 
 | Script | What it shows |
 |---|---|
@@ -193,6 +222,7 @@ of the file:
 | `examples/sca_rod_channel.py` | A single-channel fuel-rod axial solve, run at the supercritical conditions its correlations were actually fit to (see the file's own comment for why this is not a PWR case -- two-phase is not implemented). |
 | `examples/sca_annular_channel.py` | The library's principal target: a full annular dual-coolant single-channel solve. Takes several minutes on this machine -- the file explains why. |
 | `examples/deeponet_surrogate.py` | The trained DeepONet surrogate against the ground-truth solver it was trained on: accuracy on held-out cases, and timing across batch sizes. |
+| `examples/monte_carlo_rod.py` | Monte Carlo propagation of the Swenson correlation's own +/- 25 percent model-form uncertainty through a rod channel, with one perturbation drawn per trial and held fixed along the whole channel. Writes two histograms to `examples/output/`. |
 
 Run any of them from the repository root as `python -m examples.<name>` (needed so
 `torchsolve` resolves -- see "Known issues").
@@ -208,17 +238,23 @@ silently dropped.
 
 ## Known issues
 
-Found during this phase, not fixed (scope for this phase is `README.md`, `examples/`
-and `docs/` only -- `pinthac/`, `figures/` and `tests/` are out of bounds; see
-`docs/FINAL_REPORT.md` for the full list):
+Two defects were carried as known issues through the documentation phase and have since
+been fixed; both fixes are verified rather than asserted:
 
-- `pinthac/properties/iapws95.py` prints `"Using device: ..."` at module import time
-  (CLAUDE.md section 5.6 forbids this). Visible in the quickstart output above.
-- `torchsolve/pyproject.toml` declares `packages = ["torchsolve"]`, which expects a
-  `torchsolve/torchsolve/` subdirectory that does not exist -- `pip install -e
-  ./torchsolve` fails with "package directory 'torchsolve' does not exist". Everything
-  in this repository works around it by relying on `python -m` or `pytest`'s
-  cwd-on-`sys.path` behavior instead of an actual install.
+- `pinthac/properties/iapws95.py` printed `Using device: ...` at module import time,
+  against CLAUDE.md section 5.6. Removed; the selected device is available as the module
+  attribute `pinthac.properties.iapws95.device`. `pinthac/ml/deeponet.py` and
+  `pinthac/ml/pinn.py` still print it on import -- they are training entry points where
+  the message is the point, and they are the only remaining instances.
+- `torchsolve/pyproject.toml` declared `packages = ["torchsolve"]` with no matching
+  subdirectory, so `pip install ./torchsolve` failed. Fixed with
+  `package-dir = {"torchsolve" = "."}` for the flat layout; `pip wheel --no-deps
+  ./torchsolve` now builds successfully.
+
+Still open, and tracked in `docs/OPEN_QUESTIONS.md` rather than papered over: two-phase
+supercritical-transition heat transfer is not implemented, several correlations have no
+published uncertainty band and say so in their docstrings, and the annular solve is slow
+(minutes, not seconds) for the reason `sca/annular.py::_T_hp_fast` explains.
 
 ## Ground rules for anyone extending this
 

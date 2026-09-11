@@ -12,7 +12,7 @@ docs/OPEN_QUESTIONS.md Q31 for the ones PNNL-35702 does not state a range for ei
 
 Theta_Klimenko and Theta_NFI are checked against scipy.integrate.quad of the k function
 each one integrates -- an independent numerical reference, not a value read off this
-module's own output, per docs/PHASE3_BRIEF.md item 3 ("that check is the whole point:
+module's own output, per docs/brief/PHASE3_BRIEF.md item 3 ("that check is the whole point:
 it proves the integral matches the conductivity it claims to integrate").
 
 Numbers asserted below are either literal constants written directly into the formulas
@@ -117,7 +117,7 @@ def test_uo2_k_klimenko_backend_contract():
                                     (300.0, 3120.0)])
 def test_uo2_theta_klimenko_matches_quadrature_of_k_klimenko(T1, T2):
     # scipy.integrate.quad of k_Klimenko itself is the independent reference here, per
-    # docs/PHASE3_BRIEF.md item 3 -- not a value obtained from Theta_Klimenko.
+    # docs/brief/PHASE3_BRIEF.md item 3 -- not a value obtained from Theta_Klimenko.
     theta_diff = float(m.UO2.Theta_Klimenko(np.array([T2]))[0]
                         - m.UO2.Theta_Klimenko(np.array([T1]))[0])
     quad_val, _ = quad(m.UO2.k_Klimenko, T1, T2)
@@ -144,7 +144,7 @@ def test_uo2_theta_klimenko_derivative_matches_k_klimenko():
                                                (300.0, 2800.0, 50.0, 0.02)])
 def test_uo2_theta_nfi_matches_quadrature_of_k_nfi(T_ref, T, Bu, f_gad):
     # Same independent-reference check as Theta_Klimenko, against k_NFI instead --
-    # the whole point of docs/PHASE3_BRIEF.md item 3's verification requirement.
+    # the whole point of docs/brief/PHASE3_BRIEF.md item 3's verification requirement.
     theta = float(m.UO2.Theta_NFI(np.array([T]), Bu, f_gad, T_ref=T_ref, n=1000)[0])
     quad_val, _ = quad(lambda TT: m.UO2.k_NFI(TT, Bu, f_gad), T_ref, T)
     assert theta == pytest.approx(quad_val, rel=1.0E-4)

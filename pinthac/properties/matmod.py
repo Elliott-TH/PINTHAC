@@ -18,7 +18,7 @@ under any name) and `Gas.k`'s "Air" entry (in MatLib's fitting-constant table bu
 from its applicability/uncertainty bullets). Both are still marked "Not established --
 see docs/OPEN_QUESTIONS.md (Q31)", per CLAUDE.md section 6: a plausible-looking invented
 range is worse than a blank. No formula, constant or exponent changed in Phase 3 either --
-see docs/PHASE3_BRIEF.md's report for the before/after check this relied on.
+see docs/brief/PHASE3_BRIEF.md's report for the before/after check this relied on.
 """
 import math
 
@@ -217,7 +217,7 @@ class UO2:
             with a fixed grid and a SciPy `interp1d` table, which is not differentiable
             under torch. This is the same integral built instead as a fixed-step
             cumulative trapezoid, so it can be used inside a torch-differentiable solve.
-            Per docs/PHASE3_BRIEF.md item 3, pin/annular.py is not repointed at this copy
+            Per docs/brief/PHASE3_BRIEF.md item 3, pin/annular.py is not repointed at this copy
             -- rewiring the solvers is Phase 4.
 
         Formulation:
@@ -243,7 +243,7 @@ class UO2:
         Uncertainty:
             Not established -- see docs/OPEN_QUESTIONS.md (Q31). tests/test_matmod.py
             checks this integral against scipy.integrate.quad of k_NFI itself instead,
-            the same verification approach as Theta_Klimenko, per docs/PHASE3_BRIEF.md
+            the same verification approach as Theta_Klimenko, per docs/brief/PHASE3_BRIEF.md
             item 3.
 
         Reference:
@@ -324,7 +324,7 @@ class UO2:
             integral_T1^T2 k dT. `pinthac/sca/rod.py::Kint` already implements exactly
             this for the rod solver (fixed for an erf-coefficient defect in commit
             14172e4, which derives the algebra this docstring restates); this is the same
-            closed form added to the property library per docs/PHASE3_BRIEF.md item 3.
+            closed form added to the property library per docs/brief/PHASE3_BRIEF.md item 3.
             sca/rod.py is not repointed at this copy -- rewiring the solvers is Phase 4.
 
         Formulation:
@@ -350,7 +350,7 @@ class UO2:
         Uncertainty:
             Not established -- see docs/OPEN_QUESTIONS.md (Q31). tests/test_matmod.py
             checks this integral against scipy.integrate.quad of k_Klimenko itself
-            instead, per docs/PHASE3_BRIEF.md item 3 -- that is the intended
+            instead, per docs/brief/PHASE3_BRIEF.md item 3 -- that is the intended
             verification, not a substitute for a published uncertainty.
 
         Reference:

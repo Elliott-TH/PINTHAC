@@ -1,8 +1,8 @@
 """
 Surrogate (DeepONet) vs. iterative FVM solver wall-clock time, as a function of batch
-size (docs/PHASE67_BRIEF.md figure 5).
+size (docs/brief/PHASE67_BRIEF.md figure 5).
 
-docs/PHASE67_BRIEF.md's own "already measured" numbers on CPU show the speedup
+docs/brief/PHASE67_BRIEF.md's own "already measured" numbers on CPU show the speedup
 collapsing with batch size --
     N=100    surrogate  27.3 ms   FVM 1415.1 ms   51.8x
     N=1000   surrogate 426.6 ms   FVM 2343.3 ms    5.5x
