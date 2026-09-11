@@ -11,10 +11,13 @@ checks are structural consequences of the physics (a heated channel's fuel is ho
 than its coolant; cumulative friction+gravity+acceleration pressure drop from a fixed
 inlet is positive), not values read off one run.
 """
+import warnings
+
 import numpy as np
 import pytest
 import torch
 
+from pinthac.ranges import RangeWarning
 from pinthac.sca import rod
 
 
@@ -130,7 +133,13 @@ def test_bundle_correction_is_self_consistent_and_changes_the_result():
     assert float(htc_bundle) != float(htc_round)
 
     Tco_bundle = Tm + qp_val / (math.pi * Dh * float(htc_bundle))
-    htc_round_at_Tco = rod.Swenson(Property, Tm, Tco_bundle, 25.0, INPUTS["G"], Dh)
+    # Through correlations/htc.py, not a local copy: rod.py's own Swenson was a duplicate
+    # carrying Hughes' rounded exponents and is archived. There is one Swenson now.
+    from pinthac.correlations import htc as htc_mod
+    Props_b = rod._props_at(Property, Tm)
+    Props_w = rod._props_at(Property, Tco_bundle)
+    htc_round_at_Tco = htc_mod.SCW.Swenson_dT(Props_b, Props_w, Tco_bundle, Tm,
+                                               INPUTS["G"], Dh)
     assert float(psi * htc_round_at_Tco) == pytest.approx(float(htc_bundle), rel=1e-6)
 
 
@@ -153,16 +162,24 @@ def test_swenson_and_chen_are_both_selectable_and_actually_differ():
                 'kc': 24.0, 'delta': 5.0e-4, 'G': 1200.0}
     kw = dict(pval=25.0, Tscw_in=553.0, q0=25.0e3, L=3.0, n=20)
 
-    sw = _np(rod.run_SCA(geometry, correlation="swenson", **kw)['T_fuel_max'])
-    ch = _np(rod.run_SCA(geometry, correlation="chen_scw", **kw)['T_fuel_max'])
+    # Chen & Fang is validated above q'' = 129 kW/m^2 and a cosine axial shape goes to
+    # zero at both ends, so the range check fires there for any cosine case. That is the
+    # correlation's real range meeting the real power shape, and not what this test is
+    # about.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RangeWarning)
+        sw = _np(rod.run_SCA(geometry, htc_name="swenson", **kw)['T_fuel_max'])
+        ch = _np(rod.run_SCA(geometry, htc_name="chen_scw", **kw)['T_fuel_max'])
 
     assert np.isfinite(sw).all() and np.isfinite(ch).all()
     assert not np.allclose(sw, ch)          # different correlations, different answers
 
     # Coolant temperature is set by the axial energy balance alone, so the choice of
     # wall correlation must not move it at all.
-    sw_T = _np(rod.run_SCA(geometry, correlation="swenson", **kw)['T_i'])
-    ch_T = _np(rod.run_SCA(geometry, correlation="chen_scw", **kw)['T_i'])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RangeWarning)
+        sw_T = _np(rod.run_SCA(geometry, htc_name="swenson", **kw)['T_i'])
+        ch_T = _np(rod.run_SCA(geometry, htc_name="chen_scw", **kw)['T_i'])
     assert np.allclose(sw_T, ch_T, rtol=1e-12)
 
 
@@ -171,4 +188,4 @@ def test_unknown_correlation_name_raises_with_the_valid_names():
                 'kc': 24.0, 'delta': 5.0e-4, 'G': 1200.0}
     with pytest.raises(ValueError, match="swenson"):
         rod.run_SCA(geometry, pval=25.0, Tscw_in=553.0, q0=25.0e3, L=3.0, n=5,
-                    correlation="nope")
+                    htc_name="nope")

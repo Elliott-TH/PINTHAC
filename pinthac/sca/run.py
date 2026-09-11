@@ -8,22 +8,17 @@ boilerplate of assembling that module's own inputs dict. run_channel() is the on
 function that takes a geometry, a set of operating conditions, and a correlation
 selection, and returns the axial solution plus a convergence report.
 
-Correlation selection, honestly: docs/PHASE5_BRIEF.md asks for "correlation selection by
-name" via plain dict literals mapping name -> function, and that mechanism is built below
-(HTC_MODELS, FRICTION_MODELS, BUNDLE_MODELS, FUEL_CONDUCTIVITY_MODELS, and _select() to
-look a name up with a clear error on an unknown one). But sca/rod.py and sca/annular.py
-do not themselves accept an injected correlation -- their per-node physics calls
-Swenson/Filonenko/etc. by name internally, hardcoded (rod.py additionally applies
-Bundle.Presser and UO2.Theta_Klimenko/k_Klimenko; annular.py applies no bundle correction
-at all, see docs/OPEN_QUESTIONS.md Q42, and is hardcoded to UO2.k_NFI). Rewiring either
-solver's internals to accept an injected correlation is a real restructuring of a working
-module (CLAUDE.md section 9.2: "never rewrite a working module without asking"), not
-something to do silently inside a driver script. So run_channel() validates every
-requested name against the tables below (a typo or an unsupported name fails immediately,
-listing the valid options -- the actual "selection by name" contract), dispatches to
-whichever solver the geometry needs, and reports which requested selections the
-dispatched solver did NOT actually honor, rather than silently running different physics
-than what was asked for or pretending the selection did something it did not.
+Correlation selection: plain dict literals mapping name -> function (HTC_MODELS,
+FRICTION_MODELS, BUNDLE_MODELS, FUEL_CONDUCTIVITY_MODELS), looked up by _select(), which
+fails immediately on an unknown name and lists the valid ones. No registry, no
+auto-discovery, no config language -- that is the whole mechanism.
+
+Every selection reaches the solver. sca/rod.py and sca/annular.py take the correlation,
+the friction factor, the bundle factor and the fuel conductivity as arguments; neither
+defines a case of its own. Whether a heat transfer correlation needs an implicit
+wall-temperature solve is a property of the correlation, not of the solver, and is
+recorded in each solver's _HTC_DISPATCH (implicit: the wall state feeds its own formula)
+versus _EXPLICIT_HTC (bulk state only, evaluated once).
 
 Two-phase (PWR/BWR): correlations/htc.py has Chen, Bjorge and Schrock-Grossman for
 two-phase flow, and their names are in HTC_MODELS below -- so they are importable and
@@ -55,11 +50,16 @@ from pinthac.sca import annular, rod
 HTC_MODELS = {
     "swenson": htc.SCW.Swenson_dT,
     "chen_scw": htc.SCW.Chen_SCW_dT,
-    # Two-phase (PWR/BWR) -- selectable and importable, but see the module docstring:
-    # neither solver below has the subcooled-boiling bookkeeping to actually run one.
     "chen_h2o": htc.Water.Chen_H2O_dT,
     "bjorge": htc.Water.Bjorge_dT,
     "schrock_grossman": htc.Water.SchrockGrossman,
+    "dittus":htc.Water.Dittus,
+    "gnielinski":htc.Water.Gnielinski,
+    "petukhov":htc.Water.Petchukov,
+    "lyon":htc.Sodium.Lyon,
+    "seban":htc.Sodium.SebanShimazaki,
+    "lead_shen":htc.Lead.Shen,
+    "mikityuk":htc.Sodium.Mikityuk,
 }
 
 FRICTION_MODELS = {
@@ -80,17 +80,15 @@ FUEL_CONDUCTIVITY_MODELS = {
     "nfi": (matmod.UO2.k_NFI, matmod.UO2.Theta_NFI),
 }
 
-# What each solver's own per-node physics actually is today (see the module docstring).
-# bundle=None means "this channel applies no bundle correction at all" (annular.py, Q42),
-# not "unspecified".
-_ROD_FIXED = dict(htc="swenson", friction="filonenko", bundle="presser",
-                   fuel_conductivity="klimenko")
-_ANNULAR_FIXED = dict(htc="swenson", friction="filonenko", bundle=None,
-                       fuel_conductivity="nfi")
-
 _TWO_PHASE_HTC = ("chen_h2o", "bjorge", "schrock_grossman")
 
 _ROD_GEOM_KEYS = ("pitch", "rco", "tc", "delta", "kc")
+# The annular solver used to carry a module-level Inputs_ann default case. It does not any
+# more: a solver is not an example, and a default geometry silently standing in for one the
+# caller forgot is how a run ends up reporting someone else's pin. Every key is required
+# here, and a missing one fails immediately with the full list.
+_ANNULAR_GEOM_KEYS = ("ri", "ro", "tci", "tco", "delta_i", "delta_o", "Pitch")
+_ANNULAR_COND_KEYS = ("L", "Tin_i", "Tin_o", "Pnom", "mdot_i", "mdot_o", "q0")
 _ROD_COND_KEYS = ("G", "pval", "Tin", "q0", "L", "N")
 
 
@@ -118,37 +116,6 @@ def _select(name, table, category):
             f"{category}: unknown model {name!r} -- valid options are {sorted(table)}"
         )
     return table[name]
-
-
-def _unhonored_notes(requested, fixed):
-    """
-    Human-readable notes for every requested correlation the dispatched solver's
-    hardcoded per-node physics does not actually match -- see the module docstring for
-    why this is a note, not a silent no-op or a forced error.
-
-    Inputs:
-        requested : dict, the four correlation-selection kwargs as passed to run_channel
-        fixed     : one of _ROD_FIXED / _ANNULAR_FIXED
-    Returns:
-        list of strings, empty if every requested name matches what the solver does
-    """
-    notes = []
-    for key, fixed_name in fixed.items():
-        req_name = requested.get(key)
-        if req_name == fixed_name:
-            continue
-        if fixed_name is None:
-            notes.append(
-                f"{key}={req_name!r} was requested, but this channel applies no {key} "
-                f"correction at all -- see docs/OPEN_QUESTIONS.md Q42."
-            )
-        else:
-            notes.append(
-                f"{key}={req_name!r} was requested, but this solver's per-node physics "
-                f"is hardcoded to {key}={fixed_name!r}; the name was recognized but not "
-                f"honored -- see this module's docstring."
-            )
-    return notes
 
 
 def _scan_for_nonfinite(result, z_key, fields):
@@ -211,42 +178,53 @@ def _rod_inputs(geometry, conditions):
 
 
 def _annular_inputs(geometry, conditions):
-    """Assemble sca/annular.py's Inputs_ann-shaped dict: that solver takes one flat dict
-    carrying both geometry and operating conditions, so this starts from
-    annular.Inputs_ann's own defaults (so an omitted key falls back to a documented
-    default rather than a bare KeyError deep inside solve_field) and overlays whatever
-    the caller supplied."""
-    merged = dict(annular.Inputs_ann)
-    merged.update(geometry)
+    """Assemble the flat dict sca/annular.py's solve_field takes, which carries both
+    geometry and operating conditions in one mapping. Every physical key is required --
+    see _ANNULAR_GEOM_KEYS above for why there is no default case to fall back on. Only
+    the two discretization/material choices with an obvious default (N, Gas) are filled
+    in."""
+    merged = dict(geometry)
     merged.update(conditions)
+    missing = [k for k in _ANNULAR_GEOM_KEYS + _ANNULAR_COND_KEYS if k not in merged]
+    if missing:
+        raise ValueError(
+            f"annular channel: missing keys {missing} -- required geometry: "
+            f"{_ANNULAR_GEOM_KEYS}, required conditions: {_ANNULAR_COND_KEYS}"
+        )
+    merged.setdefault("N", 100)
+    merged.setdefault("Gas", "He")
     return merged
 
 
 def run_channel(geometry, conditions, htc="swenson", friction="filonenko",
                  bundle="presser", fuel_conductivity="klimenko", **solver_kwargs):
     """
-    Run one single-channel-analysis case, dispatching to sca/rod.py or sca/annular.py.
+    Run one single-channel-analysis case, dispatching to sca/rod.py or
+    sca/annular.py -- the fully general siblings of sca/rod.py/annular.py, threaded
+    so every one of the four correlation-selection keywords below actually takes effect.
 
     Why this model is here:
         The one entry point docs/PHASE5_BRIEF.md section 3 asks for: geometry and
         operating conditions as plain dicts, correlation selection by name, and a
-        convergence report a person can read when a case fails. See the module
-        docstring for exactly what the correlation-selection keywords do and do not
-        change today.
+        convergence report a person can read when a case fails.
 
     Formulation:
-        Not a physical model -- a dispatcher. geometry['type'] selects rod.run_SCA (for
-        'rod') or annular.solve_field (for 'annular'); geometry/conditions are reshaped
-        into that solver's own input format by _rod_inputs/_annular_inputs.
+        Not a physical model -- a dispatcher. geometry['type'] selects
+        rod.run_SCA (for 'rod') or annular.solve_field (for 'annular');
+        geometry/conditions are reshaped into that solver's own input format by
+        _rod_inputs/_annular_inputs, and the four correlation names are resolved via
+        HTC_MODELS/FRICTION_MODELS/BUNDLE_MODELS/FUEL_CONDUCTIVITY_MODELS and passed
+        straight through.
 
     Inputs:
         geometry   : dict with a 'type' key, 'rod' or 'annular', plus that geometry's
                      own keys -- rod: pitch, rco, tc, delta, kc (m, m, m, m, W/m-K);
-                     annular: any of Inputs_ann's geometry keys (ri, ro, tci, tco,
-                     delta_i, delta_o, Gas, Pitch), defaulting to Inputs_ann's values
+                     annular: ri, ro, tci, tco, delta_i, delta_o, Pitch (all required),
+                     plus optional Gas (default "He")
                      for anything omitted
         conditions : dict of operating conditions -- rod: G (kg/m^2-s), pval (MPa),
-                     Tin (K), q0 (W/m), optionally L (m), N; annular: any of Inputs_ann's
+                     Tin (K), q0 (W/m), optionally L (m), N; annular: L, Tin_i, Tin_o,
+                     Pnom, mdot_i, mdot_o, q0 (all required), optionally N; the
                      condition keys (Tin_i, Tin_o, Pnom, mdot_i, mdot_o, q0, L, N),
                      defaulting the same way
         htc, friction, bundle, fuel_conductivity : correlation selection by name (see
@@ -254,18 +232,20 @@ def run_channel(geometry, conditions, htc="swenson", friction="filonenko",
                      for the valid names). bundle=None means "apply no bundle
                      correction" and is always accepted.
         **solver_kwargs : passed straight through to the dispatched solver
-                     (rod.run_SCA's scw_table/device, or annular.solve_field's
-                     q_p/outer_iter/tol/progress) -- e.g. a caller who wants a looser
+                     (rod.run_SCA's scw_table/device, or annular.
+                     solve_field's q_p/outer_iter/tol/progress) -- e.g. a caller who
+                     wants a looser
                      annular tolerance for a quick exploratory run passes
                      tol=..., outer_iter=... here rather than run_channel needing to
                      know every such knob by name.
     Returns:
         dict: result (the underlying run_SCA()/solve_field() output), geom_type,
-        requested (the four correlation names as given), notes (list of strings --
-        which requested selections the dispatched solver did not honor, see
-        _unhonored_notes), convergence (dict, see _scan_for_nonfinite --
-        for 'annular' this also carries outer_converged/outer_residual/outer_iters_used,
-        see annular.solve_field's docstring)
+        requested (the four correlation names as given), notes (list of strings, always
+        empty today -- kept in the return shape in case a future selection category
+        again can't be fully honored by the dispatched solver), convergence (dict, see
+        _scan_for_nonfinite -- for 'annular' this also carries
+        outer_converged/outer_residual/outer_iters_used, see
+        annular.solve_field's docstring)
     """
     geom_type = geometry.get("type")
     if geom_type not in ("rod", "annular"):
@@ -276,33 +256,42 @@ def run_channel(geometry, conditions, htc="swenson", friction="filonenko",
     requested = dict(htc=htc, friction=friction, bundle=bundle,
                       fuel_conductivity=fuel_conductivity)
 
-    # Validate every requested name is at least recognized, regardless of whether the
-    # dispatched solver can honor it yet -- this is the actual "unknown name raises
-    # immediately" contract, independent of which solver the case lands on.
-    _select(htc, HTC_MODELS, "htc")
-    _select(friction, FRICTION_MODELS, "friction")
-    _select(bundle, BUNDLE_MODELS, "bundle")
-    _select(fuel_conductivity, FUEL_CONDUCTIVITY_MODELS, "fuel_conductivity")
+    # Validate every requested name is at least recognized (a typo or an unsupported
+    # name fails immediately, listing the valid options) and resolve it to the actual
+    # function(s) rod.py/annular.py need.
+    _select(htc, HTC_MODELS, "htc")   # rod/annular dispatch on the name itself
+    friction_func = _select(friction, FRICTION_MODELS, "friction")
+    bundle_func = _select(bundle, BUNDLE_MODELS, "bundle")
+    k_func, Theta_func = _select(fuel_conductivity, FUEL_CONDUCTIVITY_MODELS,
+                                  "fuel_conductivity")
 
     if htc in _TWO_PHASE_HTC:
         raise NotImplementedError(
             f"htc={htc!r} is a two-phase correlation, but neither sca/rod.py nor "
-            f"sca/annular.py has subcooled-boiling bookkeeping (onset-of-nucleate-boiling, "
-            f"quality/void-fraction tracking) -- see this module's docstring. Not invented "
-            f"here; use a single-phase htc selection ('swenson' or 'chen_scw')."
+            f"sca/annular.py has subcooled-boiling bookkeeping (onset-of-nucleate-"
+            f"boiling, quality/void-fraction tracking) -- see this module's docstring. "
+            f"Not invented here; use a single-phase htc selection ('swenson' or "
+            f"'chen_scw')."
         )
 
     geom_only = {k: v for k, v in geometry.items() if k != "type"}
+    # Kept as an always-present, normally-empty channel for anything a caller should know
+    # about a run that is not an error. Every correlation selection is honored, so nothing
+    # writes to it today.
+    notes = []
 
     if geom_type == "rod":
         inputs, run_kwargs = _rod_inputs(geom_only, conditions)
         run_kwargs.update(solver_kwargs)
-        result = rod.run_SCA(inputs, **run_kwargs)
+        result = rod.run_SCA(inputs, htc_name=htc, friction_func=friction_func,
+                                      bundle_func=bundle_func, k_func=k_func,
+                                      Theta_func=Theta_func, **run_kwargs)
         convergence = _scan_for_nonfinite(result, "Z", ("T_i", "T_fuel_max", "dP"))
-        notes = _unhonored_notes(requested, _ROD_FIXED)
     else:
         inp = _annular_inputs(geom_only, conditions)
-        result = annular.solve_field(inp, **solver_kwargs)
+        result = annular.solve_field(inp, htc_name=htc, friction_func=friction_func,
+                                              bundle_func=bundle_func, k_func=k_func,
+                                              **solver_kwargs)
         convergence = _scan_for_nonfinite(
             result, "z", ("Tm_i", "Tm_o", "Tfo_i", "Tfo_o", "q_i", "q_o")
         )
@@ -316,7 +305,6 @@ def run_channel(geometry, conditions, htc="swenson", friction="filonenko",
                 f"{result['outer_residual']:.4g} J/kg after {result['outer_iters_used']} "
                 f"iterations."
             )
-        notes = _unhonored_notes(requested, _ANNULAR_FIXED)
 
     return dict(result=result, geom_type=geom_type, requested=requested,
                 convergence=convergence, notes=notes)

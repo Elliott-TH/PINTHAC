@@ -15,3 +15,8 @@ test = ["pytest", "scipy>=1.9"]
 
 [tool.setuptools]
 packages = ["torchsolve"]
+# This pyproject.toml sits *inside* the package directory, alongside __init__.py, rather
+# than one level above it. Without this mapping setuptools looks for torchsolve/torchsolve/
+# and the build fails with "package directory does not exist". Pointing the package at "."
+# is the standard fix for that flat layout.
+package-dir = {"torchsolve" = "."}

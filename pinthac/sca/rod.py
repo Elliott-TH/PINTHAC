@@ -44,6 +44,12 @@ import scipy.constants
 import torch
 
 from pinthac.solvers import bisect_newton
+from pinthac.correlations import bundle as bundle_mod
+from pinthac.correlations import htc
+from pinthac.correlations import friction as fric
+from pinthac.pin.cylindrical import Cyl_T
+from pinthac.properties.matmod import UO2
+from pinthac.sca import geometry
 
 from pinthac.correlations.bundle import Bundle
 from pinthac.correlations import friction as fric
@@ -120,127 +126,12 @@ def make_Property(df):
 gpu_solve = bisect_newton
 
 
-# =============================================================================
-# Heat-transfer correlations (same physics as SCA_IAPWS95.py's inner/SCW
-# channel; Shen/psi are gone since there's no Pb channel to apply them to)
-# =============================================================================
-def Dittus(Property, Tm, p, G, D):
-    mu, cp, k = Property(['T', Tm], 'mu'), Property(['T', Tm], 'cp'), Property(['T', Tm], 'k')
-    Pr = mu * cp / k
-    Re = G * D / mu
-    return (0.023 * Re**0.8 * Pr**0.3) * k / D
 
 
-def Swenson(Property, Tb, Ts, p, G, D):
-    rho_s, rho_b = Property(['T', Ts], 'rho'), Property(['T', Tb], 'rho')
-    h_s, cp_s, mu_s, k_s = (Property(['T', Ts], 'h'), Property(['T', Ts], 'cp'),
-                             Property(['T', Ts], 'mu'), Property(['T', Ts], 'k'))
-    h_b, cp_b = Property(['T', Tb], 'h'), Property(['T', Tb], 'cp')
-    cp_bar = (h_s - h_b) / (Ts - Tb)
-    Re_s, Pr_s = G * D / mu_s, mu_s * cp_s / k_s
-    # The averaged heat capacity is referenced to the *wall*, not the bulk: Swenson's
-    # Pr_bar_w is mu_w*cp_bar/k_w, so factoring it as Pr_w*(cp_bar/cp_w) leaves cp_w
-    # underneath. A was cp_bar/cp_b, which leaves a spurious cp_w/cp_b hanging on the
-    # result. See Hughes et al. (2014) Eq. (8).
-    A, B = cp_bar / cp_s, rho_s / rho_b
-    Nu_s = 0.00459 * Re_s**0.92 * Pr_s**0.61 * A**0.61 * B**0.23
-    return Nu_s * k_s / D
 
 
-def Chen_SCW(Property, Tb, Ts, p, G, D, q):
-    """
-    Chen & Fang (2014) supercritical-water heat transfer coefficient, table-lookup form.
-
-    Why this model is here:
-        The alternative to Swenson in this solver. Swenson (1965) is the legacy benchmark;
-        Chen & Fang is the more accurate modern fit -- 5366 data points, MAD 5.4 percent,
-        95.7 percent within +/-15 percent -- and per docs/DECISIONS.md is the recommended
-        default. Written against the same `Property` lookup and the same argument order as
-        `Swenson` above so the two are interchangeable inside `htc_scw`, with the single
-        difference that Chen needs the local heat flux as well.
-
-    Formulation:
-        Nu_b = 0.46*Re_b^0.16*(Pr_w/Pr_b)^0.1*(nu_w/nu_b)^-0.55*(cp_bar/cp_b)^0.88
-               *(Gr_b*/Gr_b)^0.81
-        htc = Nu_b*k_b/D
-
-        The Grashof ratio collapses to q*D/(k_b*(Tw-Tb)) under the Boussinesq
-        approximation beta_b = (rho_b-rho_w)/(rho_b*(Tw-Tb)) -- g, beta and nu_b all
-        cancel. See correlations/htc.py::SCW.Chen_SCW_dT, whose derivation this mirrors.
-
-    Valid range / Uncertainty / Reference:
-        As correlations/htc.py::SCW.Chen_SCW_dT -- Chen, W. and Fang, X., Int. J. Heat
-        Mass Transfer 78 (2014) 156-160, docs/reference/Chen_Supercritical_H2O.pdf.
-
-    Inputs:
-        Property : the table lookup built by make_Property
-        Tb, Ts   : bulk and surface (wall) temperature, K
-        p        : pressure, MPa (accepted for signature parity; the table is built at p)
-        G        : mass flux, kg/m^2-s
-        D        : hydraulic diameter, m
-        q        : wall heat flux, W/m^2
-    Returns:
-        htc : heat transfer coefficient, W/m^2-K
-    """
-    rho_b, rho_s = Property(['T', Tb], 'rho'), Property(['T', Ts], 'rho')
-    mu_b, cp_b, k_b, h_b = (Property(['T', Tb], 'mu'), Property(['T', Tb], 'cp'),
-                            Property(['T', Tb], 'k'), Property(['T', Tb], 'h'))
-    mu_s, cp_s, k_s, h_s = (Property(['T', Ts], 'mu'), Property(['T', Ts], 'cp'),
-                            Property(['T', Ts], 'k'), Property(['T', Ts], 'h'))
-
-    Pr_b = mu_b * cp_b / k_b
-    Pr_w = mu_s * cp_s / k_s
-    Re_b = G * D / mu_b
-    nu_b, nu_w = mu_b / rho_b, mu_s / rho_s
-    cp_bar = (h_s - h_b) / (Ts - Tb)
-    Gr_ratio = (D * q) / (k_b * (Ts - Tb))
-
-    Nu = (0.46 * Re_b**0.16 * (Pr_w / Pr_b)**0.1 * (nu_w / nu_b)**(-0.55)
-          * (cp_bar / cp_b)**0.88 * Gr_ratio**0.81)
-    return Nu * k_b / D
 
 
-def htc_scw(Property, Tm, qp_val, p, G, D, psi=1.0, correlation="swenson"):
-    """
-    Solve Swenson's implicit wall-temperature balance for the rod-bundle heat transfer
-    coefficient, htc_pin = psi * htc_round_tube (Hughes et al. 2014, Eq. 11).
-
-    Why psi is baked into the residual, not multiplied on afterward: the wall
-    temperature itself depends on which htc closes the flux balance --
-    qp_val/(pi*D) = htc_pin*(Tco-Tm) -- so psi has to be inside the equation being
-    solved for Tco, the same way sca/lut.py::htc_and_Tw's `psi*h*(Tw-Tb) - q_solve`
-    residual does it. Multiplying psi onto the *converged uncorrected* htc afterward
-    would evaluate Swenson's temperature-dependent properties at the wrong Tco.
-
-    psi = 1.0 (default) reproduces the previous round-tube-only behaviour exactly.
-    """
-    # Chen's Grashof ratio carries (Tw - Tb) in its denominator and is then raised to
-    # 0.81, so any trial wall temperature at or below the bulk gives a negative base and a
-    # NaN. Swenson survives it -- its cp_bar ratio is negative over negative -- but the
-    # bracket has to exclude Tw <= Tb either way, since a heated wall is hotter than its
-    # coolant by definition. Swenson keeps the wider bracket it was validated with.
-    lo = Tm + 1.0e-3 if correlation == "chen_scw" else Tm - 50.0
-    hi = Tm + 1500.0
-
-    # Swenson and Chen take the same arguments in the same order, so selecting between
-    # them is a one-line closure rather than a second solver. Chen additionally needs the
-    # local wall heat flux, which is qp_val spread over the heated perimeter.
-    if correlation == "swenson":
-        def h_of(Tco):
-            return Swenson(Property, Tm, Tco, p, G, D)
-    elif correlation == "chen_scw":
-        q_flux = qp_val / (math.pi * D)
-        def h_of(Tco):
-            return Chen_SCW(Property, Tm, Tco, p, G, D, q_flux)
-    else:
-        raise ValueError(
-            f"unknown supercritical-water correlation {correlation!r}; "
-            "expected one of: swenson, chen_scw")
-
-    def res(Tco):
-        return (Tco - Tm) - qp_val / (math.pi * D * psi * h_of(Tco))
-    Tco = gpu_solve(res, lo, hi)
-    return psi * h_of(Tco)
 
 
 def gap(qp_val, delta, Tci, rci, rfo):
@@ -283,188 +174,10 @@ def _log(x):
     return torch.log(x) if torch.is_tensor(x) else math.log(x)
 
 
-# =============================================================================
-# Per-node solve: solid pellet -> clad -> single SCW channel in a
-# square-pitch lattice. No qp_i/qp_o split, no (A1, A2) fsolve -- q_p(z)
-# goes entirely to this one channel, and A1=0 is exact for a solid rod.
-# Every input (Tm, qp_val, and the inputs dict entries) can be either a
-# plain python float (one node of one run) or a (B,) tensor (one node of
-# B runs at once, all the gpu_solve() calls inside broadcast elementwise
-# over the batch dim already) -- see run_SCA vs run_SCA_batch below.
-# =============================================================================
-def rod_node(Property, Tm, p, qp_val, inputs, correlation="swenson"):
-    G, pitch = inputs['G'], inputs['pitch']
-    rco, tc, kc, delta = inputs['rco'], inputs['tc'], inputs['kc'], inputs['delta']
-
-    rci = rco - tc
-    rfo = rci - delta
-    d_o = 2 * rco
-    A_fuel = math.pi * rfo**2
-    q_ppp = qp_val / A_fuel
-
-    cell = geometry.square_pitch_cell(pitch, rco)
-    A_flow, Dh = cell['A_flow'], cell['Dh']
-
-    # Rod-bundle correction, Hughes et al. (2014) Eq. (11): htc_pin = psi*htc_round_tube.
-    # Presser (Eq. 10 there) is the same psi correlations/bundle.py::Bundle.Presser
-    # already applies to sca/lut.py's rod-bundle channel; this solver had no correction
-    # factor at all before (docs/PHYSICS_REVIEW.md, SCA_IAPWS95_Rod.py gap 1).
-    psi = Bundle.Presser(pitch, d_o)
-
-    htc_conv = htc_scw(Property, Tm, qp_val, p, G, Dh, psi, correlation=correlation)
-    Tco = Tm + qp_val / (math.pi * d_o * htc_conv)
-    Tci = Tco + qp_val / (2 * math.pi * kc) * _log(rco / rci)
-    Tfo = gap(qp_val, delta, Tci, rci, rfo)
-
-    # Solid-pellet centerline temperature: pin.cylindrical.Cyl_T at r=0, the shared
-    # solver's version of the (A1=0, A2=Kint(Tfo)+q'''*rfo^2/4, Tmax=Kint^-1(A2)) scheme
-    # this module used to invert by hand (see the note above Kfo/Kint used to be).
-    Theta_fo = UO2.Theta_Klimenko(Tfo)
-    Tmax = Cyl_T(0.0, rfo, q_ppp, Theta_fo, UO2.Theta_Klimenko, k_func=UO2.k_Klimenko,
-                 T_lo=1.0, T_hi=6000.0)
-    return Tco, Tmax
 
 
-def pressure_drop(T_arr, G, D, scw_table, fric_func, dz, g=9.81):
-    """
-    Cumulative single-phase axial pressure drop from friction, gravity, and flow
-    acceleration -- same momentum balance sca/annular.py::pressure_drop and
-    sca/lut.py::dP_cell use:
-
-        dP = f*dz*G**2*vol_avg/(2*D) + g*dz/vol_avg + G**2*(vol - vol_prev)
-
-    Why this model is here:
-        rod.py held pressure at pval for the entire channel with no friction, gravity or
-        acceleration term at all (docs/PHYSICS_REVIEW.md item 2 of "SCA_IAPWS95_Rod.py --
-        six gaps"). This adds it as a single post-processing pass over the already-solved
-        axial temperature field, the same decoupled-from-the-thermal-solve structure
-        sca/annular.py::solve_field uses for its own pressure_drop call -- the
-        single-phase momentum balance does not feed back into the enthalpy/htc closure.
-
-    fric_func's correlation choice: Wu (the rod-bundle-fitted friction factor sca/lut.py
-    uses for this same square-pitch-bundle geometry) is range-limited to G <= 1000
-    kg/m^2-s (docs/DECISIONS.md, "Wu friction"). This module's own __main__ example runs
-    at G = 1200 kg/m^2-s, already 20 percent over that bound, so passing Wu here would
-    warn on every node of the reference case -- the same out-of-range situation the owner
-    flagged for sca/annular.py's outer channel (Q3 in section 1). Filonenko is used
-    instead by default at the call site below, matching the "Filonenko on both channels"
-    decision's spirit rather than repeating that mistake in a second file.
-
-    T_arr (numpy array): bulk coolant temperature along z, K.
-    G, D: mass flux [kg/m^2-s] and hydraulic diameter [m] for this channel (both constant
-        along z -- the geometry and flow rate are fixed for the whole channel).
-    scw_table: the build_scw_table(pval) dict this solver already built for the property
-        lookups, reused here via plain numpy interpolation (T_arr and the table's own T
-        grid are both already resolved to plain numbers by the time this is called, so
-        there is no need to stay in torch for a diagnostic quantity that does not feed
-        back into the solve).
-    fric_func(Props, G, D): friction-factor correlation, e.g. friction.f_SCW.Filonenko.
-    dz: axial node spacing, m.
-
-    Returns cumulative dP [Pa] along z, dP[0] = 0 (no drop across the already-counted
-    inlet half-cell, matching sca/annular.py::pressure_drop's convention).
-    """
-    T_tab = scw_table['T'].detach().cpu().numpy()
-    mu_tab = scw_table['mu'].detach().cpu().numpy()
-    rho_tab = scw_table['rho'].detach().cpu().numpy()
-
-    T = np.asarray(T_arr, dtype=float)
-    mu = np.interp(T, T_tab, mu_tab)
-    rho = np.interp(T, T_tab, rho_tab)
-    vol = 1.0 / rho
-
-    Props = {'mu': mu}
-    f = fric_func(Props, G, D)
-
-    vol_prev = np.empty_like(vol)
-    vol_prev[0] = vol[0]
-    vol_prev[1:] = vol[:-1]
-    vol_avg = 0.5 * (vol_prev + vol)
-
-    dP_fric = f * dz * G**2 * vol_avg / (2 * D)
-    dP_grav = g * dz / vol_avg
-    dP_acc = G**2 * (vol - vol_prev)
-
-    dP_cell = dP_fric + dP_grav + dP_acc
-    dP_cell[0] = 0.0
-    return np.cumsum(dP_cell)
 
 
-# =============================================================================
-# Axial marching solution: cosine power shape over a channel of length L,
-# single SCW enthalpy balance (no LHGR split solve -- qp_val at each node
-# *is* the local linear heat rate, all of it going to this one channel).
-# =============================================================================
-def run_SCA(inputs, pval, Tscw_in, q0, L=3.0, n=400, scw_table=None, device=device, correlation='swenson'):
-    """Runs the same axial march as SCA_IAPWS95.run_SCA() for a normal
-    (solid, single-coolant) rod and returns the axial profiles as plain
-    python lists.
-
-    inputs   : dict with keys pitch, rco, tc, delta, kc, G
-    pval     : SCW pressure [MPa] (held constant along the channel)
-    Tscw_in  : SCW inlet temperature [K]
-    q0       : peak linear heat generation rate [W/m] (cosine axial shape)
-    L        : active fuel length [m]
-    n        : number of axial nodes
-    scw_table: optional pre-built build_scw_table(pval) dict, to skip
-               rebuilding the SCW property table when many runs share the
-               same pval
-
-    Returns a dict with keys Z, T_i, qp, T_fuel_max (as before) plus dP: cumulative
-    friction+gravity+acceleration pressure drop along z [Pa], dP[0] = 0 -- see
-    pressure_drop's docstring.
-    """
-    if scw_table is None:
-        scw_table = build_scw_table(pval, device=device)
-    Property = make_Property(scw_table)
-
-    dz = L / n
-    Z = [-L / 2 + dz + i * dz for i in range(n)]
-
-    def q_p(z):
-        return q0 * math.cos(math.pi * z / L)
-
-    cell = geometry.square_pitch_cell(inputs['pitch'], inputs['rco'])
-    A_flow, Dh = cell['A_flow'], cell['Dh']
-    mdot = inputs['G'] * A_flow
-
-    Tin_t = torch.tensor(float(Tscw_in), dtype=DTYPE, device=device)
-    hin = Property(['T', Tin_t], 'h')
-
-    qp0 = q_p(-L / 2 + dz / 2)
-    qp0_t = torch.tensor(float(qp0), dtype=DTYPE, device=device)
-    _, Tmax0 = rod_node(Property, Tin_t, pval, qp0_t, inputs, correlation=correlation)
-    h0 = hin + qp0_t * dz / mdot
-    T0 = Property(['h', h0], 'T')
-
-    qpZ, h_i, T_i, T_fuel_max = [qp0], [h0], [T0], [Tmax0]
-
-    for i in range(1, n):
-        z = Z[i]
-        qp_local = q_p(z - dz / 2)
-        qp_t = torch.tensor(float(qp_local), dtype=DTYPE, device=device)
-        _, Tmax = rod_node(Property, T_i[i - 1], pval, qp_t, inputs, correlation=correlation)
-
-        h_scw = h_i[i - 1] + qp_t * dz / mdot
-        T_scw = Property(['h', h_scw], 'T')
-
-        qpZ.append(qp_local); h_i.append(h_scw)
-        T_i.append(T_scw); T_fuel_max.append(Tmax)
-
-    T_i_list = [float(t) for t in T_i]
-
-    # Pressure drop: a single pass over the converged coolant temperature field, the
-    # same decoupled-from-the-thermal-solve structure sca/annular.py::solve_field uses
-    # (see pressure_drop's docstring for the Filonenko-not-Wu choice).
-    dP = pressure_drop(np.array(T_i_list), inputs['G'], Dh, scw_table, fric.f_SCW.Filonenko, dz)
-
-    return {
-        'Z': Z,
-        'T_i': T_i_list,
-        'qp': qpZ,
-        'T_fuel_max': [float(t) for t in T_fuel_max],
-        'dP': dP,
-    }
 
 
 def interp_sensors(q_sensors, sensor_z, zq):
@@ -491,8 +204,287 @@ def interp_sensors(q_sensors, sensor_z, zq):
     return y0 + w * (y1 - y0)
 
 
+
+
+if __name__ == '__main__':
+    import time
+    import matplotlib.pyplot as plt
+
+    inputs = {
+        "pitch": 0.0125, "rco": 0.0045, "tc": 0.00063,
+        "delta": 5e-4, "kc": 24, "G": 1200,
+    }
+
+    t0 = time.time()
+    out = run_SCA(inputs, pval=25, Tscw_in=300 + 273.15, q0=25e3, L=3, n=400)
+    print(f"run_SCA (400 axial steps, solid rod, {device}) elapsed: {time.time()-t0:.2f} s")
+
+    peak_idx = int(max(range(len(out['T_fuel_max'])), key=lambda i: out['T_fuel_max'][i]))
+    print(f"Peak fuel temperature: {out['T_fuel_max'][peak_idx]:.1f} K at "
+          f"z = {out['Z'][peak_idx]:.3f} m")
+    print(f"Total pressure drop: {out['dP'][-1]/1000:.2f} kPa")
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+    axes[0].plot(out['Z'], out['T_i'], label='SCW Temperature')
+    axes[0].set_xlabel('z [m]'); axes[0].set_ylabel('T [K]'); axes[0].legend()
+
+    axes[1].plot(out['Z'], out['qp'], label='LHGR')
+    axes[1].set_xlabel('z [m]'); axes[1].set_ylabel("q' [W/m]"); axes[1].legend()
+
+    axes[2].plot(out['Z'], out['T_fuel_max'], label='Peak fuel temperature')
+    axes[2].set_xlabel('z [m]'); axes[2].set_ylabel('T [K]'); axes[2].legend()
+
+    plt.tight_layout()
+    plt.savefig('sca_iapws95_rod_check.png', dpi=150)
+    print("Saved plot to sca_iapws95_rod_check.png")
+
+
+_TWO_PHASE_HTC = ("chen_h2o", "bjorge", "schrock_grossman")
+
+
+# name -> (dT_func, solve_func, needs_q). dT_func(Props_b, Props_w, Tw, Tb, G, D[, q]) is
+# the explicit form solved for Tco below; solve_func exists only so a caller importing
+# this dispatch table can see which correlations/htc.py wall-temperature solve pairs with
+# each name (htc_scw below re-solves the wall temperature itself with gpu_solve
+# rather than calling solve_func, since gpu_solve is what already runs on whatever device
+# rod.py's tensors live on -- see rod.py's own module docstring). Both of these need a
+# wall temperature (Tw) in their own formula -- properties vary too strongly with
+# temperature near the supercritical pseudocritical point to evaluate them at the bulk
+# state alone -- so htc(Tco) has to be solved for self-consistently with the flux balance.
+_HTC_DISPATCH = {
+    "swenson": (htc.SCW.Swenson_dT, htc.SCW.Swenson, False),
+    "chen_scw": (htc.SCW.Chen_SCW_dT, htc.SCW.Chen_SCW, True),
+}
+
+
+# name -> Props, G, D, pitch, Tm -> htc. Every one of these correlations (ordinary
+# single-phase water, and the liquid-metal ones -- "Sodium" in correlations/htc.py means
+# any low-Prandtl coolant, not sodium specifically, see that class's own docstring) is a
+# function of bulk-state properties and flow alone, with no wall-temperature dependence
+# at all, unlike Swenson/Chen_SCW above -- so no implicit solve is needed: htc_scw
+# below evaluates these once at Tm and returns psi*htc directly. Every adapter takes the
+# same (Props, G, D, pitch, Tm) shape and ignores whatever its own correlation does not
+# need, so htc_scw does not need a second per-name signature to remember.
+_EXPLICIT_HTC = {
+    "dittus": lambda Props, G, D, pitch, Tm: htc.Water.Dittus(Props, G, D),
+    "petukhov": lambda Props, G, D, pitch, Tm: htc.Water.Petchukov(Props, G, D),
+    "gnielinski": lambda Props, G, D, pitch, Tm: htc.Water.Gnielinski(Props, G, D),
+    "lyon": lambda Props, G, D, pitch, Tm: htc.Sodium.Lyon(Props, G, D),
+    "seban": lambda Props, G, D, pitch, Tm: htc.Sodium.SebanShimazaki(Props, G, D),
+    # Mikityuk is the one bundle (not round-tube) correlation here -- it needs the
+    # rod pitch, which none of the others do.
+    "mikityuk": lambda Props, G, D, pitch, Tm: htc.Sodium.Mikityuk(Props, G, D, pitch),
+    # Lead.Shen's T argument is accepted only "for interface consistency" and not used
+    # by its own formula (see that function's docstring) -- Tm is passed for the same
+    # reason every adapter here takes it, not because Shen needs it.
+    "lead_shen": lambda Props, G, D, pitch, Tm: htc.Lead.Shen(Props, Tm, G, D),
+}
+
+
+def _props_at(Property, T):
+    """Props dict (correlations/*.py's convention) built from rod.py's local table."""
+    return {
+        'rho': Property(['T', T], 'rho'),
+        'mu':  Property(['T', T], 'mu'),
+        'k':   Property(['T', T], 'k'),
+        'cp':  Property(['T', T], 'cp'),
+        'h':   Property(['T', T], 'h'),
+    }
+
+
+def htc_scw(Property, Tm, qp_val, p, G, D, psi=1.0, htc_name="swenson", pitch=None):
+    """
+    General version of rod.py::htc_scw. Two regimes, both keyed by htc_name:
+
+      - _EXPLICIT_HTC (Dittus, Petukhov, Gnielinski, Lyon, SebanShimazaki, Mikityuk,
+        Lead.Shen): no wall-temperature dependence, so htc = psi*correlation(bulk
+        Props, G, D[, pitch]) is returned directly, no solve needed.
+      - _HTC_DISPATCH (Swenson, Chen_SCW): same implicit wall-temperature balance as
+        rod.py::htc_scw (qp_val/(pi*D) = psi*h(Tco)*(Tco-Tm), psi baked inside the
+        residual -- see that docstring for why), with h looked up by name instead of
+        being one of two local hand-rolled functions.
+    """
+    if htc_name in _TWO_PHASE_HTC:
+        raise NotImplementedError(
+            f"htc={htc_name!r} is a two-phase correlation; sca/rod_gen.py (like "
+            f"sca/rod.py) has no subcooled-boiling bookkeeping -- see sca/run.py's "
+            f"module docstring."
+        )
+    if htc_name in _EXPLICIT_HTC:
+        Props_b = _props_at(Property, Tm)
+        return psi * _EXPLICIT_HTC[htc_name](Props_b, G, D, pitch, Tm)
+    if htc_name not in _HTC_DISPATCH:
+        raise ValueError(
+            f"unknown htc correlation {htc_name!r}; expected one of: "
+            f"{sorted(list(_HTC_DISPATCH) + list(_EXPLICIT_HTC))}"
+        )
+    dT_func, _, needs_q = _HTC_DISPATCH[htc_name]
+
+    # Chen's Grashof ratio carries (Tw-Tb) in its denominator raised to a fractional
+    # power, so any trial Tw at or below Tb gives a negative base and a NaN -- the
+    # bracket must start strictly above Tm. Swenson's cp_bar ratio survives Tw <= Tb (a
+    # NaN never appears), so it keeps the wider bracket it was validated with, same as
+    # rod.py::htc_scw.
+    lo = Tm + 1.0e-3 if needs_q else Tm - 50.0
+    hi = Tm + 1500.0
+    Props_b = _props_at(Property, Tm)
+
+    if needs_q:
+        q_flux = qp_val / (math.pi * D)
+        def h_of(Tco):
+            return dT_func(Props_b, _props_at(Property, Tco), Tco, Tm, G, D, q_flux)
+    else:
+        def h_of(Tco):
+            return dT_func(Props_b, _props_at(Property, Tco), Tco, Tm, G, D)
+
+    def res(Tco):
+        return (Tco - Tm) - qp_val / (math.pi * D * psi * h_of(Tco))
+    Tco = gpu_solve(res, lo, hi)
+    return psi * h_of(Tco)
+
+
+def rod_node(Property, Tm, p, qp_val, inputs, htc_name="swenson",
+                  bundle_func=bundle_mod.Bundle.Presser,
+                  k_func=UO2.k_Klimenko, Theta_func=UO2.Theta_Klimenko):
+    """
+    General version of rod.py::rod_node: identical solid-pellet/clad/gap/coolant
+    physics, but the bundle correction and fuel conductivity model are parameters
+    instead of being hardcoded to Bundle.Presser and UO2.k_Klimenko/Theta_Klimenko.
+    Defaults reproduce rod.py::rod_node's own physics exactly.
+
+    bundle_func : one of correlations/bundle.py::Bundle's functions, (P, D) -> psi, or
+                  None for no bundle correction (psi = 1.0) -- see sca/run.py's
+                  BUNDLE_MODELS.
+    k_func, Theta_func : a conductivity/its integral pair, e.g.
+                  (UO2.k_Klimenko, UO2.Theta_Klimenko) or (UO2.k_NFI, UO2.Theta_NFI) --
+                  see sca/run.py's FUEL_CONDUCTIVITY_MODELS.
+    """
+    G, pitch = inputs['G'], inputs['pitch']
+    rco, tc, kc, delta = inputs['rco'], inputs['tc'], inputs['kc'], inputs['delta']
+
+    rci = rco - tc
+    rfo = rci - delta
+    d_o = 2 * rco
+    A_fuel = math.pi * rfo**2
+    q_ppp = qp_val / A_fuel
+
+    cell = geometry.square_pitch_cell(pitch, rco)
+    Dh = cell['Dh']
+
+    psi = bundle_func(pitch, d_o) if bundle_func is not None else 1.0
+
+    htc_conv = htc_scw(Property, Tm, qp_val, p, G, Dh, psi, htc_name=htc_name, pitch=pitch)
+    Tco = Tm + qp_val / (math.pi * d_o * htc_conv)
+    Tci = Tco + qp_val / (2 * math.pi * kc) * _log(rco / rci)
+    Tfo = gap(qp_val, delta, Tci, rci, rfo)
+
+    Theta_fo = Theta_func(Tfo)
+    Tmax = Cyl_T(0.0, rfo, q_ppp, Theta_fo, Theta_func, k_func=k_func,
+                 T_lo=1.0, T_hi=6000.0)
+    return Tco, Tmax
+
+
+def pressure_drop(T_arr, G, D, scw_table, fric_func, dz, g=9.81):
+    """
+    Same momentum balance as rod.py::pressure_drop -- see that docstring -- but builds
+    the full property dict (rho, mu, cp, k) rather than mu alone, so any of sca/run.py's
+    FRICTION_MODELS can be used, including Wu (needs cp and k, not just mu), not only the
+    mu-only correlations rod.py's own version supports.
+    """
+    T_tab = scw_table['T'].detach().cpu().numpy()
+    T = np.asarray(T_arr, dtype=float)
+    Props = {
+        key: np.interp(T, T_tab, scw_table[key].detach().cpu().numpy())
+        for key in ('rho', 'mu', 'k', 'cp')
+    }
+    vol = 1.0 / Props['rho']
+    f = fric_func(Props, G, D)
+
+    vol_prev = np.empty_like(vol)
+    vol_prev[0] = vol[0]
+    vol_prev[1:] = vol[:-1]
+    vol_avg = 0.5 * (vol_prev + vol)
+
+    dP_fric = f * dz * G**2 * vol_avg / (2 * D)
+    dP_grav = g * dz / vol_avg
+    dP_acc = G**2 * (vol - vol_prev)
+
+    dP_cell = dP_fric + dP_grav + dP_acc
+    dP_cell[0] = 0.0
+    return np.cumsum(dP_cell)
+
+
+def run_SCA(inputs, pval, Tscw_in, q0, L=3.0, n=400, scw_table=None, device=device,
+                 htc_name="swenson", friction_func=fric.f_SCW.Filonenko,
+                 bundle_func=bundle_mod.Bundle.Presser,
+                 k_func=UO2.k_Klimenko, Theta_func=UO2.Theta_Klimenko):
+    """
+    General version of rod.py::run_SCA: the same cosine-power axial march over a solid
+    rod in a square-pitch SCW channel, but htc_name/friction_func/bundle_func/
+    (k_func, Theta_func) are all parameters -- exactly sca/run.py's four correlation-
+    selection keywords -- instead of hardcoded. Defaults reproduce rod.py::run_SCA
+    exactly (Swenson, Filonenko, Presser, Klimenko).
+
+    See rod.py::run_SCA's docstring for inputs/pval/Tscw_in/q0/L/n/scw_table; returns the
+    same dict (Z, T_i, qp, T_fuel_max, dP).
+    """
+    if scw_table is None:
+        scw_table = build_scw_table(pval, device=device)
+    Property = make_Property(scw_table)
+
+    dz = L / n
+    Z = [-L / 2 + dz + i * dz for i in range(n)]
+
+    def q_p(z):
+        return q0 * math.cos(math.pi * z / L)
+
+    cell = geometry.square_pitch_cell(inputs['pitch'], inputs['rco'])
+    Dh = cell['Dh']
+    mdot = inputs['G'] * cell['A_flow']
+
+    def node(Tm, qp_val):
+        return rod_node(Property, Tm, pval, qp_val, inputs, htc_name=htc_name,
+                             bundle_func=bundle_func, k_func=k_func, Theta_func=Theta_func)
+
+    Tin_t = torch.tensor(float(Tscw_in), dtype=DTYPE, device=device)
+    hin = Property(['T', Tin_t], 'h')
+
+    qp0 = q_p(-L / 2 + dz / 2)
+    qp0_t = torch.tensor(float(qp0), dtype=DTYPE, device=device)
+    _, Tmax0 = node(Tin_t, qp0_t)
+    h0 = hin + qp0_t * dz / mdot
+    T0 = Property(['h', h0], 'T')
+
+    qpZ, h_i, T_i, T_fuel_max = [qp0], [h0], [T0], [Tmax0]
+
+    for i in range(1, n):
+        z = Z[i]
+        qp_local = q_p(z - dz / 2)
+        qp_t = torch.tensor(float(qp_local), dtype=DTYPE, device=device)
+        _, Tmax = node(T_i[i - 1], qp_t)
+
+        h_scw = h_i[i - 1] + qp_t * dz / mdot
+        T_scw = Property(['h', h_scw], 'T')
+
+        qpZ.append(qp_local); h_i.append(h_scw)
+        T_i.append(T_scw); T_fuel_max.append(Tmax)
+
+    T_i_list = [float(t) for t in T_i]
+    dP = pressure_drop(np.array(T_i_list), inputs['G'], Dh, scw_table, friction_func, dz)
+
+    return {
+        'Z': Z,
+        'T_i': T_i_list,
+        'qp': qpZ,
+        'T_fuel_max': [float(t) for t in T_fuel_max],
+        'dP': dP,
+    }
+
+
 def run_SCA_batch(inputs_b, Tscw_in_b, q_sensors_b, sensor_z, pval=25.0,
-                   L=3.0, n=400, scw_table=None, device=device, correlation='swenson'):
+                   L=3.0, n=400, scw_table=None, device=device, htc_name='swenson',
+                   bundle_func=bundle_mod.Bundle.Presser,
+                   k_func=UO2.k_Klimenko, Theta_func=UO2.Theta_Klimenko):
     """Same axial march as run_SCA(), but over a whole batch of B runs at
     once instead of one python-level run at a time: every quantity at a
     given axial node is a (B,) tensor, and the n sequential axial steps
@@ -534,7 +526,9 @@ def run_SCA_batch(inputs_b, Tscw_in_b, q_sensors_b, sensor_z, pval=25.0,
     hin = Property(['T', Tscw_in_b], 'h')
 
     qp0 = q_p_batch(-L / 2 + dz / 2)
-    _, Tmax0 = rod_node(Property, Tscw_in_b, pval, qp0, inputs_b, correlation=correlation)
+    _, Tmax0 = rod_node(Property, Tscw_in_b, pval, qp0, inputs_b, htc_name=htc_name,
+                            bundle_func=bundle_func, k_func=k_func,
+                            Theta_func=Theta_func)
     h0 = hin + qp0 * dz / mdot
     T0 = Property(['h', h0], 'T')
 
@@ -543,7 +537,9 @@ def run_SCA_batch(inputs_b, Tscw_in_b, q_sensors_b, sensor_z, pval=25.0,
     for i in range(1, n):
         z = Z[i]
         qp_local = q_p_batch(z - dz / 2)
-        _, Tmax = rod_node(Property, T_i[i - 1], pval, qp_local, inputs_b, correlation=correlation)
+        _, Tmax = rod_node(Property, T_i[i - 1], pval, qp_local, inputs_b, htc_name=htc_name,
+                           bundle_func=bundle_func, k_func=k_func,
+                           Theta_func=Theta_func)
 
         h_scw = h_i[i - 1] + qp_local * dz / mdot
         T_scw = Property(['h', h_scw], 'T')
@@ -557,36 +553,3 @@ def run_SCA_batch(inputs_b, Tscw_in_b, q_sensors_b, sensor_z, pval=25.0,
         'qp': torch.stack(qpZ, dim=1),
         'T_fuel_max': torch.stack(T_fuel_max, dim=1),
     }
-
-
-if __name__ == '__main__':
-    import time
-    import matplotlib.pyplot as plt
-
-    inputs = {
-        "pitch": 0.0125, "rco": 0.0045, "tc": 0.00063,
-        "delta": 5e-4, "kc": 24, "G": 1200,
-    }
-
-    t0 = time.time()
-    out = run_SCA(inputs, pval=25, Tscw_in=300 + 273.15, q0=25e3, L=3, n=400)
-    print(f"run_SCA (400 axial steps, solid rod, {device}) elapsed: {time.time()-t0:.2f} s")
-
-    peak_idx = int(max(range(len(out['T_fuel_max'])), key=lambda i: out['T_fuel_max'][i]))
-    print(f"Peak fuel temperature: {out['T_fuel_max'][peak_idx]:.1f} K at "
-          f"z = {out['Z'][peak_idx]:.3f} m")
-    print(f"Total pressure drop: {out['dP'][-1]/1000:.2f} kPa")
-
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
-    axes[0].plot(out['Z'], out['T_i'], label='SCW Temperature')
-    axes[0].set_xlabel('z [m]'); axes[0].set_ylabel('T [K]'); axes[0].legend()
-
-    axes[1].plot(out['Z'], out['qp'], label='LHGR')
-    axes[1].set_xlabel('z [m]'); axes[1].set_ylabel("q' [W/m]"); axes[1].legend()
-
-    axes[2].plot(out['Z'], out['T_fuel_max'], label='Peak fuel temperature')
-    axes[2].set_xlabel('z [m]'); axes[2].set_ylabel('T [K]'); axes[2].legend()
-
-    plt.tight_layout()
-    plt.savefig('sca_iapws95_rod_check.png', dpi=150)
-    print("Saved plot to sca_iapws95_rod_check.png")

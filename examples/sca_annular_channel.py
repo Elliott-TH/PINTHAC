@@ -15,7 +15,7 @@ Two things worth knowing before reading the output:
     flux split between the two coolants closes to machine precision (Q34/Round 5 in
     docs/OPEN_QUESTIONS.md measured 4.8e-16), and the energy balance across the whole
     axial march is reported below via each channel's converged enthalpy rise.
-  - The default case (Inputs_ann, unchanged here) genuinely takes several minutes on
+  - This case genuinely takes several minutes on
     this machine -- see the timing note in the pasted output below. Each outer Picard
     iteration evaluates the IAPWS-95 property library and a bracket-guarded
     (torchsolve) wall-temperature solve many times across the whole axial field, and
@@ -27,23 +27,57 @@ Run: python -m examples.sca_annular_channel   (run from the repository root)
 """
 import time
 
-from pinthac.sca.annular import solve_field, Inputs_ann
+from pinthac.sca import run
+
+
+# The case this example runs. It used to live inside pinthac/sca/annular.py as a
+# module-level Inputs_ann constant, which is the wrong home for it: a solver is not an
+# example, and a default geometry quietly standing in for one the caller forgot is how a
+# run ends up reporting someone else's pin. The solver now requires every key, and the
+# case that exercises it lives here, where a reader can see and change it.
+CASE_GEOMETRY = {
+    "type":    "annular",
+    "ri":      0.0035,    # fuel inner radius, m
+    "ro":      0.0055,    # fuel outer radius, m
+    "tci":     0.0006,    # inner cladding thickness, m
+    "tco":     0.0006,    # outer cladding thickness, m
+    "delta_i": 0.0001,    # inner (fuel-ID-side) gas gap, m
+    "delta_o": 0.0001,    # outer (fuel-OD-side) gas gap, m
+    "Pitch":   0.0130,    # outer bundle pitch, m
+    "Gas":     "He",      # gap fill gas
+}
+
+CASE_CONDITIONS = {
+    "L":      4.27,       # active fuel length, m
+    "N":      100,        # axial cells
+    "Tin_i":  623.15,     # inner-channel inlet temperature, K
+    "Tin_o":  623.15,     # outer-channel inlet temperature, K
+    "Pnom":   25.0,       # MPa
+    "mdot_i": 0.010,      # inner channel mass flow, kg/s
+    "mdot_o": 0.060,      # outer channel mass flow, kg/s
+    "q0":     10.0e3,     # peak total LHGR, W/m (cosine axial shape)
+}
 
 
 def main():
-    print(f"Geometry/conditions: default Inputs_ann -- L={Inputs_ann['L']} m, "
-          f"N={Inputs_ann['N']} axial nodes, q0={Inputs_ann['q0']/1e3:.1f} kW/m peak "
-          f"(cosine shape), Pnom={Inputs_ann['Pnom']} MPa, "
-          f"mdot_i={Inputs_ann['mdot_i']} kg/s, mdot_o={Inputs_ann['mdot_o']} kg/s")
+    print(f"Geometry/conditions: L={CASE_CONDITIONS['L']} m, "
+          f"N={CASE_CONDITIONS['N']} axial nodes, "
+          f"q0={CASE_CONDITIONS['q0']/1e3:.1f} kW/m peak (cosine shape), "
+          f"Pnom={CASE_CONDITIONS['Pnom']} MPa, "
+          f"mdot_i={CASE_CONDITIONS['mdot_i']} kg/s, "
+          f"mdot_o={CASE_CONDITIONS['mdot_o']} kg/s")
 
     t0 = time.perf_counter()
-    out = solve_field(Inputs_ann, progress=False)
+    report = run.run_channel(CASE_GEOMETRY, CASE_CONDITIONS,
+                             htc="swenson", friction="filonenko",
+                             bundle="presser", fuel_conductivity="nfi")
+    out = report["result"]
     elapsed = time.perf_counter() - t0
 
     print(f"\nSolved in {elapsed:.1f} s ({out['outer_iters_used']} outer Picard "
           f"iterations, converged={out['outer_converged']}, "
           f"residual={out['outer_residual']:.3g} J/kg)")
-    print(f"\nFlux-split energy balance (should equal q0 to within the {Inputs_ann['N']}-node "
+    print(f"\nFlux-split energy balance (should equal q0 to within the {CASE_CONDITIONS['N']}-node "
           f"axial discretization -- see pinthac/pin/annular.py::Ann_flux_split's docstring):")
     print(f"  inner channel enthalpy rise: {(out['h_i'][-1] - out['h_i'][0])/1e3:.3f} kJ/kg")
     print(f"  outer channel enthalpy rise: {(out['h_o'][-1] - out['h_o'][0])/1e3:.3f} kJ/kg")
