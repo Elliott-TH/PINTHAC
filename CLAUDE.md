@@ -3,8 +3,8 @@
 This file is the authority for every later phase of the cleanup and for every subagent.
 It was written in Phase 0 by reading the existing good files (`MatMod.py`, `SCA_Example.py`,
 `Advanced_Swenson.py`, `Misc_Good_SCA/SCW_Pb_Ann_SCA.py`, `PinHT.py`, `FRICT.py`) and the
-brief in `Prompt.md`. Where the brief and the existing code disagree, the disagreement is
-listed in `docs/OPEN_QUESTIONS.md` and must be resolved by the repository owner, not guessed.
+brief in `docs/brief/ORIGINAL_BRIEF.md`. Where the brief and the existing code
+disagree, the disagreement is listed in `docs/OPEN_QUESTIONS.md` and must be resolved by the repository owner, not guessed.
 
 ---
 

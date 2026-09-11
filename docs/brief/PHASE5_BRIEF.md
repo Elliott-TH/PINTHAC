@@ -2,7 +2,7 @@
 
 Read `CLAUDE.md` first; it outranks anything here. Then `docs/DECISIONS.md`,
 `docs/PHYSICS_REVIEW.md` (what is wrong with the two existing solvers), and
-`docs/PHASE2_BRIEF.md` (its ground rules still apply).
+`docs/brief/PHASE2_BRIEF.md` (its ground rules still apply).
 
 ## Scope
 

@@ -1,5 +1,5 @@
 """
-Permanent tests for pinthac.sca.rod, added per docs/PHASE5_BRIEF.md section 4.
+Permanent tests for pinthac.sca.rod, added per docs/brief/PHASE5_BRIEF.md section 4.
 
 Small axial node counts throughout (n=20-30, not the 400-node reference case) so the
 suite stays fast -- rod.run_SCA's per-node solves are the same physics regardless of
@@ -43,7 +43,7 @@ def test_run_sca_produces_finite_output():
 
 # ------------------------------------------------------------------- energy balance
 def test_energy_balance_closes():
-    """sum(q'*dz) against the coolant enthalpy rise, docs/PHASE5_BRIEF.md section 4.
+    """sum(q'*dz) against the coolant enthalpy rise, docs/brief/PHASE5_BRIEF.md section 4.
 
     Independent check, not a tautology: run_SCA's own march computes h internally and
     converts it back to T via the SCW property table's h->T inversion (a bisection, not

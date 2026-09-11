@@ -11,7 +11,8 @@ repository — nothing here is asserted without something that produced it.
 ## Phase by phase
 
 **Phase 0 — audit.** Read every file in the pre-cleanup repository against the brief
-(`Prompt.md`) and wrote the four documents everything else was built on:
+(`docs/brief/ORIGINAL_BRIEF.md`, moved there from the repository root in the final
+cleanup pass) and wrote the four documents everything else was built on:
 `docs/AUDIT.md` (per-file inventory, the float/numpy/torch contract baseline),
 `docs/DUPLICATES.md` (D1-D12, every duplicated model and the physics defects found by
 comparing copies), `docs/PHYSICS_REVIEW.md` (the single-channel solvers checked
@@ -220,13 +221,72 @@ validation section and the items above:
 
 ## Test suite
 
-`pytest tests/ -q`, run at the end of this phase on this machine:
+`pytest -q`, run at the end of the final cleanup pass on this machine:
 
 ```
-346 passed, 1933 warnings in 174.09s (0:02:54)
+348 passed, 1 warning in 583.98s (0:09:43)
 ```
 
-The warnings are all pre-existing (NumPy 2.0 `__array_wrap__` deprecation notices in
-`correlations/htc.py`, and one `RuntimeWarning` from a deliberately out-of-domain test
-case in `correlations/friction.py`'s Colebrook test) — none newly introduced by this
-phase, which touched no file under `pinthac/` or `tests/`.
+The single remaining warning is a `RuntimeWarning` from a deliberately out-of-domain
+test case in `correlations/friction.py`'s Colebrook test — the test asserts that a
+known-bad input is reported rather than silently returning a NaN, so the warning is the
+behaviour under test.
+
+At the end of the documentation phase this same suite reported `346 passed, 1933
+warnings`. The two added tests and the disappearance of the 1932 NumPy 2.0
+`__array_wrap__` deprecation notices both come from the later `sca/run.py` rework, which
+routed the supercritical wall-temperature residual through the backend dispatch instead
+of letting NumPy scalars and torch tensors meet directly inside `correlations/htc.py`.
+
+---
+
+## Final cleanup pass
+
+Nothing was deleted. Everything listed below was either moved or regenerated, and every
+number quoted in this repository still comes from a run on this machine.
+
+**Moved out of the way**
+
+- `Prompt.md` → `docs/brief/ORIGINAL_BRIEF.md`. The brief is project history, not a
+  top-level file; `CLAUDE.md` and this report were updated to cite the new path.
+- `docs/PHASE{2,3,5,67,8}_BRIEF.md` → `docs/brief/`. These are the working instructions
+  each phase was given, not library documentation. Every citation of them in `tests/`
+  and `_archive/` was rewritten to the new path, so the tests still say where their
+  requirements came from.
+- Four loose PNGs in `figures/` (`IAPWS_Benchmark_results.png`,
+  `outlet_enthalpy_dist.png`, `sca_rod_deeponet_eval_parity.png`,
+  `sca_rod_deeponet_eval_profiles.png`) → `_archive/stray_figure_renders/`. They predate
+  `figures/style.py` and the `figures/output/` convention, no committed script produces
+  or reads them, and `.gitignore` already excluded them from tracking.
+
+**Removed from the working tree** (build artifacts only, all regenerable and all already
+covered by `.gitignore`): every `__pycache__/`, `.pytest_cache/`, and the `.VSCodeCounter/`
+tree, which had been committed by accident and is now untracked.
+
+**Two known issues closed, with the fix verified rather than asserted**
+
+- `pinthac/properties/iapws95.py` no longer prints `Using device: ...` at import time,
+  which CLAUDE.md section 5.6 forbids. Confirmed by running all five examples and
+  checking that the line is absent from their output. `pinthac/ml/deeponet.py` and
+  `pinthac/ml/pinn.py` still print it; they are training entry points, and they are the
+  only remaining instances.
+- `torchsolve/pyproject.toml` now carries `package-dir = {"torchsolve" = "."}` for its
+  flat layout. Confirmed by `pip wheel --no-deps --no-build-isolation ./torchsolve`,
+  which builds `torchsolve-0.1.0-py3-none-any.whl` successfully.
+
+**Examples**
+
+All five were re-run end to end and their pasted output blocks refreshed from the actual
+runs, since several had drifted: the import-time device line and a `RangeWarning` that
+both examples used to show are gone, `sca_annular_channel.py` no longer refers to a
+module-level `Inputs_ann` (`sca/run.py` owns the inputs now), and
+`property_lookup.py`'s `cp` line had a unit slip — 5457.86 printed under a kJ/kg-K
+label. The corrected block carries a note about that slip, because the number came from
+a real run and was still wrong: a pasted value has to be checked against the physics,
+not just against its provenance.
+
+`examples/monte_carlo_rod.py` is new in this pass and now carries an output block like
+the rest. It also switched to the lognormal perturbation described in README.md's "How
+uncertainty is meant to be used": the additive form it used first produced negative heat
+transfer coefficients at around 4 sigma, which a 500,000-trial run found (15 trials, one
+reporting a peak fuel temperature of 352,573 K).

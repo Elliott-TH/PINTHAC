@@ -76,22 +76,12 @@ Real output (python -m examples.sca_rod_channel, from the repository root -- see
 README.md's "Known issues" for why -m rather than a plain path, on this machine,
 GenEnv3.12, torch 2.9.1+rocm7.2.1):
 
-/home/elliott/Codes/Projects/Pinthac/pinthac/sca/annular.py:27: RangeWarning: uo2_k_nfi: out of validated range -- T = 3600 above the upper bound 2800
-  _Theta_UO2 = ht.Ann_Theta(lambda T: mat.UO2.k_NFI(T))
-Using device: cuda
-Solved in 14.75 s (200 axial nodes)
+Solved in 10.85 s (200 axial nodes)
 Converged (no non-finite field): True
 Unhonored correlation-selection notes: (none)
 
 Inlet coolant temperature:    573.16 K
 Outlet coolant temperature:   640.26 K
-Peak fuel centerline temp:    2524.21 K at z = 0.015 m
+Peak fuel centerline temp:    2523.72 K at z = 0.015 m
 Total pressure drop:          23.739 kPa
-
-The RangeWarning fires at import time, from pinthac/sca/annular.py's module-level
-Ann_Theta build (a fixed 300-3600 K integration grid that runs UO2.k_NFI, whose own
-validated range tops out at 2800 K) -- triggered here only because sca/run.py imports
-both sca/rod.py and sca/annular.py unconditionally, not because this example's rod
-solve itself does anything out of range. Harmless to this example, reported rather
-than suppressed.
 """

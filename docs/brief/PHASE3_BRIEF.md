@@ -1,7 +1,7 @@
 # Phase 3 Brief (delegated half) — Property Models: citations, ranges, uncertainties
 
 Read `CLAUDE.md` first — it is the style contract and outranks anything here. Then
-`docs/DECISIONS.md` and `docs/PHASE2_BRIEF.md` (its ground rules still apply).
+`docs/DECISIONS.md` and `docs/brief/PHASE2_BRIEF.md` (its ground rules still apply).
 
 ## Your scope — exactly two modules and their tests
 

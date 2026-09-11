@@ -48,7 +48,10 @@ OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 GEOMETRY = {"pitch": 0.0125, "rco": 0.0045, "tc": 0.00063, "delta": 5.0e-4, "kc": 24.0}
 CONDITIONS = {"G": 1200.0, "pval": 25.0, "Tin": 553.0, "q0": 25.0e3, "L": 3.0}
 
-N_TRIALS = 500
+# 20,000 trials runs in well under a minute and is far past the point where the
+# distribution stops moving. Raise it if you want a tighter tail estimate -- the lognormal
+# perturbation below stays physical at any sample count, which the additive form does not.
+N_TRIALS = 20_000
 N_AXIAL = 60
 SEED = 12345
 
@@ -66,7 +69,16 @@ def main():
     # One draw per trial. Shape (N_TRIALS,), broadcast across every axial node by the
     # closure below -- this is the whole point of the example.
     z = torch.randn(N_TRIALS, dtype=rod.DTYPE, generator=generator).to(dev)
-    factor = 1.0 + sigma * z
+    # Lognormal, not 1 + sigma*z. The additive form crosses zero at z = -1/sigma, which
+    # for this +/- 25 percent band is -4 sigma: invisible in a few hundred trials, and
+    # reliably present in a few hundred thousand. At 500000 draws about 15 come back with
+    # a negative heat transfer coefficient, and the near-zero ones are worse still because
+    # they do not fail loudly -- they just report a peak fuel temperature of 350000 K.
+    # exp(sigma_ln*z) with sigma_ln = ln(1+sigma) is strictly positive, reproduces the
+    # same band (exp(+/-0.223) = 1.25 / 0.80), and makes "25 percent high" and "25 percent
+    # low" mirror images, which a multiplicative error should be.
+    sigma_ln = float(np.log(1.0 + sigma))
+    factor = torch.exp(sigma_ln * z)
 
     # The batch is N_TRIALS copies of one rod; only `factor` differs between them.
     inputs_b = {k: torch.full((N_TRIALS,), v, dtype=rod.DTYPE, device=dev)
@@ -190,3 +202,32 @@ def _plot(T_out, T_fuel, sigma):
 
 if __name__ == "__main__":
     main()
+
+"""
+Real output (python -m examples.monte_carlo_rod, from the repository root, on this
+machine, GenEnv3.12, torch 2.9.1+rocm7.2.1):
+
+Swenson model-form uncertainty: +/- 25 percent (correlations/htc.py::UNCERTAINTY)
+20000 trials, 60 axial nodes, one perturbation per trial held fixed along the channel
+running...
+20000 of 20000 trials finite
+
+Propagated uncertainty:
+  coolant outlet T         mean   627.95 K   sd   0.00   95% [  627.95,   627.95]   spread   0.00
+  peak fuel T              mean  2517.65 K   sd   3.72   95% [ 2511.19,  2525.38]   spread  14.19
+
+Plots written to /home/elliott/Codes/Projects/Pinthac/examples/output/
+
+The coolant outlet temperature comes back with a spread of exactly zero across all
+20,000 trials. That is the correct answer and not a broken run: outlet temperature is
+fixed by the axial energy balance, mdot*dh = integral of q' dz, in which the heat
+transfer coefficient does not appear. Perturbing htc moves the wall and fuel
+temperatures and leaves the bulk alone.
+
+The peak fuel temperature moves by only about +/- 7 K on a +/- 25 percent band on htc,
+because the film drop is a small part of the total 2517 - 628 = 1890 K rise from
+coolant to fuel centerline -- most of that is the fuel's own conduction drop, which
+this perturbation does not touch. The distribution is nonetheless right-skewed: the
+film drop goes as 1/htc, so the low-htc trials reach further above the mean than the
+high-htc ones reach below it.
+"""

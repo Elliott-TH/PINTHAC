@@ -150,7 +150,6 @@ if __name__ == "__main__":
 Real output (python -m examples.deeponet_surrogate, from the repository root, on this
 machine, GenEnv3.12, torch 2.9.1+rocm7.2.1):
 
-Using device: cuda
 Dataset: 59773 runs x 100 axial nodes (/home/elliott/Codes/Projects/Pinthac/data/sca_rod_deeponet_dataset.npz)
 
 Accuracy vs. ground-truth FVM, 3 held-out operating points:
@@ -159,15 +158,15 @@ Accuracy vs. ground-truth FVM, 3 held-out operating points:
   run  7249: G=693 kg/m2-s  Tin=586.8 K  q0=15195 W/m  MAE T_i=0.140 K  MAE T_fuel_max=4.395 K
 
 Wall-clock: DeepONet surrogate vs. iterative FVM solver (cuda), full 100-node axial solve:
-  batch=   10   FVM=  4464.01 ms   surrogate=     2.10 ms   speedup=  2121.2x
-  batch= 1000   FVM=  5981.77 ms   surrogate=   147.29 ms   speedup=    40.6x
+  batch=   10   FVM=  3259.73 ms   surrogate=     2.04 ms   speedup=  1596.8x
+  batch= 1000   FVM=  4681.07 ms   surrogate=   150.44 ms   speedup=    31.1x
 
 These three runs' per-run MAE is consistent with (and, for T_fuel_max on the two
 higher-power runs, a bit above) the full 2,000-held-out-run averages this repository
 reports elsewhere (T_i MAE 0.113 K, T_fuel_max MAE 5.03 K -- see
-docs/FIGURE_CAPTIONS.md and figures/sca_surrogate_validation.py): three runs are not
-a resampling of that statistic, just an honest look at a few individual cases. The
-timing collapse from ~2100x to ~40x between batch sizes 10 and 1000 matches
+docs/FIGURE_CAPTIONS.md and figures/sca_surrogate_validation.py): three runs are not a
+resampling of that statistic, just an honest look at a few individual cases. The
+timing collapse from ~1600x to ~30x between batch sizes 10 and 1000 matches
 figures/sca_inference_speed.py's finding that run_SCA_batch is itself already
 vectorized over its batch, so the FVM side's wall-clock time barely grows with batch
 size while the surrogate's does -- see that script's docstring for why the speedup is

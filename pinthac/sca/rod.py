@@ -156,11 +156,11 @@ def gap(qp_val, delta, Tci, rci, rfo):
 # Kint/Kfo/T_from_Kint used to live here as this module's own hand-rolled copy of the
 # Klimenko-Zorin conductivity integral and its inversion -- the D4 erf-coefficient and
 # factor-of-100 fixes (see commit 14172e4) were made directly in this file. Phase 3
-# (docs/PHASE3_BRIEF.md item 3) ported the same fixed formulas into the property library
+# (docs/brief/PHASE3_BRIEF.md item 3) ported the same fixed formulas into the property library
 # as properties.matmod.UO2.Theta_Klimenko/k_Klimenko, verified bit-identical to this
 # module's own Kint/Kfo (max abs diff 0.0 / 4.4e-16 over 300-3000 K -- floating-point
 # noise, not a difference in the formula). rod_node below now calls pin.cylindrical.Cyl_T
-# with those two functions instead of keeping a second copy, per docs/PHASE5_BRIEF.md
+# with those two functions instead of keeping a second copy, per docs/brief/PHASE5_BRIEF.md
 # section 2 ("use it if it is a clean substitution") -- Cyl_T's r=0 solid-pellet solve is
 # exactly the (A1=0, A2=Kint(Tfo)+q'''*rfo^2/4, Tmax=Kint^-1(A2)) scheme this module used
 # by hand, so the substitution is a rename, not a redesign.

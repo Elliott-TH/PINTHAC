@@ -1,5 +1,5 @@
 """
-Permanent tests for pinthac.sca.run, added per docs/PHASE5_BRIEF.md section 4.
+Permanent tests for pinthac.sca.run, added per docs/brief/PHASE5_BRIEF.md section 4.
 
 Annular cases here always pass a small N and a loose outer_iter/tol through
 run_channel's **solver_kwargs (see run.py's docstring and tests/test_sca_annular.py's
@@ -152,7 +152,7 @@ def test_two_phase_htc_raises_not_implemented():
 
 # ------------------------------------------------------------------- known-bad case
 def test_known_bad_case_gives_a_located_report_not_a_silent_nan():
-    """docs/PHASE5_BRIEF.md section 4: "a known-bad case produces a readable convergence
+    """docs/brief/PHASE5_BRIEF.md section 4: "a known-bad case produces a readable convergence
     report rather than a silent NaN". Pitch too small for the rod OD gives a negative
     flow area, which propagates to NaN through the friction factor / Reynolds number --
     a genuine bad case, not a fabricated one."""

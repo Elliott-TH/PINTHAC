@@ -73,3 +73,14 @@ the rod-bundle correction, subcooled boiling and the CHFR check, and Phase 5 wor
 | Path | Note |
 |---|---|
 | `sca_fix_ref/run.py`, `rod_gen.py`, `annular_gen.py` | The owner's starting point for fixing `pinthac/sca/`. Its design was right -- correlation selection by plain dict, an implicit/explicit split, every model threaded into the solver -- but it built `rod_gen.py`/`annular_gen.py` as *siblings* of `rod.py`/`annular.py` rather than replacing them, leaving two copies of each solver. The general versions were merged into the originals instead, so there is one rod solver and one annular solver again. Kept here because it is where the design came from. Note it also omitted `run_SCA_batch`, which the DeepONet data generator runs on; that was restored from the pre-merge `rod.py` and generalized the same way. |
+
+## `stray_figure_renders/` (final cleanup pass)
+
+Four loose PNGs that were sitting in `figures/` rather than in `figures/output/`:
+`IAPWS_Benchmark_results.png`, `outlet_enthalpy_dist.png`,
+`sca_rod_deeponet_eval_parity.png`, `sca_rod_deeponet_eval_profiles.png`. They are
+one-off renders from the original project, predating `figures/style.py` and the
+`figures/output/` convention, and none of the committed figure scripts produces or
+reads them. `.gitignore` already excluded `figures/*.png`, so they were never tracked;
+moved here rather than deleted so the original renders remain available for comparison
+against the regenerated portfolio figures.
