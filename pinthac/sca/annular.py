@@ -1,3 +1,31 @@
+"""
+Dual-cooled annular single-channel analysis: an inner coolant channel (r < ri), an
+annular fuel region (ri <= r <= ro) generating a total q'(z), and an outer coolant
+channel in a square-pitch cell. Cladding and a gas gap on both sides.
+
+What makes this harder than sca/rod.py: the power split between the two coolants is
+unknown -- how much of q'(z) goes inward depends on how hot each coolant is, which
+depends on what each has already absorbed upstream, which depends on the split. So the
+axial march and the radial solve are coupled, and iterated against each other:
+
+    solve_field   outer Picard on the enthalpy fields h_i(z), h_o(z)
+      closure     inner Picard on the surface temperatures, in two phases
+        phase 1   wall temperature folded into the Picard loop (cheap, contraction
+                  up to roughly q0 = 5-8 kW/m)
+        phase 2   wall temperature genuinely root-found, only if phase 1 stalled
+
+The split itself is closed-form given both fuel surface temperatures: the Kirchhoff
+transform Theta = integral k_f dT linearises the conduction equation, and pin.Ann_HT
+solves the resulting two-point problem by Cramer's rule. Theta is only ever evaluated
+forwards, never inverted -- which is why this solver reports fuel surface temperatures
+and no centreline. See docs/SCA_Module_Reference.tex and
+docs/reference/Annular_Heat_Transfer_Final.pdf section 1.1.
+
+Coolant: supercritical water only. Every property lookup is gp._getprop('SCW', ...) or
+the use_lut table built from it, so the liquid-metal correlations sca/run.py offers
+(lyon, seban, mikityuk, lead_shen) will run here but will be handed water properties.
+See run.py's HTC_MODELS.
+"""
 import warnings
 
 import numpy as np
@@ -8,48 +36,11 @@ from pinthac.correlations import htc as htc
 from pinthac.correlations import friction as fric
 from pinthac.correlations import bundle as bnd
 from pinthac import pin as ht
-from pinthac.properties import matmod as mat
 from pinthac.properties import iapws95 as iapws
 from pinthac.sca import geometry as chan_geom
 from tqdm import tqdm
 import inspect
-from pinthac.correlations import bundle as bnd
 from pinthac.properties.matmod import Gas, UO2, Zircalloy
-
-'''
-Annular single-channel analysis: an inner coolant channel (r < ri), an
-annular fuel region (ri <= r <= ro) with a specified total LHGR profile
-q'(z), and an outer coolant channel (r > ro) in a square-pitch cell.
-See SCA_PDFs/Annular_Heat_Transfer_Final.pdf.
-
-This module holds the physics shared by SCA_Annular_PINN.py and
-SCA_Annular_DeepONet.py: the Kirchhoff-transformed annular conduction
-solve (PinHT.Ann_HT/Ann_Theta) coupled to the Swenson SCW correlation,
-and a reference axial solver built on top of it.
-'''
-
-# Theta[kf](T) for UO2 via the NFI model (matmod.UO2.k_NFI, fresh fuel: Bu=0, f_gad=0),
-# built once at import since Ann_HT only ever needs it evaluated forward, never inverted
-# (see pin/annular.py's Ann_Theta/Ann_HT docstrings).
-#
-# check_range=False on the table build, deliberately: Ann_Theta tabulates kf out to
-# 3600 K so the interpolant covers any temperature a solve might reach, while k_NFI is
-# validated only to 2800 K. Every build therefore warns once about a temperature no case
-# necessarily visits. Suppressing it here, at the one place that extrapolates knowingly,
-# is right; leaving it to fire on import would train a reader to ignore range warnings
-# generally, which is the opposite of what ranges.py is for. A case that genuinely runs
-# fuel above 2800 K is still extrapolating k_NFI, and that is a real limitation -- see
-# docs/OPEN_QUESTIONS.md.
-def _k_UO2_unchecked(T):
-    """k_NFI without the range warning, for the table build only -- k_NFI has no
-    check_range argument, so the warning is filtered at the call instead."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RangeWarning)
-        return mat.UO2.k_NFI(T)
-
-
-_Theta_UO2 = ht.Ann_Theta(_k_UO2_unchecked)
-
 
 def _find_Tpc(Pnom, T_lo=550.0, T_hi=750.0, n=200):
     """Pseudocritical temperature at Pnom [MPa]: where cp(T) peaks. Cheap,
@@ -60,33 +51,22 @@ def _find_Tpc(Pnom, T_lo=550.0, T_hi=750.0, n=200):
     return float(Ts[np.argmax(cp)])
 
 
-# Pseudocritical temperature at 25 MPa, the pressure this solver is normally run at.
-# Used only as a search anchor for the Swenson branch solve, so a case at a different
-# Pnom still converges -- it just starts from a slightly worse guess.
+# Search anchor for Swenson's branch solve. A case at a different Pnom still converges,
+# it just starts from a slightly worse guess.
 _T_PC = _find_Tpc(25.0)
-# Loose tolerances for the pseudocritical-branch (implicit-solve) phase of
-# closure(): that phase is warm-started from a fast explicit pass and
-# itself sits inside closure()'s own Picard loop, so it doesn't need to
-# resolve Tw tighter than a fraction of a Kelvin -- see htc.SCW.Swenson's and
-# _solve_Tw_scw's tol_kw/branch_n docstrings for why this matters for speed.
+# Loose tolerances for closure()'s robust phase: it is warm-started from the fast phase
+# and sits inside solve_field's own Picard loop, so resolving Tw tighter than a fraction
+# of a kelvin buys nothing and costs a great deal.
 _LOOSE_TOL_KW = dict(ftol_rel=1e-2, xtol=0.05, rtol=1e-4, max_iter=25)
 
 
-# =============================================================================
-# Optional property lookup table (solve_field's use_lut=True).
-#
-# Why this exists: props_at below is a live IAPWS-95 call, and a measured profile of
-# one solve (docs/scripts/profile_annular_properties.py, N=20 nodes, 3 outer
-# iterations) put 97.7 percent of the wall clock inside it -- 653 separate calls,
-# 147.5 s, against 0.13 s for every flux split, Cramer solve, gap balance and cladding
-# step put together. The cost is per call, not per point: 226 ms to evaluate 21 state
-# points, because the equation of state's fixed overhead (tensor staging, a 60-iteration
-# Newton density solve, the full Helmholtz residual) is amortised over almost nothing.
-#
-# sca/rod.py already solves this the other way round: one batched call over 3000 state
-# points at table-construction time, interpolation thereafter. These two functions are
-# the same idea in numpy, at the one pressure the annular solver holds fixed anyway.
-# =============================================================================
+# Optional property lookup table (solve_field's use_lut=True). A measured profile of one
+# solve (docs/scripts/profile_annular_properties.py) put 97.7 percent of the wall clock
+# inside the live props_at below -- 653 calls, 147.5 s, against 0.13 s for all the actual
+# physics. The cost is per call, not per point: 226 ms for 21 state points, because the
+# equation of state's fixed overhead amortises over almost nothing at that size. These two
+# functions do what sca/rod.py already does -- one batched call at construction time,
+# interpolation thereafter -- at the one pressure this solver holds fixed anyway.
 def build_scw_lut(Pnom, Tmin=500.0, Tmax=1300.0, n=3000):
     """
     Tabulate supercritical-water properties against temperature at one fixed pressure.
@@ -172,36 +152,25 @@ def make_lut_lookups(table):
 
 def _T_hp_fast(h, p, iters=12, newton_iters=12):
     """
-    h -> T inversion at fixed p, the same outer bisection IAPWS_95.T_hp
-    uses but with far fewer iterations. T_hp aims at safety-analysis
-    precision -- 60 outer bisections, each wrapping a 60-Newton rho_Tp
-    solve -- which is enormous overkill for an ML training loop that
-    calls this thousands of times.
+    h -> T inversion at fixed p: the same branch-free outer bisection IAPWS95.T_hp uses,
+    with far fewer iterations. T_hp aims at safety-analysis precision (60 bisections
+    around a 60-Newton rho_Tp solve), which is overkill inside a loop that runs thousands
+    of times.
 
-    On newton_iters: this used to pass bisect_iters through to rho_Tp,
-    back when rho_Tp bracketed the density globally before polishing it.
-    That bisection was deliberately removed (see rho_Tp's docstring: away
-    from the true branch the residual terms stop cancelling in floating
-    point and a bracket search locks onto a spurious root near rho_c), so
-    the argument no longer exists and Newton now carries the whole solve
-    from the ancillary seed. Three iterations were enough alongside a
-    bracket and are not enough alone -- at 650 K and 25 MPa, right at the
-    pseudocritical point where this solver spends its time, rho comes out
-    at 281 kg/m^3 against a converged 488.8, low by 42 percent.
+    Measured worst-case error over the SCW range at 25 MPa, against the temperatures that
+    generated the enthalpies:
 
-    Measured worst-case error over the SCW range at 25 MPa, against the
-    temperatures that generated the enthalpies:
-
-        newton_iters=3    2.931 K     60.8 ms      <- the old value
+        newton_iters=3    2.931 K     60.8 ms      <- the old default
         newton_iters=6    1.080 K
         newton_iters=12   0.118 K    211.2 ms      <- the default now
         newton_iters=20   0.118 K    346.4 ms      (no further gain)
         IAPWS95.T_hp      0.000 K   5100.6 ms      (the reference)
 
-    So 12 keeps this 24x faster than the reference while being 25x more
-    accurate than 3 was. The speed argument for having a fast path at all
-    survives; the 0.05 K accuracy this docstring used to claim did not,
-    and was measured back when the bracket still existed.
+    3 is not enough on its own: it dates from when rho_Tp bracketed the density before
+    polishing, and that bracket was deliberately removed (away from the true branch the
+    residual terms stop cancelling and a bracket search locks onto a spurious root near
+    rho_c). At 650 K and 25 MPa, where this solver spends its time, 3 gives rho = 281
+    against a converged 488.8 kg/m^3.
 
     h [kJ/kg], p [MPa], both broadcastable numpy arrays.
     """
@@ -217,19 +186,12 @@ def _T_hp_fast(h, p, iters=12, newton_iters=12):
     return 0.5*(T_lo + T_hi)
 
 
-# Convergence envelope, re-swept against the full clad+gap+fuel closure
-# (for a representative geometry): the fast explicit phase alone (see
-# closure()'s docstring) is a contraction up to q0 ~ 5-8 kW/m; above
-# that it stalls in a small (few-K) limit cycle rather than diverging,
-# so the robust (torchsolve-backed) second phase finishes convergence at
-# a materially higher per-call cost (several seconds vs. a fraction of
-# one). Checked up to q0 = 40 kW/m peak with exact energy balance and
-# consistent results under more robust-phase iterations; above ~45 kW/m
-# the required wall superheat exceeds the widened Tb+500 K search window
-# (see htc.SCW.Swenson's hi parameter) -- push that out further if a
-# case genuinely needs it, rather than assuming no solution exists.
-# Re-sweep for a different geometry rather than trusting a result
-# without checking err.
+# Measured convergence envelope for a representative geometry: closure()'s fast phase is
+# a contraction up to q0 ~ 5-8 kW/m, and above that stalls in a few-kelvin limit cycle
+# rather than diverging -- which is what the robust phase exists to finish. Checked to
+# q0 = 40 kW/m with exact energy balance. Above ~45 kW/m the required wall superheat
+# exceeds the Tb+500 K search window (htc.SCW.Swenson's hi): widen it rather than
+# concluding no solution exists. Re-sweep for a different geometry before trusting it.
 
 
 def geometry(inp):
@@ -319,30 +281,26 @@ if __name__ == "__main__":
         'sca/annular.py is a solver, not a script: it no longer carries a default\n'
         'case to run. See examples/sca_annular_channel.py for a worked case, or\n'
         'call pinthac.sca.run.run_channel() with your own geometry and conditions.')
-    print(f"Peak fuel Tfo_i: {out['Tfo_i'].max():.2f} K   Peak fuel Tfo_o: {out['Tfo_o'].max():.2f} K   "
-          f"Outlet Tm_i: {out['Tm_i'][-1]:.2f} K   Outlet Tm_o: {out['Tm_o'][-1]:.2f} K")
-    print(f"Total dP_i: {out['dP_i'][-1]/1000:.2f} kPa   Total dP_o: {out['dP_o'][-1]/1000:.2f} kPa")
 
 
 _TWO_PHASE_HTC = ("chen_h2o", "bjorge", "schrock_grossman")
 
 
-# name -> (dT_func, solve_func, needs_q) -- see rod_gen.py's identical table for why the
-# explicit ("_dT") and implicit (solve) forms are both needed: the fast Picard phase below
-# calls dT_func directly with a guessed trial Tw, the robust phase calls solve_func to
-# actually root-find it. Both of these need Tw in their own formula (see rod_gen.py's
-# identical comment) -- the pseudocritical property swing is what the whole two-phase
-# fast/robust Tw solve exists for.
+# Implicit correlations: name -> (dT_func, solve_func, needs_q). Both forms are needed
+# here, unlike in sca/rod.py: closure's fast phase calls dT_func with the previous
+# iterate's wall temperature, and the robust phase calls solve_func to actually root-find
+# it. The pseudocritical property swing is what that whole two-phase structure exists for.
 _HTC_DISPATCH = {
     "swenson": (htc.SCW.Swenson_dT, htc.SCW.Swenson, False),
     "chen_scw": (htc.SCW.Chen_SCW_dT, htc.SCW.Chen_SCW, True),
 }
 
 
-# name -> (Props, G, D, pitch, Tm) -> htc -- see rod_gen.py's identical table (same
-# adapter shape, so both modules' dispatch reads the same way). No wall-temperature
-# dependence at all, so closure evaluates these once per side (at the fixed bulk
-# T_i/T_o, computed once before either Picard phase) instead of solving for Tw with them.
+# Explicit correlations: name -> (Props, G, D, pitch, Tm) -> htc. Same adapter shape as
+# sca/rod.py's table, so both modules' dispatch reads the same way. No wall-temperature
+# dependence, so closure evaluates these once per side before either Picard phase rather
+# than inside them. The four liquid-metal entries get water properties -- see the module
+# docstring.
 _EXPLICIT_HTC = {
     "dittus": lambda Props, G, D, pitch, Tm: htc.Water.Dittus(Props, G, D),
     "petukhov": lambda Props, G, D, pitch, Tm: htc.Water.Petchukov(Props, G, D),
@@ -405,11 +363,18 @@ def closure(T_i, T_o, q_tot, inp, geom, props_at, Theta_func, htc_name="swenson"
                  bundle_func=bnd.Bundle.Presser, tol=1e-3,
                  fast_iter=30, robust_iter=4, relax=0.4):
     """
-    General version of annular.py::closure -- identical resistance-chain physics
-    (coolant -> cladding -> gas gap -> fuel surface on each side, same two-phase fast/
-    robust Picard structure -- see annular.py::closure's docstring for the full
-    derivation, which this does not repeat), but htc/bundle_func/Theta_func are
-    parameters instead of hardcoded to Swenson/Presser/UO2.k_NFI.
+    The radial solve, for the whole axial field at once: given both bulk coolant
+    temperature fields and the total power, find how the power splits between the two
+    coolants and what the surface temperatures are.
+
+    Iterated, because the chain closes on itself -- the split needs Theta at both fuel
+    surfaces, which needs the surface temperatures, which are reached by walking inward
+    from each coolant through convection, cladding and gap, which needs the split. Two
+    phases: the fast one folds the wall-temperature balance into this Picard loop, the
+    robust one genuinely root-finds it and runs only if the fast one stalled.
+
+    Under-relaxed at relax=0.4 because the fuel-surface/flux-split loop will otherwise
+    oscillate. Converges on the summed change in four surface temperatures, tol in K.
 
     Theta_func : the conductivity-integral callable (e.g. pin.Ann_Theta(UO2.k_NFI) or
                  pin.Ann_Theta(UO2.k_Klimenko)) -- built once by the caller (solve_field_
@@ -427,9 +392,8 @@ def closure(T_i, T_o, q_tot, inp, geom, props_at, Theta_func, htc_name="swenson"
     """
     if htc_name in _TWO_PHASE_HTC:
         raise NotImplementedError(
-            f"htc={htc_name!r} is a two-phase correlation; sca/annular_gen.py (like "
-            f"sca/annular.py) has no subcooled-boiling bookkeeping -- see sca/run.py's "
-            f"module docstring."
+            f"htc={htc_name!r} is a two-phase correlation; sca/annular.py has no "
+            f"subcooled-boiling bookkeeping -- see sca/run.py's module docstring."
         )
     is_explicit = htc_name in _EXPLICIT_HTC
     if not is_explicit and htc_name not in _HTC_DISPATCH:
@@ -562,13 +526,17 @@ def solve_field(Inputs, q_p=None, outer_iter=15, tol=10.0, progress=False,
                       bundle_func=bnd.Bundle.Presser, k_func=UO2.k_NFI,
                       use_lut=False, lut=None):
     """
-    General version of annular.py::solve_field: identical enthalpy-march/closure outer
-    Picard loop (see that docstring for the full derivation), but htc_name/
-    friction_func/bundle_func/k_func are parameters -- exactly sca/run.py's four
-    correlation-selection keywords (fuel_conductivity here is a bare k_func, not a
-    (k_func, Theta_func) pair, since Ann_Theta builds Theta from k alone) -- instead of
-    hardcoded. Defaults reproduce annular.py::solve_field's own physics exactly
-    (Swenson, Filonenko, Presser, UO2.k_NFI).
+    The outer Picard loop, and this module's entry point.
+
+        h -> T -> closure -> (q_i, q_o) -> h
+
+    Guess both enthalpy fields, get temperatures, solve the radial problem to find how
+    the power actually splits at those temperatures, re-march the enthalpies with that
+    split, repeat until the enthalpy fields stop moving. No under-relaxation here: the
+    march integrates the split, which smooths it. Convergence is in J/kg.
+
+    fuel_conductivity arrives as a bare k_func, not the (k_func, Theta_func) pair the rod
+    path takes, because Ann_Theta builds Theta from k and this scheme never inverts it.
 
     The conductivity integral is built once here, not per closure() call or per
     axial node -- see closure's Theta_func docstring for why.
@@ -605,10 +573,12 @@ def solve_field(Inputs, q_p=None, outer_iter=15, tol=10.0, progress=False,
     geom = geometry(inp)
     G_i, D_i, G_o, D_o = geom['G_i'], geom['D_i'], geom['G_o'], geom['D_o']
 
-    # Same deliberate extrapolation as the module-level _Theta_UO2 above: Ann_Theta
-    # tabulates kf out to 3600 K so the interpolant covers anything a solve might reach,
-    # while k_NFI is validated to 2800 K. Warning once per solve about a temperature no
-    # case necessarily visits would train a reader to ignore range warnings generally.
+    # Deliberate extrapolation: Ann_Theta tabulates kf out to 3600 K so the interpolant
+    # covers anything a solve might reach, while k_NFI is validated only to 2800 K.
+    # Suppressed here, at the one place that extrapolates knowingly -- a warning fired
+    # once per solve about a temperature no case necessarily visits would train a reader
+    # to ignore range warnings generally. A case that genuinely runs fuel above 2800 K is
+    # still extrapolating, and that remains a real limitation (docs/OPEN_QUESTIONS.md).
     def _k_unchecked(T):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RangeWarning)
