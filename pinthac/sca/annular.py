@@ -21,10 +21,10 @@ forwards, never inverted -- which is why this solver reports fuel surface temper
 and no centreline. See docs/SCA_Module_Reference.tex and
 docs/reference/Annular_Heat_Transfer_Final.pdf section 1.1.
 
-Coolant: supercritical water only. Every property lookup is gp._getprop('SCW', ...) or
-the use_lut table built from it, so the liquid-metal correlations sca/run.py offers
-(lyon, seban, mikityuk, lead_shen) will run here but will be handed water properties.
-See run.py's HTC_MODELS.
+Coolant is a parameter (coolant="scw" by default; see sca/coolant.py for the full list).
+Both channels carry the same coolant. Water is evaluated live by default and tabulated
+under use_lut=True; the liquid metals are always evaluated directly, because their
+property correlations are explicit fits that cost less than tabulating them would.
 """
 import warnings
 
@@ -37,6 +37,7 @@ from pinthac.correlations import friction as fric
 from pinthac.correlations import bundle as bnd
 from pinthac import pin as ht
 from pinthac.properties import iapws95 as iapws
+from pinthac.sca import coolant as coolant_mod
 from pinthac.sca import geometry as chan_geom
 from tqdm import tqdm
 import inspect
@@ -51,9 +52,6 @@ def _find_Tpc(Pnom, T_lo=550.0, T_hi=750.0, n=200):
     return float(Ts[np.argmax(cp)])
 
 
-# Search anchor for Swenson's branch solve. A case at a different Pnom still converges,
-# it just starts from a slightly worse guess.
-_T_PC = _find_Tpc(25.0)
 # Loose tolerances for closure()'s robust phase: it is warm-started from the fast phase
 # and sits inside solve_field's own Picard loop, so resolving Tw tighter than a fraction
 # of a kelvin buys nothing and costs a great deal.
@@ -67,87 +65,17 @@ _LOOSE_TOL_KW = dict(ftol_rel=1e-2, xtol=0.05, rtol=1e-4, max_iter=25)
 # equation of state's fixed overhead amortises over almost nothing at that size. These two
 # functions do what sca/rod.py already does -- one batched call at construction time,
 # interpolation thereafter -- at the one pressure this solver holds fixed anyway.
-def build_scw_lut(Pnom, Tmin=500.0, Tmax=1300.0, n=3000):
-    """
-    Tabulate supercritical-water properties against temperature at one fixed pressure.
-
-    Why this model is here:
-        The table behind solve_field(use_lut=True). Evaluates the equation of state
-        once, as a single batched call over n state points, so every later lookup is an
-        interpolation instead of another solve.
-
-    Formulation:
-        Not a physical model -- gp._getprop('SCW', T, Pnom) on a linspace, stored.
-
-    Valid range:
-        [Tmin, Tmax]. Tmin defaults to 500 K rather than lower because
-        IAPWS95.rho_Tp's solve loses the liquid-density root below roughly 480 K at
-        these pressures (it converges to a spurious root near rho_c instead) -- the
-        same limit sca/scw_table.py records. Tmax defaults to 1300 K to cover the
-        Tb + 500 K wall-temperature search window closure() uses, since the wall solve
-        evaluates properties at trial temperatures well above any bulk temperature.
-        Queries outside the table clamp to its edge (numpy.interp's own behaviour), so
-        a case that leaves the window gets an edge value, not an extrapolation.
-
-    Uncertainty:
-        Interpolation error on top of whatever IAPWS-95 itself carries. At the default
-        n = 3000 over 800 K the grid spacing is 0.27 K; see solve_field's use_lut
-        docstring for the measured field-level difference against the live path.
-
-    Inputs:
-        Pnom : pressure, MPa -- the one pressure the whole table is built at
-        Tmin, Tmax : table bounds, K
-        n    : number of grid points
-    Returns:
-        dict with key 'T' (the grid, K) plus 'rho', 'mu', 'k', 'cp', 'h' -- each a
-        numpy array of length n, in the units of properties/getprop.py's Props dict
-    """
-    T = np.linspace(Tmin, Tmax, n)
-    props = gp._getprop('SCW', T, Pnom)
-    table = {'T': T}
-    for key in ('rho', 'mu', 'k', 'cp', 'h'):
-        table[key] = np.asarray(props[key], dtype=float)
-    return table
+def build_scw_lut(Pnom, Tmin=500.0, Tmax=1300.0, n=3000, coolant="scw"):
+    """Property table for solve_field(use_lut=True). Thin wrapper over sca/coolant.py's
+    build_table, kept under this name because it is part of solve_field's published
+    interface (the lut= argument takes one of these)."""
+    return coolant_mod.build_table(coolant, Pnom, Tmin=Tmin, Tmax=Tmax, n=n)
 
 
-def make_lut_lookups(table):
-    """
-    Build the (props_at, T_from_h) pair that replaces the live equation-of-state calls.
-
-    Why this model is here:
-        solve_field reaches the equation of state in exactly two places -- props_at
-        (T -> properties) and _T_hp_fast (h -> T). This returns a table-backed
-        replacement for each, in the same shape the live versions have, so the switch
-        is one assignment rather than a change to closure/pressure_drop/_htc_robust,
-        none of which know or care where the numbers come from.
-
-    Formulation:
-        Both directions are numpy.interp on the table. The h -> T direction works
-        because h is monotone in T at a fixed supercritical pressure (there is no
-        two-phase dome above the critical pressure, so no plateau), which is the same
-        property sca/rod.py's Property(['h', h], 'T') lookup relies on. That replaces
-        _T_hp_fast's 12 bisections around a 12-iteration Newton density solve with a
-        single interpolation.
-
-    Inputs:
-        table : a build_scw_lut() result
-    Returns:
-        (props_at, T_from_h) : props_at(T) -> Props dict; T_from_h(h) -> T [K].
-        props_at takes T in K and returns h in J/kg, matching the live props_at;
-        T_from_h takes h in J/kg (NOT the kJ/kg _T_hp_fast wants -- see solve_field)
-    """
-    T_grid = table['T']
-    h_grid = table['h']
-
-    def props_at(T):
-        T_np = np.asarray(T, dtype=float)
-        return {key: np.interp(T_np, T_grid, table[key])
-                for key in ('rho', 'mu', 'k', 'cp', 'h')}
-
-    def T_from_h(h):
-        return np.interp(np.asarray(h, dtype=float), h_grid, T_grid)
-
-    return props_at, T_from_h
+def make_lut_lookups(table, coolant="scw"):
+    """The (props_at, T_from_h) pair backed by `table`. Thin wrapper over
+    sca/coolant.py's make_lookups."""
+    return coolant_mod.make_lookups(coolant, None, table=table)
 
 
 def _T_hp_fast(h, p, iters=12, newton_iters=12):
@@ -479,7 +407,10 @@ def closure(T_i, T_o, q_tot, inp, geom, props_at, Theta_func, htc_name="swenson"
             fast_converged = True
             break
 
-    T_PC = _find_Tpc(inp.get("Pnom", 25.0))
+    # Only the implicit (wall-temperature-solving) correlations use the anchor, and
+    # finding it costs a 200-point property scan -- so it is not computed for an explicit
+    # correlation, which includes every liquid-metal one.
+    T_PC = None if (is_explicit or fast_converged) else _find_Tpc(inp.get("Pnom", 25.0))
     for _ in range(0 if fast_converged else robust_iter):
         Theta_i, Theta_o = Theta_func(Tfo_i), Theta_func(Tfo_o)
         C1, C2 = ht.Ann_HT(ri, ro, q3, Theta_i, Theta_o)
@@ -524,7 +455,7 @@ def closure(T_i, T_o, q_tot, inp, geom, props_at, Theta_func, htc_name="swenson"
 def solve_field(Inputs, q_p=None, outer_iter=15, tol=10.0, progress=False,
                       htc_name="swenson", friction_func=fric.f_SCW.Filonenko,
                       bundle_func=bnd.Bundle.Presser, k_func=UO2.k_NFI,
-                      use_lut=False, lut=None):
+                      coolant="scw", use_lut=False, lut=None):
     """
     The outer Picard loop, and this module's entry point.
 
@@ -541,7 +472,11 @@ def solve_field(Inputs, q_p=None, outer_iter=15, tol=10.0, progress=False,
     The conductivity integral is built once here, not per closure() call or per
     axial node -- see closure's Theta_func docstring for why.
 
-    use_lut : False (default) evaluates IAPWS-95 live at every property lookup, which
+    coolant : coolant name, see sca/coolant.py's COOLANTS. Both channels carry it. Pnom
+              is unused for a liquid metal, whose properties are pressure-independent,
+              and use_lut/lut are ignored for one (it is never tabulated).
+    use_lut : tabulated coolants only. False (default) evaluates IAPWS-95 live at every
+              property lookup, which
               is what every result committed to this repository was produced with.
               True builds a 3000-point table at Pnom once (build_scw_lut) and
               interpolates it instead, for both directions -- T -> properties and the
@@ -587,15 +522,22 @@ def solve_field(Inputs, q_p=None, outer_iter=15, tol=10.0, progress=False,
     Theta_func = ht.Ann_Theta(_k_unchecked)
 
     # The one seam. Every consumer below -- closure(), pressure_drop(), and through
-    # closure the robust-phase wall solve -- takes props_at as an argument, so swapping
-    # the implementation here is the whole change; none of them is touched.
-    if use_lut:
+    # closure the robust-phase wall solve -- takes props_at as an argument, so choosing
+    # the implementation here is the whole of coolant and use_lut support; none of them
+    # is touched.
+    entry = coolant_mod.resolve(coolant)
+    if not entry["tabulated"]:
+        # Liquid metals: explicit correlations, cheaper to call than to tabulate.
+        props_at, T_from_h = coolant_mod.make_lookups(coolant, Pnom)
+    elif use_lut:
         if lut is None:
-            lut = build_scw_lut(Pnom)
-        props_at, T_from_h = make_lut_lookups(lut)
+            lut = build_scw_lut(Pnom, coolant=coolant)
+        props_at, T_from_h = make_lut_lookups(lut, coolant=coolant)
     else:
+        substance = entry["substance"]
+
         def props_at(T):
-            return gp._getprop('SCW', T, Pnom)
+            return gp._getprop(substance, T, Pnom)
 
         # _T_hp_fast takes h in kJ/kg; every enthalpy in this solver is J/kg.
         def T_from_h(h):

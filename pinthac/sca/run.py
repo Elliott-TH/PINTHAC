@@ -24,9 +24,10 @@ below:
     march a single-phase enthalpy balance. run_channel raises NotImplementedError rather
     than pretending to run a boiling channel that does not exist.
 
-  - Liquid-metal htc names (lyon, seban, mikityuk, lead_shen). These currently run and
-    return a number, and that number is meaningless: both solvers are hardcoded to
-    supercritical water on the property side. See HTC_MODELS.
+  - A correlation that does not match the coolant. Both solvers now take coolant=, so
+    running a sodium correlation against water (or Swenson against sodium) is a real
+    mistake rather than the only thing available, and is rejected by name. See
+    HTC_FAMILY.
 """
 import numpy as np
 import pandas as pd
@@ -35,21 +36,13 @@ from pinthac.correlations import bundle as bundle_mod
 from pinthac.correlations import friction as fric
 from pinthac.correlations import htc
 from pinthac.properties import matmod
-from pinthac.sca import annular, rod
+from pinthac.sca import annular, coolant as coolant_mod, rod
 
 
 # One dict literal per category, name -> function. fuel_conductivity maps to a
 # (k_func, Theta_func) pair because pin.cylindrical.Cyl_T needs the conductivity and its
 # integral together -- Theta to state the problem, k as its analytic derivative for the
 # Newton polish.
-# WARNING, coolant: both solvers evaluate properties as supercritical water only --
-# sca/rod.py's build_scw_table is IAPWS-95, sca/annular.py's props_at is
-# getprop._getprop('SCW', ...). Neither takes a coolant argument. The four liquid-metal
-# entries below (lyon, seban, mikityuk, lead_shen) are therefore selectable but WRONG:
-# they will be handed water properties and will return a plausible-looking number with
-# no error and, except for mikityuk's Peclet range check, no warning. They are listed
-# because correlations/htc.py implements them and a future coolant-aware solver will
-# want them; do not use them for a result today.
 HTC_MODELS = {
     "swenson": htc.SCW.Swenson_dT,
     "chen_scw": htc.SCW.Chen_SCW_dT,
@@ -84,6 +77,38 @@ FUEL_CONDUCTIVITY_MODELS = {
 }
 
 _TWO_PHASE_HTC = ("chen_h2o", "bjorge", "schrock_grossman")
+
+# Which coolant family each correlation was fitted for. This is what stops a liquid-metal
+# correlation being run against water, which used to be selectable and silently produced
+# a plausible-looking number: Lyon on a water rod returned a peak fuel temperature within
+# 1.5 K of Swenson's, with no error and no warning.
+#
+# The split is not arbitrary. Dittus-Boelter and its relatives are validated for
+# 0.7 < Pr < 160; a liquid metal sits near Pr = 0.005, three orders of magnitude below
+# the bottom of that range, where the thermal boundary layer is far thicker than the
+# velocity one and the Nusselt number stops following Re^0.8 Pr^0.4 at all. The
+# liquid-metal correlations are the Peclet-number fits built for that regime, and they
+# are equally wrong applied to water.
+HTC_FAMILY = {
+    "swenson": "water", "chen_scw": "water",
+    "dittus": "water", "gnielinski": "water", "petukhov": "water",
+    "chen_h2o": "water", "bjorge": "water", "schrock_grossman": "water",
+    "lyon": "liquid_metal", "seban": "liquid_metal",
+    "mikityuk": "liquid_metal", "lead_shen": "liquid_metal",
+}
+
+# Filonenko and Wu are supercritical-water fits; the other three are Reynolds-number
+# correlations for any single-phase turbulent flow in a smooth channel.
+FRICTION_FAMILY = {
+    "filonenko": "water", "wu": "water",
+    "blasius": "any", "mcadams": "any", "colebrook": "any",
+}
+
+# What htc= and friction= resolve to when left as None, per coolant family.
+FAMILY_DEFAULTS = {
+    "water": dict(htc="swenson", friction="filonenko"),
+    "liquid_metal": dict(htc="lyon", friction="blasius"),
+}
 
 _ROD_GEOM_KEYS = ("pitch", "rco", "tc", "delta", "kc")
 # Every physical key is required, with no default to fall back on -- see run_channel.
@@ -193,8 +218,9 @@ def _annular_inputs(geometry, conditions):
     return merged
 
 
-def run_channel(geometry, conditions, htc="swenson", friction="filonenko",
-                 bundle="presser", fuel_conductivity="klimenko", **solver_kwargs):
+def run_channel(geometry, conditions, htc=None, friction=None,
+                 bundle="presser", fuel_conductivity="klimenko", coolant="scw",
+                 **solver_kwargs):
     """
     Run one single-channel-analysis case. The module's main entry point.
 
@@ -213,8 +239,14 @@ def run_channel(geometry, conditions, htc="swenson", friction="filonenko",
         conditions : rod: G [kg/m^2-s], pval [MPa], Tin [K], q0 [W/m], optional L [m]
                      and N; annular: L, Tin_i, Tin_o, Pnom, mdot_i, mdot_o, q0, optional
                      N. q0 is the peak of the default cosine axial shape.
+        coolant    : coolant name -- "scw" (default), "water", "sodium", "lead", "lbe".
+                     See sca/coolant.py. Both channels of an annular case carry the same
+                     coolant. Pressure is unused for a liquid metal.
         htc, friction, bundle, fuel_conductivity : selection by name; see the tables
-                     above for valid names and for which htc names not to trust.
+                     above for valid names. htc and friction default to None, meaning
+                     "the standard choice for this coolant" -- swenson/filonenko for
+                     water, lyon/blasius for a liquid metal. A correlation that does not
+                     match the coolant is rejected, see HTC_FAMILY.
                      bundle=None means no bundle correction and is always accepted.
         **solver_kwargs : passed straight through to the dispatched solver -- rod:
                      scw_table, device; annular: q_p, outer_iter, tol, progress, and
@@ -235,8 +267,13 @@ def run_channel(geometry, conditions, htc="swenson", friction="filonenko",
             f"run_channel: geometry['type'] must be 'rod' or 'annular', got {geom_type!r}"
         )
 
+    family = coolant_mod.resolve(coolant)["family"]
+    defaults = FAMILY_DEFAULTS[family]
+    htc = defaults["htc"] if htc is None else htc
+    friction = defaults["friction"] if friction is None else friction
+
     requested = dict(htc=htc, friction=friction, bundle=bundle,
-                      fuel_conductivity=fuel_conductivity)
+                      fuel_conductivity=fuel_conductivity, coolant=coolant)
 
     # Validate every requested name is at least recognized (a typo or an unsupported
     # name fails immediately, listing the valid options) and resolve it to the actual
@@ -246,6 +283,20 @@ def run_channel(geometry, conditions, htc="swenson", friction="filonenko",
     bundle_func = _select(bundle, BUNDLE_MODELS, "bundle")
     k_func, Theta_func = _select(fuel_conductivity, FUEL_CONDUCTIVITY_MODELS,
                                   "fuel_conductivity")
+
+    if htc in HTC_FAMILY and HTC_FAMILY[htc] != family:
+        raise ValueError(
+            f"htc={htc!r} is a {HTC_FAMILY[htc]} correlation but coolant={coolant!r} is "
+            f"{family} -- the two do not go together (see HTC_FAMILY for why). Valid "
+            f"htc names for this coolant: "
+            f"{sorted(k for k, v in HTC_FAMILY.items() if v == family and k not in _TWO_PHASE_HTC)}."
+        )
+    if FRICTION_FAMILY.get(friction, "any") not in ("any", family):
+        raise ValueError(
+            f"friction={friction!r} is a {FRICTION_FAMILY[friction]} correlation but "
+            f"coolant={coolant!r} is {family}. Valid friction names for this coolant: "
+            f"{sorted(k for k, v in FRICTION_FAMILY.items() if v in ('any', family))}."
+        )
 
     if htc in _TWO_PHASE_HTC:
         raise NotImplementedError(
@@ -265,13 +316,15 @@ def run_channel(geometry, conditions, htc="swenson", friction="filonenko",
     if geom_type == "rod":
         inputs, run_kwargs = _rod_inputs(geom_only, conditions)
         run_kwargs.update(solver_kwargs)
-        result = rod.run_SCA(inputs, htc_name=htc, friction_func=friction_func,
+        result = rod.run_SCA(inputs, coolant=coolant, htc_name=htc,
+                                      friction_func=friction_func,
                                       bundle_func=bundle_func, k_func=k_func,
                                       Theta_func=Theta_func, **run_kwargs)
         convergence = _scan_for_nonfinite(result, "Z", ("T_i", "T_fuel_max", "dP"))
     else:
         inp = _annular_inputs(geom_only, conditions)
-        result = annular.solve_field(inp, htc_name=htc, friction_func=friction_func,
+        result = annular.solve_field(inp, coolant=coolant, htc_name=htc,
+                                              friction_func=friction_func,
                                               bundle_func=bundle_func, k_func=k_func,
                                               **solver_kwargs)
         convergence = _scan_for_nonfinite(
