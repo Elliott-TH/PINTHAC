@@ -29,6 +29,7 @@ def _getprop(substance, T, P):
         "Lead" / "Pb": liqprops.Props(liqprops.Lead, T) (P is not used -- the liquid-metal
             correlations are pressure-independent, as documented in liqprops.py).
         "Sodium" / "Na": liqprops.Props(liqprops.Sodium, T) (P likewise unused).
+        "LBE" / "PbBi": liqprops.Props(liqprops.LBE, T) (P likewise unused).
 
     Valid range:
         Whatever the underlying property library (iapws95.IAPWS95, liqprops.Sodium/Lead)
@@ -41,7 +42,8 @@ def _getprop(substance, T, P):
         Not applicable.
 
     Inputs:
-        substance : one of "SCW", "Water", "Lead", "Pb", "Sodium", "Na" (string)
+        substance : one of "SCW", "Water", "Lead", "Pb", "Sodium", "Na", "LBE",
+                    "PbBi" (string)
         T         : temperature (float, numpy array, or torch tensor), K
         P         : pressure, MPa (float, numpy array, or torch tensor for "SCW"/"Water";
                     unused, may be None, for the liquid metals)
@@ -81,6 +83,12 @@ def _getprop(substance, T, P):
     elif substance in ("Sodium", "Na"):
         props = lm.Props(lm.Sodium, T)
 
+    # liqprops implements LBE alongside Sodium and Lead, but this dispatcher used to
+    # have no branch for it, so the one lead-bismuth model in the library was
+    # unreachable through the interface every solver calls.
+    elif substance in ("LBE", "PbBi"):
+        props = lm.Props(lm.LBE, T)
+
     else:
         # Every prior branch leaves `props` undefined on no match, which previously
         # raised a confusing UnboundLocalError from the return statement below rather
@@ -88,7 +96,7 @@ def _getprop(substance, T, P):
         # error for an input this dispatcher was never going to know how to serve.
         raise ValueError(
             f"_getprop: unrecognized substance {substance!r} -- expected one of "
-            "'SCW', 'Water', 'Lead', 'Pb', 'Sodium', 'Na'"
+            "'SCW', 'Water', 'Lead', 'Pb', 'Sodium', 'Na', 'LBE', 'PbBi'"
         )
 
     return props

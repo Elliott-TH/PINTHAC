@@ -17,10 +17,11 @@ conductivity integral for the centreline temperature (pin.cylindrical.Cyl_T).
 Everything here is torch and broadcast-generic, so the same node routine serves one rod
 (run_SCA) or a batch of independent rods at once (run_SCA_batch), on CPU or GPU.
 
-Coolant: supercritical water only. build_scw_table is IAPWS-95 and every property lookup
-goes through it, so the liquid-metal correlations sca/run.py offers (lyon, seban,
-mikityuk, lead_shen) will run here but will be handed water properties. See run.py's
-HTC_MODELS.
+Coolant is a parameter (coolant="scw" by default; see sca/coolant.py for the full list).
+Every property lookup in this module goes through the single Property callable that
+module builds, so nothing here is water-specific: supercritical water and water are
+tabulated and interpolated, and the liquid metals are evaluated straight through because
+their correlations are explicit fits that cost less than a table lookup would.
 """
 import math
 
@@ -34,6 +35,7 @@ from pinthac.correlations import htc
 from pinthac.correlations import friction as fric
 from pinthac.pin.cylindrical import Cyl_T
 from pinthac.properties.matmod import UO2
+from pinthac.sca import coolant as coolant_mod
 from pinthac.sca import geometry
 
 from pinthac.correlations.bundle import Bundle
@@ -48,19 +50,23 @@ DTYPE = torch.float64
 # "tensors on cuda:0 and cpu" mismatch that the numpy path never triggers. That is a
 # pre-existing bug in the property library. The lookups and the root-finder -- the parts
 # that actually benefit from the GPU -- still run on `device`.
-def build_scw_table(p, Tmin=290.0, Tmax=1000.0, n=3000, device=device):
-    T = np.linspace(Tmin, Tmax, n)
-    rho = IAPWS95.rho_Tp(T, p)
-    d = IAPWS95.helmholtz(rho, T)
-    table = {
-        'T':  T,
-        'rho': rho,
-        'mu': IAPWS95.mu(d),
-        'k':  IAPWS95.lam(d),
-        'h':  IAPWS95.h(d),   # J/kg
-        'cp': IAPWS95.cp(d),  # J/kg/K
-    }
-    return {k: torch.as_tensor(v, dtype=DTYPE, device=device) for k, v in table.items()}
+def build_scw_table(p, Tmin=290.0, Tmax=1000.0, n=3000, device=device, coolant="scw"):
+    """
+    Property table for a tabulated coolant, as torch tensors on `device`.
+
+    Thin wrapper over sca/coolant.py's build_table, kept under this name and with these
+    defaults because ml/deeponet.py, ml/datagen.py, figures/ and the tests all import it.
+    The 290-1000 K default window is this module's own, not coolant.py's.
+
+    Inputs:
+        p       : pressure, MPa
+        Tmin, Tmax, n : table bounds [K] and grid points
+        device  : torch device to stage the table onto
+        coolant : any tabulated coolant name (see sca/coolant.py's COOLANTS)
+    Returns:
+        dict: 'T' plus 'rho', 'mu', 'k', 'cp', 'h' -- torch tensors of length n
+    """
+    return coolant_mod.build_table(coolant, p, Tmin=Tmin, Tmax=Tmax, n=n, device=device)
 
 
 def make_Property(df):
@@ -126,6 +132,10 @@ def gap(qp_val, delta, Tci, rci, rfo):
 # The conductivity integral and its inversion used to be hand-rolled here. rod_node now
 # calls pin.cylindrical.Cyl_T with matmod.UO2.Theta_Klimenko/k_Klimenko instead: the same
 # solid-pellet solve, A1 = 0 and Tmax = Theta^-1(Theta(Tfo) + q3*rfo^2/4).
+
+
+def _to_numpy(x):
+    return x.detach().cpu().numpy() if torch.is_tensor(x) else np.asarray(x, dtype=float)
 
 
 def _log(x):
@@ -338,7 +348,7 @@ def rod_node(Property, Tm, p, qp_val, inputs, htc_name="swenson",
     return Tco, Tmax
 
 
-def pressure_drop(T_arr, G, D, scw_table, fric_func, dz, g=9.81):
+def pressure_drop(T_arr, G, D, Property, fric_func, dz, g=9.81):
     """
     Cumulative single-phase pressure drop [Pa] along the channel: friction + gravity +
     acceleration, summed cell by cell, with dP[0] = 0 at the inlet half-cell.
@@ -348,12 +358,8 @@ def pressure_drop(T_arr, G, D, scw_table, fric_func, dz, g=9.81):
     Builds the full property dict (rho, mu, cp, k) rather than mu alone so that any of
     sca/run.py's FRICTION_MODELS works here, including Wu, which needs cp and k.
     """
-    T_tab = scw_table['T'].detach().cpu().numpy()
     T = np.asarray(T_arr, dtype=float)
-    Props = {
-        key: np.interp(T, T_tab, scw_table[key].detach().cpu().numpy())
-        for key in ('rho', 'mu', 'k', 'cp')
-    }
+    Props = {key: _to_numpy(Property(['T', T], key)) for key in ('rho', 'mu', 'k', 'cp')}
     vol = 1.0 / Props['rho']
     f = fric_func(Props, G, D)
 
@@ -372,7 +378,7 @@ def pressure_drop(T_arr, G, D, scw_table, fric_func, dz, g=9.81):
 
 
 def run_SCA(inputs, pval, Tscw_in, q0, L=3.0, n=400, scw_table=None, device=device,
-                 htc_name="swenson", friction_func=fric.f_SCW.Filonenko,
+                 coolant="scw", htc_name="swenson", friction_func=fric.f_SCW.Filonenko,
                  bundle_func=bundle_mod.Bundle.Presser,
                  k_func=UO2.k_Klimenko, Theta_func=UO2.Theta_Klimenko):
     """
@@ -384,16 +390,21 @@ def run_SCA(inputs, pval, Tscw_in, q0, L=3.0, n=400, scw_table=None, device=devi
     Tscw_in  : inlet coolant temperature [K]
     q0       : peak linear heat generation rate [W/m]
     L, n     : heated length [m] and number of axial nodes
-    scw_table: a prebuilt build_scw_table() result to reuse; built here when None
+    coolant  : coolant name, see sca/coolant.py's COOLANTS. Tabulated coolants build (or
+               reuse) a property table; liquid metals are evaluated directly and ignore
+               scw_table entirely. pval is unused for a liquid metal, whose properties
+               are pressure-independent.
+    scw_table: a prebuilt build_scw_table() result to reuse; built here when None and the
+               coolant is a tabulated one
     htc_name, friction_func, bundle_func, (k_func, Theta_func) : sca/run.py's four
                correlation-selection keywords, resolved to functions
 
     Returns dict: Z [m], T_i [K], qp [W/m], T_fuel_max [K], dP [Pa] -- each length n.
     Values are plain floats, so this path is not differentiable; use run_SCA_batch.
     """
-    if scw_table is None:
-        scw_table = build_scw_table(pval, device=device)
-    Property = make_Property(scw_table)
+    if scw_table is None and coolant_mod.resolve(coolant)["tabulated"]:
+        scw_table = build_scw_table(pval, device=device, coolant=coolant)
+    Property = coolant_mod.make_property(coolant, pval, table=scw_table, device=device)
 
     dz = L / n
     Z = [-L / 2 + dz + i * dz for i in range(n)]
@@ -433,7 +444,7 @@ def run_SCA(inputs, pval, Tscw_in, q0, L=3.0, n=400, scw_table=None, device=devi
         T_i.append(T_scw); T_fuel_max.append(Tmax)
 
     T_i_list = [float(t) for t in T_i]
-    dP = pressure_drop(np.array(T_i_list), inputs['G'], Dh, scw_table, friction_func, dz)
+    dP = pressure_drop(np.array(T_i_list), inputs['G'], Dh, Property, friction_func, dz)
 
     return {
         'Z': Z,
@@ -445,7 +456,8 @@ def run_SCA(inputs, pval, Tscw_in, q0, L=3.0, n=400, scw_table=None, device=devi
 
 
 def run_SCA_batch(inputs_b, Tscw_in_b, q_sensors_b, sensor_z, pval=25.0,
-                   L=3.0, n=400, scw_table=None, device=device, htc_name='swenson',
+                   L=3.0, n=400, scw_table=None, device=device, coolant="scw",
+                   htc_name='swenson',
                    bundle_func=bundle_mod.Bundle.Presser,
                    k_func=UO2.k_Klimenko, Theta_func=UO2.Theta_Klimenko):
     """Same axial march as run_SCA(), but over a whole batch of B runs at
@@ -471,9 +483,9 @@ def run_SCA_batch(inputs_b, Tscw_in_b, q_sensors_b, sensor_z, pval=25.0,
                    weakly affects SCW properties over the realistic range)
     Returns Z (n,) plus T_i, qp, T_fuel_max each (B, n).
     """
-    if scw_table is None:
-        scw_table = build_scw_table(pval, device=device)
-    Property = make_Property(scw_table)
+    if scw_table is None and coolant_mod.resolve(coolant)["tabulated"]:
+        scw_table = build_scw_table(pval, device=device, coolant=coolant)
+    Property = coolant_mod.make_property(coolant, pval, table=scw_table, device=device)
 
     B = Tscw_in_b.shape[0]
     dz = L / n
