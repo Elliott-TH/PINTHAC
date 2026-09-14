@@ -2238,19 +2238,76 @@ the inversion becomes an interpolation against that column, exactly as
 \code{rod.py}'s \code{Property(['h', h], 'T')} does --- replacing a 12$\times$12 bisection
 with a \code{searchsorted}.
 
-\paragraph{What it would cost in accuracy.} A table is an approximation, and near the
-pseudocritical point $c_p$ has a sharp peak that a coarse grid will clip. \code{rod.py}'s
-grid is 3000 points over 710~K, about 0.24~K spacing, which resolves the peak well.
-Whether the same is adequate for the annular solver has to be \emph{measured}, not
-assumed, by running a case both ways and comparing --- which is the only honest way to
-introduce this and is what a toggle is for.
+\subsection{The toggle, as implemented}
 
-\paragraph{What the toggle should probably look like.} \code{scw\_table.py}'s 2-D $(T,P)$
-form is the more capable option, and it would let the annular solver pick up local
-pressure the way \code{lut.py} does. \code{rod.py}'s 1-D form is simpler, already proven,
-already on GPU, and matches the annular solver's fixed-pressure assumption exactly. The
-1-D form is the smaller, safer step; the 2-D form is a capability upgrade as well as a
-speedup. Neither has been implemented, and no accuracy comparison has been run.
+\code{solve\_field} now takes \code{use\_lut=False} (default) and an optional prebuilt
+\code{lut=} table. \code{use\_lut=True} calls \code{build\_scw\_lut(Pnom)} --- 3000 points
+over 500--1300~K, one batched equation-of-state call --- and \code{make\_lut\_lookups}
+returns the \code{(props\_at, T\_from\_h)} pair that replaces both live paths.
+\code{\_T\_hp\_fast}'s $12 \times 12$ bisection becomes a \code{numpy.interp} against the
+table's $h$ column, valid because $h$ is monotone in $T$ at a fixed supercritical
+pressure. Nothing in \code{closure}, \code{pressure\_drop} or \code{\_htc\_robust} changed
+--- they already took \code{props\_at} as a parameter. \code{run\_channel} needs no change
+either: \code{use\_lut} and \code{lut} reach \code{solve\_field} through
+\code{**solver\_kwargs}.
+
+The table bounds are not arbitrary. 500~K is the floor because \code{IAPWS95.rho\_Tp}
+loses the liquid-density root below roughly 480~K at these pressures; 1300~K is the
+ceiling because the wall-temperature solve evaluates properties out to $T_b + 500$~K.
+
+\subsection{What it costs, measured}
+
+\code{docs/scripts/compare\_annular\_lut.py} runs the same case ($N = 40$, $q_0 = 10$~kW/m,
+25~MPa) both ways:
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+& time & \\
+\midrule
+live IAPWS-95 & 405.13 s & 7 outer iterations, converged \\
+lookup table & 2.72 s & 8 outer iterations, converged \\
+\midrule
+\textbf{speedup} & \textbf{149.0$\times$} & (table build included in the 2.72 s) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Field & max abs.\ difference & max rel. \\
+\midrule
+\code{Tm\_i}, \code{Tm\_o} & 0.126 K, 0.117 K & 0.021\% \\
+\code{Tfo\_i}, \code{Tfo\_o} & 0.093 K, 0.098 K & 0.017\% \\
+\code{Tcldi\_ID}, \code{Tcldo\_OD} & 0.112 K, 0.108 K & 0.020\% \\
+\code{q\_i}, \code{q\_o} & 3.90 W/m (both) & 2.05\%, 0.64\% \\
+\code{dP\_i}, \code{dP\_o} & 3.53 Pa, 0.73 Pa & 0.031\% \\
+\midrule
+peak \code{Tfo\_i} & $+0.017$ K & \\
+peak \code{Tfo\_o} & $+0.018$ K & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Every temperature agrees to better than 0.13~K, and the peak fuel surface temperatures
+to 0.02~K --- far inside Swenson's own $\pm 25$ percent model-form band, so the table is
+nowhere near the limiting error in this solve. The flux split shows the largest
+\emph{relative} difference only because $q_i$ is the smaller of the two; the absolute
+difference is identical on both sides, which is what conservation requires.
+
+One honest caveat on attribution: the two runs took 7 and 8 outer iterations, both to
+the same 10~J/kg tolerance, so part of the difference is the two solves landing at
+slightly different points inside that band rather than interpolation error alone. The
+interpolation error by itself is smaller than this comparison can resolve.
+
+\subsection{What is still not done}
+
+The default remains \code{use\_lut=False}, so no committed figure or example changes.
+\code{scw\_table.py}'s 2-D $(T,P)$ form remains the more capable option --- it would let
+the annular solver pick up \emph{local} pressure the way \code{lut.py} does, which
+neither live solver currently does. That is a capability upgrade rather than a speedup,
+and it has not been built.
 
 \section{What this module does not do}
 
