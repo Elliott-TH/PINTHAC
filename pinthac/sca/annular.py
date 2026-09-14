@@ -72,6 +72,104 @@ _T_PC = _find_Tpc(25.0)
 _LOOSE_TOL_KW = dict(ftol_rel=1e-2, xtol=0.05, rtol=1e-4, max_iter=25)
 
 
+# =============================================================================
+# Optional property lookup table (solve_field's use_lut=True).
+#
+# Why this exists: props_at below is a live IAPWS-95 call, and a measured profile of
+# one solve (docs/scripts/profile_annular_properties.py, N=20 nodes, 3 outer
+# iterations) put 97.7 percent of the wall clock inside it -- 653 separate calls,
+# 147.5 s, against 0.13 s for every flux split, Cramer solve, gap balance and cladding
+# step put together. The cost is per call, not per point: 226 ms to evaluate 21 state
+# points, because the equation of state's fixed overhead (tensor staging, a 60-iteration
+# Newton density solve, the full Helmholtz residual) is amortised over almost nothing.
+#
+# sca/rod.py already solves this the other way round: one batched call over 3000 state
+# points at table-construction time, interpolation thereafter. These two functions are
+# the same idea in numpy, at the one pressure the annular solver holds fixed anyway.
+# =============================================================================
+def build_scw_lut(Pnom, Tmin=500.0, Tmax=1300.0, n=3000):
+    """
+    Tabulate supercritical-water properties against temperature at one fixed pressure.
+
+    Why this model is here:
+        The table behind solve_field(use_lut=True). Evaluates the equation of state
+        once, as a single batched call over n state points, so every later lookup is an
+        interpolation instead of another solve.
+
+    Formulation:
+        Not a physical model -- gp._getprop('SCW', T, Pnom) on a linspace, stored.
+
+    Valid range:
+        [Tmin, Tmax]. Tmin defaults to 500 K rather than lower because
+        IAPWS95.rho_Tp's solve loses the liquid-density root below roughly 480 K at
+        these pressures (it converges to a spurious root near rho_c instead) -- the
+        same limit sca/scw_table.py records. Tmax defaults to 1300 K to cover the
+        Tb + 500 K wall-temperature search window closure() uses, since the wall solve
+        evaluates properties at trial temperatures well above any bulk temperature.
+        Queries outside the table clamp to its edge (numpy.interp's own behaviour), so
+        a case that leaves the window gets an edge value, not an extrapolation.
+
+    Uncertainty:
+        Interpolation error on top of whatever IAPWS-95 itself carries. At the default
+        n = 3000 over 800 K the grid spacing is 0.27 K; see solve_field's use_lut
+        docstring for the measured field-level difference against the live path.
+
+    Inputs:
+        Pnom : pressure, MPa -- the one pressure the whole table is built at
+        Tmin, Tmax : table bounds, K
+        n    : number of grid points
+    Returns:
+        dict with key 'T' (the grid, K) plus 'rho', 'mu', 'k', 'cp', 'h' -- each a
+        numpy array of length n, in the units of properties/getprop.py's Props dict
+    """
+    T = np.linspace(Tmin, Tmax, n)
+    props = gp._getprop('SCW', T, Pnom)
+    table = {'T': T}
+    for key in ('rho', 'mu', 'k', 'cp', 'h'):
+        table[key] = np.asarray(props[key], dtype=float)
+    return table
+
+
+def make_lut_lookups(table):
+    """
+    Build the (props_at, T_from_h) pair that replaces the live equation-of-state calls.
+
+    Why this model is here:
+        solve_field reaches the equation of state in exactly two places -- props_at
+        (T -> properties) and _T_hp_fast (h -> T). This returns a table-backed
+        replacement for each, in the same shape the live versions have, so the switch
+        is one assignment rather than a change to closure/pressure_drop/_htc_robust,
+        none of which know or care where the numbers come from.
+
+    Formulation:
+        Both directions are numpy.interp on the table. The h -> T direction works
+        because h is monotone in T at a fixed supercritical pressure (there is no
+        two-phase dome above the critical pressure, so no plateau), which is the same
+        property sca/rod.py's Property(['h', h], 'T') lookup relies on. That replaces
+        _T_hp_fast's 12 bisections around a 12-iteration Newton density solve with a
+        single interpolation.
+
+    Inputs:
+        table : a build_scw_lut() result
+    Returns:
+        (props_at, T_from_h) : props_at(T) -> Props dict; T_from_h(h) -> T [K].
+        props_at takes T in K and returns h in J/kg, matching the live props_at;
+        T_from_h takes h in J/kg (NOT the kJ/kg _T_hp_fast wants -- see solve_field)
+    """
+    T_grid = table['T']
+    h_grid = table['h']
+
+    def props_at(T):
+        T_np = np.asarray(T, dtype=float)
+        return {key: np.interp(T_np, T_grid, table[key])
+                for key in ('rho', 'mu', 'k', 'cp', 'h')}
+
+    def T_from_h(h):
+        return np.interp(np.asarray(h, dtype=float), h_grid, T_grid)
+
+    return props_at, T_from_h
+
+
 def _T_hp_fast(h, p, iters=12, newton_iters=12):
     """
     h -> T inversion at fixed p, the same outer bisection IAPWS_95.T_hp
@@ -461,7 +559,8 @@ def closure(T_i, T_o, q_tot, inp, geom, props_at, Theta_func, htc_name="swenson"
 
 def solve_field(Inputs, q_p=None, outer_iter=15, tol=10.0, progress=False,
                       htc_name="swenson", friction_func=fric.f_SCW.Filonenko,
-                      bundle_func=bnd.Bundle.Presser, k_func=UO2.k_NFI):
+                      bundle_func=bnd.Bundle.Presser, k_func=UO2.k_NFI,
+                      use_lut=False, lut=None):
     """
     General version of annular.py::solve_field: identical enthalpy-march/closure outer
     Picard loop (see that docstring for the full derivation), but htc_name/
@@ -473,6 +572,21 @@ def solve_field(Inputs, q_p=None, outer_iter=15, tol=10.0, progress=False,
 
     The conductivity integral is built once here, not per closure() call or per
     axial node -- see closure's Theta_func docstring for why.
+
+    use_lut : False (default) evaluates IAPWS-95 live at every property lookup, which
+              is what every result committed to this repository was produced with.
+              True builds a 3000-point table at Pnom once (build_scw_lut) and
+              interpolates it instead, for both directions -- T -> properties and the
+              h -> T inversion that _T_hp_fast otherwise bisects for.
+
+              This is an accuracy-for-speed trade and the numbers are measured, not
+              assumed. See docs/scripts/compare_annular_lut.py, which runs the same
+              case both ways; its recorded output is in that file and in
+              docs/SCA_Module_Reference.tex Part X. The default stays False so no
+              existing figure or example silently changes.
+    lut     : a prebuilt build_scw_lut() table to reuse across calls, e.g. a parameter
+              sweep at one pressure that would otherwise rebuild it per case. Ignored
+              unless use_lut is True; built here when None.
     """
     inp = Inputs
     L, N = inp['L'], inp['N']
@@ -502,8 +616,20 @@ def solve_field(Inputs, q_p=None, outer_iter=15, tol=10.0, progress=False,
 
     Theta_func = ht.Ann_Theta(_k_unchecked)
 
-    def props_at(T):
-        return gp._getprop('SCW', T, Pnom)
+    # The one seam. Every consumer below -- closure(), pressure_drop(), and through
+    # closure the robust-phase wall solve -- takes props_at as an argument, so swapping
+    # the implementation here is the whole change; none of them is touched.
+    if use_lut:
+        if lut is None:
+            lut = build_scw_lut(Pnom)
+        props_at, T_from_h = make_lut_lookups(lut)
+    else:
+        def props_at(T):
+            return gp._getprop('SCW', T, Pnom)
+
+        # _T_hp_fast takes h in kJ/kg; every enthalpy in this solver is J/kg.
+        def T_from_h(h):
+            return _T_hp_fast(h/1000.0, Pnom)
 
     def march(h0, q, mdot):
         e = np.empty(N)
@@ -522,8 +648,8 @@ def solve_field(Inputs, q_p=None, outer_iter=15, tol=10.0, progress=False,
     outer_err = float('inf')
     outer_iters_used = 0
     for _ in it:
-        T_i = _T_hp_fast(h_i/1000.0, Pnom)
-        T_o = _T_hp_fast(h_o/1000.0, Pnom)
+        T_i = T_from_h(h_i)
+        T_o = T_from_h(h_o)
 
         c = closure(T_i, T_o, q_tot, inp, geom, props_at, Theta_func,
                          htc_name=htc_name, bundle_func=bundle_func)
