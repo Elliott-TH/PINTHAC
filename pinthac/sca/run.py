@@ -1,34 +1,32 @@
 """
-sca/run.py -- the top-level single-channel-analysis driver.
+sca/run.py -- the top-level single-channel-analysis driver, and the only file most
+callers need.
 
-Why this module exists: sca/rod.py and sca/annular.py are each a complete axial solver
-for one geometry, but a user (or a figure-generation script, or a batch data-gen sweep)
-should not have to know which module a given case dispatches to, or repeat the
-boilerplate of assembling that module's own inputs dict. run_channel() is the one
-function that takes a geometry, a set of operating conditions, and a correlation
-selection, and returns the axial solution plus a convergence report.
+run_channel(geometry, conditions, htc=..., friction=..., bundle=...,
+fuel_conductivity=...) takes plain dicts, dispatches on geometry['type'] to sca/rod.py
+or sca/annular.py, and returns the axial solution plus a convergence report. run_batch
+runs many cases and isolates a failing one; read_cases_csv builds cases from a
+spreadsheet.
 
-Correlation selection: plain dict literals mapping name -> function (HTC_MODELS,
-FRICTION_MODELS, BUNDLE_MODELS, FUEL_CONDUCTIVITY_MODELS), looked up by _select(), which
-fails immediately on an unknown name and lists the valid ones. No registry, no
-auto-discovery, no config language -- that is the whole mechanism.
+Correlation selection is four dict literals below mapping name -> function, looked up by
+_select(), which fails immediately on an unknown name and lists the valid ones. No
+registry, no auto-discovery, no config language -- that is the whole mechanism. Whether
+a heat transfer correlation needs an implicit wall-temperature solve is a property of
+the correlation, not of the solver, so it is recorded in each solver's own
+_HTC_DISPATCH (implicit) / _EXPLICIT_HTC (explicit) tables rather than here.
 
-Every selection reaches the solver. sca/rod.py and sca/annular.py take the correlation,
-the friction factor, the bundle factor and the fuel conductivity as arguments; neither
-defines a case of its own. Whether a heat transfer correlation needs an implicit
-wall-temperature solve is a property of the correlation, not of the solver, and is
-recorded in each solver's _HTC_DISPATCH (implicit: the wall state feeds its own formula)
-versus _EXPLICIT_HTC (bulk state only, evaluated once).
+Two things this driver will accept and should not, both flagged at their definitions
+below:
 
-Two-phase (PWR/BWR): correlations/htc.py has Chen, Bjorge and Schrock-Grossman for
-two-phase flow, and their names are in HTC_MODELS below -- so they are importable and
-selectable through the same mechanism. But neither sca/rod.py nor sca/annular.py is a
-boiling-channel solver: both march a single-phase supercritical-water enthalpy balance
-with no onset-of-nucleate-boiling correlation, no quality/void-fraction tracking, and no
-subcooled-boiling bookkeeping anywhere in pinthac/sca/. Per docs/brief/PHASE5_BRIEF.md's own
-instruction ("if subcooled-boiling bookkeeping is not already present somewhere, say so
-rather than inventing it"), run_channel() raises NotImplementedError for a two-phase htc
-selection rather than pretending to run a boiling channel that does not exist.
+  - Two-phase (PWR/BWR) htc names. Chen, Bjorge and Schrock-Grossman are real,
+    implemented correlations, but neither solver has onset-of-nucleate-boiling
+    detection, quality/void-fraction tracking, or subcooled-boiling bookkeeping -- both
+    march a single-phase enthalpy balance. run_channel raises NotImplementedError rather
+    than pretending to run a boiling channel that does not exist.
+
+  - Liquid-metal htc names (lyon, seban, mikityuk, lead_shen). These currently run and
+    return a number, and that number is meaningless: both solvers are hardcoded to
+    supercritical water on the property side. See HTC_MODELS.
 """
 import numpy as np
 import pandas as pd
@@ -40,13 +38,18 @@ from pinthac.properties import matmod
 from pinthac.sca import annular, rod
 
 
-# =============================================================================
-# Correlation selection: a plain dict literal per category, name -> function (or, for
-# fuel_conductivity, a (k_func, Theta_func) pair -- pin.cylindrical.Cyl_T and
-# pin.annular.Ann_flux_split both need the conductivity and its integral together).
-# No plugin registry, no entry points, no auto-discovery, no DSL, no config parser --
-# docs/brief/PHASE5_BRIEF.md forbids all of these by name. This is the whole mechanism.
-# =============================================================================
+# One dict literal per category, name -> function. fuel_conductivity maps to a
+# (k_func, Theta_func) pair because pin.cylindrical.Cyl_T needs the conductivity and its
+# integral together -- Theta to state the problem, k as its analytic derivative for the
+# Newton polish.
+# WARNING, coolant: both solvers evaluate properties as supercritical water only --
+# sca/rod.py's build_scw_table is IAPWS-95, sca/annular.py's props_at is
+# getprop._getprop('SCW', ...). Neither takes a coolant argument. The four liquid-metal
+# entries below (lyon, seban, mikityuk, lead_shen) are therefore selectable but WRONG:
+# they will be handed water properties and will return a plausible-looking number with
+# no error and, except for mikityuk's Peclet range check, no warning. They are listed
+# because correlations/htc.py implements them and a future coolant-aware solver will
+# want them; do not use them for a result today.
 HTC_MODELS = {
     "swenson": htc.SCW.Swenson_dT,
     "chen_scw": htc.SCW.Chen_SCW_dT,
@@ -83,10 +86,7 @@ FUEL_CONDUCTIVITY_MODELS = {
 _TWO_PHASE_HTC = ("chen_h2o", "bjorge", "schrock_grossman")
 
 _ROD_GEOM_KEYS = ("pitch", "rco", "tc", "delta", "kc")
-# The annular solver used to carry a module-level Inputs_ann default case. It does not any
-# more: a solver is not an example, and a default geometry silently standing in for one the
-# caller forgot is how a run ends up reporting someone else's pin. Every key is required
-# here, and a missing one fails immediately with the full list.
+# Every physical key is required, with no default to fall back on -- see run_channel.
 _ANNULAR_GEOM_KEYS = ("ri", "ro", "tci", "tco", "delta_i", "delta_o", "Pitch")
 _ANNULAR_COND_KEYS = ("L", "Tin_i", "Tin_o", "Pnom", "mdot_i", "mdot_o", "q0")
 _ROD_COND_KEYS = ("G", "pval", "Tin", "q0", "L", "N")
@@ -96,10 +96,9 @@ def _select(name, table, category):
     """
     Look up a correlation by name, raising immediately with the valid options on a miss.
 
-    Why this model is here:
-        The single point every correlation-selection keyword in this module passes
-        through -- the entire "selection by name" mechanism docs/brief/PHASE5_BRIEF.md asks
-        for, and nothing more (no registry, no fallback guessing, no partial matching).
+    The single point every correlation-selection keyword passes through. No fallback
+    guessing, no partial matching -- an unknown name raises here, listing the options,
+    rather than becoming a silently different physics model three figures later.
 
     Inputs:
         name     : the requested model name, or None (passes through unchanged -- used
@@ -122,13 +121,11 @@ def _scan_for_nonfinite(result, z_key, fields):
     """
     Find the first axial node where any tracked field is non-finite (NaN or +/-inf).
 
-    Why this model is here:
-        docs/brief/PHASE5_BRIEF.md section 4 asks for "a known-bad case produces a readable
-        convergence report rather than a silent NaN". Neither sca/rod.py's bisect_newton
-        solves nor sca/annular.py's closure() raise on a physically nonsensical case --
-        a bad bracket or a diverging Picard iterate just comes out as NaN or inf in the
-        output arrays. This turns that into a specific, located failure instead of a
-        result the caller has to notice is broken by inspecting every field by hand.
+    Neither solver raises on a physically nonsensical case: bisect_newton runs a fixed
+    iteration count and returns whatever it has, and a diverging Picard iterate comes out
+    as inf. Both propagate quietly into the output arrays. This turns that into a
+    located failure -- which field, which node, which axial position -- instead of a
+    result the caller has to notice is broken by inspecting every field by hand.
 
     Inputs:
         result : a run_SCA()/solve_field()-shaped dict of 1-D arrays
@@ -199,45 +196,30 @@ def _annular_inputs(geometry, conditions):
 def run_channel(geometry, conditions, htc="swenson", friction="filonenko",
                  bundle="presser", fuel_conductivity="klimenko", **solver_kwargs):
     """
-    Run one single-channel-analysis case, dispatching to sca/rod.py or
-    sca/annular.py -- the fully general siblings of sca/rod.py/annular.py, threaded
-    so every one of the four correlation-selection keywords below actually takes effect.
+    Run one single-channel-analysis case. The module's main entry point.
 
-    Why this model is here:
-        The one entry point docs/brief/PHASE5_BRIEF.md section 3 asks for: geometry and
-        operating conditions as plain dicts, correlation selection by name, and a
-        convergence report a person can read when a case fails.
-
-    Formulation:
-        Not a physical model -- a dispatcher. geometry['type'] selects
-        rod.run_SCA (for 'rod') or annular.solve_field (for 'annular');
-        geometry/conditions are reshaped into that solver's own input format by
-        _rod_inputs/_annular_inputs, and the four correlation names are resolved via
-        HTC_MODELS/FRICTION_MODELS/BUNDLE_MODELS/FUEL_CONDUCTIVITY_MODELS and passed
-        straight through.
+    Not a physical model -- a dispatcher. geometry['type'] selects rod.run_SCA or
+    annular.solve_field, geometry/conditions are reshaped into that solver's own input
+    format by _rod_inputs/_annular_inputs, and the four correlation names are resolved
+    against the tables above and passed straight through.
 
     Inputs:
-        geometry   : dict with a 'type' key, 'rod' or 'annular', plus that geometry's
-                     own keys -- rod: pitch, rco, tc, delta, kc (m, m, m, m, W/m-K);
-                     annular: ri, ro, tci, tco, delta_i, delta_o, Pitch (all required),
-                     plus optional Gas (default "He")
-                     for anything omitted
-        conditions : dict of operating conditions -- rod: G (kg/m^2-s), pval (MPa),
-                     Tin (K), q0 (W/m), optionally L (m), N; annular: L, Tin_i, Tin_o,
-                     Pnom, mdot_i, mdot_o, q0 (all required), optionally N; the
-                     condition keys (Tin_i, Tin_o, Pnom, mdot_i, mdot_o, q0, L, N),
-                     defaulting the same way
-        htc, friction, bundle, fuel_conductivity : correlation selection by name (see
-                     HTC_MODELS/FRICTION_MODELS/BUNDLE_MODELS/FUEL_CONDUCTIVITY_MODELS
-                     for the valid names). bundle=None means "apply no bundle
-                     correction" and is always accepted.
-        **solver_kwargs : passed straight through to the dispatched solver
-                     (rod.run_SCA's scw_table/device, or annular.
-                     solve_field's q_p/outer_iter/tol/progress) -- e.g. a caller who
-                     wants a looser
-                     annular tolerance for a quick exploratory run passes
-                     tol=..., outer_iter=... here rather than run_channel needing to
-                     know every such knob by name.
+        geometry   : dict with 'type' ('rod' or 'annular') plus that geometry's keys --
+                     rod: pitch, rco, tc, delta, kc [m, m, m, m, W/m-K]
+                     annular: ri, ro, tci, tco, delta_i, delta_o, Pitch [m], plus
+                     optional Gas (default "He"). All are required; a missing key raises
+                     naming it, because a defaulted geometry silently standing in for a
+                     forgotten one is how a run reports somebody else's pin.
+        conditions : rod: G [kg/m^2-s], pval [MPa], Tin [K], q0 [W/m], optional L [m]
+                     and N; annular: L, Tin_i, Tin_o, Pnom, mdot_i, mdot_o, q0, optional
+                     N. q0 is the peak of the default cosine axial shape.
+        htc, friction, bundle, fuel_conductivity : selection by name; see the tables
+                     above for valid names and for which htc names not to trust.
+                     bundle=None means no bundle correction and is always accepted.
+        **solver_kwargs : passed straight through to the dispatched solver -- rod:
+                     scw_table, device; annular: q_p, outer_iter, tol, progress, and
+                     use_lut/lut for the property lookup table. This is why run_channel
+                     does not need to name every solver knob itself.
     Returns:
         dict: result (the underlying run_SCA()/solve_field() output), geom_type,
         requested (the four correlation names as given), notes (list of strings, always
@@ -315,19 +297,11 @@ def run_batch(cases):
     Run many cases, or one case repeated across several correlation selections, in one
     call.
 
-    Why this model is here:
-        docs/brief/PHASE5_BRIEF.md section 3 asks for exactly this -- "run many cases, or one
-        case across several correlations, in one call", which is what the comparison
-        figures and DeepONet training-data generation both need. One bad case (a typo'd
-        correlation name, a geometry missing a required key) is reported and skipped
-        rather than stopping every other case in the batch -- deliberate error isolation
-        at this one boundary, not a substitute for checking values inline elsewhere in
-        this module (CLAUDE.md section 2 forbids try/except as control flow; this is
-        catching an actual exception at a batch boundary to isolate one case's failure
-        from the rest, which is what run_channel already raises to signal).
-
-    Formulation:
-        Not a physical model -- calls run_channel(**case) once per entry in `cases`.
+    One bad case -- a typo'd correlation name, a geometry missing a key -- is recorded
+    and skipped rather than killing every other case in a sweep. This is the module's
+    only try/except, and the documented exception to CLAUDE.md section 2's ban on
+    exceptions as control flow: it catches an actual exception at a batch boundary to
+    isolate one case, which is exactly what run_channel raises to signal.
 
     Inputs:
         cases : list of dicts, each with keys 'geometry' and 'conditions' (as
@@ -358,16 +332,10 @@ def read_cases_csv(path, geom_type):
     Read many cases from a CSV file, in the spirit of
     docs/reference_code/SCA_Example.py's spreadsheet-driven input.
 
-    Why this model is here:
-        docs/brief/PHASE5_BRIEF.md section 3 asks for "a small spreadsheet reader in the
-        spirit of docs/reference_code/SCA_Example.py". openpyxl is not installed, and
-        docs/DECISIONS.md/docs/brief/PHASE5_BRIEF.md do not approve adding it, so this reads
-        .csv only (pandas.read_csv) -- an .xlsx file needs to be exported to .csv first,
-        or openpyxl added as an explicit, owner-approved dependency before a
-        pandas.read_excel path is added here.
+    .csv only: openpyxl is not installed and adding it was not approved, so an .xlsx
+    file has to be exported to .csv first.
 
-    Formulation:
-        Not a physical model. Each row becomes one case dict for run_batch(): columns
+    Each row becomes one case dict for run_batch(): columns
         named 'htc'/'friction'/'bundle'/'fuel_conductivity' (if present) become that
         row's correlation-selection override, and every other column becomes a
         geometry/condition value, keyed by _rod_inputs'/_annular_inputs' own key names

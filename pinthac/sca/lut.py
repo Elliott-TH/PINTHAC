@@ -8,14 +8,20 @@ from pinthac.properties import matmod as mats
 from pinthac.correlations import htc as htc
 from pinthac.correlations import friction as fric
 import matplotlib.pyplot as plt
-# =============================================================
-# Single-pin SCWR channel model driven entirely by the SCW
-# property lookup table (see SCW_Table_Gen.py / SCW_Prop_Table.csv)
-# instead of live IAPWS-95 calls. Local pressure is tracked node
-# to node from the momentum equation (not held at Pnom), so
-# property lookups pick up the effect of the channel's pressure
-# drop -- the table's few pressure points exist to support this.
-# =============================================================
+# LEGACY, not wired in: nothing imports this module and sca/run.py cannot dispatch to
+# it. A third rod solver, older than sca/rod.py, driven entirely by the (T, P) table
+# sca/scw_table.py writes.
+#
+# Kept for the one thing neither live solver does: local pressure is tracked node to node
+# from the momentum equation rather than held at Pnom, so property lookups pick up the
+# channel's own pressure drop. The table's pressure points exist to support that.
+#
+# Why it is not wired in: a module-level Inputs_rod default case; NFI conductivity
+# constants hardcoded inline with a magic /100 relaxation step; T_fo and Tmax are while
+# loops with no iteration cap, so they can hang; matplotlib at module scope; temperatures
+# in degC against the library's kelvin-everywhere rule; and a wall-temperature bisection
+# assuming a single root on [Tb, Tb+200], which is exactly the assumption that fails in
+# the deteriorated-heat-transfer regime correlations/htc.py's guarded solver exists for.
 
 from pinthac.paths import data_file
 

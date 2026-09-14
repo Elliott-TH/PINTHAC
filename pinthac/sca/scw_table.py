@@ -4,14 +4,9 @@ import time
 from pinthac.properties import getprop as prop
 from pinthac.paths import data_file
 
-# =============================================================
-# Generates a property lookup table for supercritical water
-# (SCW), used by SCA_LUT.py so the channel loop can interpolate
-# properties instead of calling the IAPWS-95 solver at every
-# axial node. A handful of pressure points bracket the nominal
-# operating pressure so the table still resolves properties as
-# pressure drops along the channel.
-# =============================================================
+# Generates the 2-D (T, P) supercritical-water property table that sca/lut.py reads.
+# Legacy: nothing in the live solvers uses it. sca/annular.py's use_lut builds its own
+# 1-D table in T at a fixed pressure instead (annular.build_scw_lut).
 
 
 def build_table():
@@ -19,18 +14,14 @@ def build_table():
     Generate the supercritical-water property lookup table and write it to the data
     directory.
 
-    Why this model is here:
-        pinthac/sca/lut.py interpolates this table instead of calling the IAPWS-95 solver
-        at every axial node, which is what makes the table-driven channel solver fast
-        enough to generate surrogate training data. A handful of pressure points bracket
-        the nominal operating pressure so the table still resolves properties as the
-        pressure drops along the channel.
+    501 temperatures x 9 pressures. The pressure points exist so sca/lut.py can look
+    properties up at the local pressure as it drops along the channel -- the one thing
+    neither live solver does.
 
-        This used to run at module scope, which meant merely *importing* the module
-        regenerated 4500 rows and overwrote the existing table -- so it now sits behind a
-        function and a __main__ guard. Note that the regeneration is reproducible in
-        physics but not byte-for-byte: GPU reduction ordering moves the last one or two
-        significant figures, so nothing downstream should assert on an exact table value.
+    Behind a function and a __main__ guard because this used to run at module scope,
+    where merely importing the module regenerated 4509 rows over the existing table.
+    Regeneration is reproducible in physics but not byte-for-byte (GPU reduction ordering
+    moves the last significant figure or two), so nothing should assert on an exact value.
 
     Returns:
         path : absolute path of the CSV written, string

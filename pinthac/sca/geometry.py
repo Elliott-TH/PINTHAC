@@ -1,49 +1,31 @@
 """
-Shared channel-geometry helpers for the single-channel solvers.
+Channel-geometry helpers shared by the single-channel solvers.
 
-Why this module exists: sca/rod.py's single rod-bundle channel and
-sca/annular.py's outer (rod-bundle) channel both compute the same square-pitch
-unit-cell hydraulic diameter from a pitch and a rod (or clad) outer radius, by
-hand, in two different files; annular.py's inner channel separately computes
-the same circular-tube hydraulic diameter (its own diameter) from a channel
-radius. docs/brief/PHASE5_BRIEF.md section 3 asks for a shared geometry module --
-this is that module, factored out of the two call sites it replaces rather
-than written from scratch, so it carries no new physics or formula.
+Exact unit-cell geometry, not fitted correlations, so there is no valid range,
+uncertainty or reference to state for either function. sca/rod.py's coolant channel and
+sca/annular.py's outer channel are both square_pitch_cell; sca/annular.py's inner
+channel is circular_channel.
 """
 import math
 
 
 def square_pitch_cell(pitch, R):
     """
-    Flow area, wetted perimeter and hydraulic diameter of a square-pitch rod-bundle
-    unit cell, for one rod of outer radius R inside a pitch x pitch square.
+    Flow area, wetted perimeter and hydraulic diameter of a square-pitch rod-bundle unit
+    cell: one rod of outer radius R inside a pitch x pitch square.
 
-    Why this model is here:
-        The rod-bundle channel geometry shared by sca/rod.py's single coolant channel
-        (rod_node) and sca/annular.py's outer channel (geometry()) -- both are a rod (or
-        cladding) sitting in a square-pitch unit cell.
-
-    Formulation:
         A_flow = pitch^2 - pi*R^2
         Per    = 2*pi*R
         Dh     = 4*A_flow/Per
 
-    Valid range:
-        Not applicable -- exact unit-cell geometry, not a fitted correlation.
+    The wetted perimeter counts only the rod surface. The four square boundaries are
+    symmetry planes between adjacent rods -- no shear, no heat flux -- not walls.
 
-    Uncertainty:
-        Not applicable.
-
-    Reference:
-        Not applicable -- standard square-pitch bundle unit-cell geometry (see e.g.
-        Todreas & Kazimi, Nuclear Systems Volume 1, chapter 9).
-
-    Inputs (float, numpy array, or torch tensor; broadcastable against each other):
+    Inputs (float, numpy array, or torch tensor; broadcastable):
         pitch : rod pitch, m
         R     : rod (or clad) outer radius, m
     Returns:
-        dict with keys A_flow (flow area, m^2), Per (wetted perimeter, m),
-        Dh (hydraulic diameter, m) -- each the same type as the inputs
+        dict with A_flow [m^2], Per [m], Dh [m], each the same type as the inputs
     """
     A_flow = pitch**2 - math.pi*R**2
     Per = 2*math.pi*R
@@ -55,31 +37,17 @@ def circular_channel(R):
     """
     Flow area, wetted perimeter and hydraulic diameter of a circular channel of radius R.
 
-    Why this model is here:
-        sca/annular.py's inner channel is a plain circular tube bored through the
-        cladding. The hydraulic diameter of a circular channel is trivially its own
-        diameter, but writing it as A_flow/Per/Dh here keeps both channels' geometry the
-        same shape at the call site, alongside square_pitch_cell.
-
-    Formulation:
         A_flow = pi*R^2
         Per    = 2*pi*R
         Dh     = 4*A_flow/Per = 2*R
 
-    Valid range:
-        Not applicable -- exact circular-tube geometry, not a fitted correlation.
-
-    Uncertainty:
-        Not applicable.
-
-    Reference:
-        Not applicable -- standard circular-tube geometry.
+    Dh is trivially the channel's own diameter; written in the same A/Per/Dh shape as
+    square_pitch_cell so both channels read identically at the call site.
 
     Inputs (float, numpy array, or torch tensor):
         R : channel radius, m
     Returns:
-        dict with keys A_flow (flow area, m^2), Per (wetted perimeter, m),
-        Dh (hydraulic diameter, m) -- each the same type as R
+        dict with A_flow [m^2], Per [m], Dh [m], each the same type as R
     """
     A_flow = math.pi*R**2
     Per = 2*math.pi*R
