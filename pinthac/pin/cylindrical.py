@@ -1,33 +1,15 @@
-"""
-Radial temperature profile of a solid cylindrical fuel pellet.
-
-Moved verbatim from PinHT.py in Phase 1. Phase 2 brings it up to the docstring standard
-without changing the formula; it already passed the float/numpy/torch contract at
-Phase 0 (docs/AUDIT.md's baseline). Only the constant-conductivity profile exists so
-far; the conductivity-integral form described in
-docs/reference/PINTHA_Code_Summary.pdf section 4.3, and the heat-flux and
-LHGR-at-radius helpers, are for a later phase to add (pin/annular.py already has the
-conductivity-integral solve for the annular case, Ann_HT/Ann_Theta -- Cyl_HT is that
-solve's simpler, constant-kf special case).
-"""
+"""Radial temperature profile of a solid cylindrical fuel pellet."""
 from pinthac import backend
 
 
 def Cyl_HT(r, q_vol, kint, C):
-    """
-    Radial temperature profile for a solid cylinder with uniform volumetric heat
+    """Radial temperature profile for a solid cylinder with uniform volumetric heat
     generation and constant thermal conductivity.
-
-    Why this model is here:
-        The simplest fuel-pellet radial temperature solve: a constant-property special
-        case of the conductivity-integral (Kirchhoff-transformed) annular solve in
-        pin/annular.py, useful wherever kf's own temperature dependence can be ignored
-        or has already been folded into an effective kint.
 
     Formulation:
         T(r) = C - q_vol*r^2/(4*kint)
 
-        Sign convention confirmed against docs/reference/Annular_Heat_Transfer_Final.pdf
+        Sign convention confirmed against Annular_Heat_Transfer_Final.pdf
         Eq. (2), which carries the same -q'''*r^2/4 term for the general (annular) case
         this is the r_i=0 special case of -- see docs/OPEN_QUESTIONS.md Q17 item 4,
         where a different source document had the sign the other way and the PDF (and
@@ -57,14 +39,7 @@ def Cyl_HT(r, q_vol, kint, C):
 
 
 def Cyl_Theta(r, rfo, q3, Theta_fo):
-    """
-    Conductivity integral at radius r in a solid pellet, given its value at the surface.
-
-    Why this model is here:
-        The temperature-dependent counterpart of Cyl_HT, and the forward half of the
-        radial solve the manual describes in section 4.3. Everything downstream that
-        needs a temperature inverts this once; everything that needs only a flux does
-        not need it at all.
+    """Conductivity integral at radius r in a solid pellet, given its value at the surface.
 
     Formulation:
         The annular solution Theta = -q3/4*r^2 + C1*log(r) + C2 collapses for a solid
@@ -87,8 +62,8 @@ def Cyl_Theta(r, rfo, q3, Theta_fo):
         conductivity model behind Theta.
 
     Reference:
-        docs/reference/PINTHA_Code_Summary.pdf section 4.3, and
-        docs/reference/Annular_Heat_Transfer_Final.pdf Eq. (2) with ri -> 0.
+        PINTHA_Code_Summary.pdf section 4.3, and
+        Annular_Heat_Transfer_Final.pdf Eq. (2) with ri -> 0.
 
     Inputs (float, numpy array, or torch tensor; broadcastable against each other):
         r        : radial position, m
@@ -102,13 +77,7 @@ def Cyl_Theta(r, rfo, q3, Theta_fo):
 
 
 def Cyl_qpp(r, q3):
-    """
-    Radial heat flux at radius r in a solid pellet.
-
-    Why this model is here:
-        The manual's section 4.3 asks for the heat flux at a specified radius alongside
-        the temperature solve. It needs no conductivity model at all -- only the heat
-        generated inside r has to cross the surface at r, so this follows from geometry.
+    """Radial heat flux at radius r in a solid pellet.
 
     Formulation:
         q''(r) = q3*r/2
@@ -123,7 +92,7 @@ def Cyl_qpp(r, q3):
         Not applicable -- an energy balance, not a correlation.
 
     Reference:
-        docs/reference/PINTHA_Code_Summary.pdf section 4.3.
+        PINTHA_Code_Summary.pdf section 4.3.
 
     Inputs (float, numpy array, or torch tensor; broadcastable against each other):
         r  : radial position, m
@@ -135,12 +104,7 @@ def Cyl_qpp(r, q3):
 
 
 def Cyl_qlin(r, q3):
-    """
-    Linear heat rate generated within radius r of a solid pellet.
-
-    Why this model is here:
-        The other half of the manual's section 4.3 request. Useful for checking that a
-        radial solve conserves energy, and for splitting a pellet into rings.
+    """Linear heat rate generated within radius r of a solid pellet.
 
     Formulation:
         q'(r) = 2*pi*r * q''(r) = pi*q3*r^2
@@ -155,7 +119,7 @@ def Cyl_qlin(r, q3):
         Not applicable -- an energy balance, not a correlation.
 
     Reference:
-        docs/reference/PINTHA_Code_Summary.pdf section 4.3.
+        PINTHA_Code_Summary.pdf section 4.3.
 
     Inputs (float, numpy array, or torch tensor; broadcastable against each other):
         r  : radial position, m
@@ -171,15 +135,7 @@ def Cyl_qlin(r, q3):
 
 def Cyl_T(r, rfo, q3, Theta_fo, Theta_func, k_func=None,
           T_lo=250.0, T_hi=4000.0, return_convergence=False):
-    """
-    Temperature at radius r in a solid pellet with temperature-dependent conductivity.
-
-    Why this model is here:
-        This is what the manual's section 4.3 actually asks for -- "solved iteratively
-        for T given the radius" -- and the piece Cyl_HT could not provide, since Cyl_HT
-        assumes a constant conductivity. UO2's conductivity falls by roughly half between
-        800 K and 1800 K, so a constant-k profile misplaces the centreline temperature of
-        a hot pin badly.
+    """Temperature at radius r in a solid pellet with temperature-dependent conductivity.
 
         Note the asymmetry with the annular case. There, the whole point of the scheme is
         that Theta is only ever evaluated forward. Here an inversion is unavoidable:
@@ -197,11 +153,6 @@ def Cyl_T(r, rfo, q3, Theta_fo, Theta_func, k_func=None,
         and the guarded bracketing of `torchsolve` is not needed -- unlike the
         supercritical wall-temperature solves, whose residual genuinely is non-monotone.
 
-        Passing k_func supplies dTheta/dT analytically and skips a graph build per Newton
-        step. properties.matmod.UO2.k_Klimenko is exactly the derivative of
-        Theta_Klimenko, which is the identity the Phase 3 conductivity-integral fix
-        established.
-
     Valid range:
         0 <= r <= rfo, and the true temperature inside [T_lo, T_hi]. Widen the bracket
         rather than assuming no solution exists.
@@ -210,7 +161,7 @@ def Cyl_T(r, rfo, q3, Theta_fo, Theta_func, k_func=None,
         Inherited from the conductivity model behind Theta_func.
 
     Reference:
-        docs/reference/PINTHA_Code_Summary.pdf section 4.3.
+        PINTHA_Code_Summary.pdf section 4.3.
 
     Inputs (float, numpy array, or torch tensor; broadcastable against each other):
         r          : radial position, m
@@ -231,14 +182,17 @@ def Cyl_T(r, rfo, q3, Theta_fo, Theta_func, k_func=None,
     from pinthac.solvers import bisect_newton
 
     Theta_target = Cyl_Theta(r, rfo, q3, Theta_fo)
-    target = torch.as_tensor(backend.np.asarray(Theta_target, dtype=float)
-                             if not isinstance(Theta_target, torch.Tensor) else Theta_target,
-                             dtype=torch.float64)
+    if isinstance(Theta_target, torch.Tensor):
+        target = Theta_target.to(dtype=torch.float64)
+    else:
+        target_array = backend.np.asarray(Theta_target, dtype=float)
+        target = torch.as_tensor(target_array, dtype=torch.float64)
 
     def residual(T):
         return Theta_func(T) - target
 
-    deriv = (lambda T: k_func(T)) if k_func is not None else None
+    # Conductivity is the derivative of the conductivity integral.
+    deriv = k_func
     lo = torch.full_like(target, T_lo)
     hi = torch.full_like(target, T_hi)
     T = bisect_newton(residual, lo, hi, deriv=deriv)

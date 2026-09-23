@@ -1,5 +1,4 @@
-"""
-Monte Carlo perturbation of model outputs, for propagating model-form uncertainty.
+"""Monte Carlo perturbation of model outputs, for propagating model-form uncertainty.
 
 Why this exists: every correlation and property model in this library carries a
 documented uncertainty band -- roughly +/- 25 percent for Dittus-Boelter, 5 to 7 percent
@@ -21,42 +20,34 @@ ENABLED = False
 SEED = 0
 
 _np_rng = backend.np.random.default_rng(SEED)
-_torch_generator = None
+_torch_generators = {}
 
 
 def enable(seed=0):
-    """
-    Switch perturbation on and reset the random streams to a known state.
-
-    Why this model is here:
-        A Monte Carlo study has to be reproducible to be worth anything -- a reviewer
-        must be able to regenerate the exact same error band. Seeding through this one
-        function, rather than letting callers seed the global numpy and torch generators
-        themselves, keeps the library's randomness separate from whatever else in the
-        process is drawing random numbers (a training loop's weight initialization, most
-        obviously).
+    """Switch perturbation on and reset the random streams to a known state.
 
     Inputs:
         seed : integer seed for both the numpy and torch streams
     Returns:
         None
     """
-    global ENABLED, SEED, _np_rng, _torch_generator
+    global ENABLED, SEED, _np_rng
     ENABLED = True
     SEED = seed
     _np_rng = backend.np.random.default_rng(seed)
-    if backend.TORCH_AVAILABLE:
-        _torch_generator = backend.torch.Generator().manual_seed(seed)
+    _torch_generators.clear()
+
+
+def _generator_for(device):
+    """Keep a seeded random stream on each tensor device."""
+    key = str(device)
+    if key not in _torch_generators:
+        _torch_generators[key] = backend.torch.Generator(device=device).manual_seed(SEED)
+    return _torch_generators[key]
 
 
 def disable():
-    """
-    Switch perturbation off. Every perturb() call then returns its input unchanged.
-
-    Why this model is here:
-        Off is the default and must stay cheap: a deterministic run should not pay for
-        random number generation it does not use, and, more importantly, a user who has
-        not asked for uncertainty must never silently receive a perturbed answer.
+    """Switch perturbation off. Every perturb() call then returns its input unchanged.
 
     Returns:
         None
@@ -66,8 +57,7 @@ def disable():
 
 
 def _sigma_ln(rel_sigma):
-    """
-    The lognormal width that reproduces a stated relative band.
+    """The lognormal width that reproduces a stated relative band.
 
     sigma_ln = ln(1 + rel_sigma), so a +/- 25 percent band becomes exp(+/-0.2231),
     i.e. 1.25 high and 0.80 low -- mirror images, and strictly positive.
@@ -76,14 +66,7 @@ def _sigma_ln(rel_sigma):
 
 
 def perturb(value, rel_sigma, lognormal=False):
-    """
-    Perturb a model output within its documented model-form uncertainty.
-
-    Why this model is here:
-        The single mechanism behind every uncertainty band this library produces. It is
-        applied at the point a model returns its answer, so the perturbation propagates
-        through everything downstream of that model exactly as a real modelling error
-        would.
+    """Perturb a model output within its documented model-form uncertainty.
 
     Formulation:
         value_perturbed = value * (1 + rel_sigma * z),   z ~ N(0, 1)
@@ -132,7 +115,7 @@ def perturb(value, rel_sigma, lognormal=False):
 
     if backend.is_torch(value):
         z = backend.torch.randn(value.shape, dtype=value.dtype, device=value.device,
-                                generator=_torch_generator)
+                                generator=_generator_for(value.device))
         if lognormal:
             return value * backend.torch.exp(_sigma_ln(rel_sigma) * z)
         return value * (1.0 + rel_sigma * z)
@@ -145,14 +128,7 @@ def perturb(value, rel_sigma, lognormal=False):
 
 
 def band(value, rel_sigma, n_samples, lognormal=False):
-    """
-    Draw n_samples independent perturbations of a single value.
-
-    Why this model is here:
-        The plotting path. A figure showing an uncertainty band around a property curve
-        needs many samples of the same curve, which perturb() alone cannot give -- it
-        draws one perturbation per element, not many per element. This stacks the samples
-        along a new leading axis so a caller can take percentiles across axis 0.
+    """Draw n_samples independent perturbations of a single value.
 
         Works regardless of the module-level switch, since asking for a band is itself an
         explicit request for perturbed values.
@@ -168,7 +144,7 @@ def band(value, rel_sigma, n_samples, lognormal=False):
     if backend.is_torch(value):
         shape = (n_samples,) + tuple(value.shape)
         z = backend.torch.randn(shape, dtype=value.dtype, device=value.device,
-                                generator=_torch_generator)
+                                generator=_generator_for(value.device))
         if lognormal:
             return value.unsqueeze(0) * backend.torch.exp(_sigma_ln(rel_sigma) * z)
         return value.unsqueeze(0) * (1.0 + rel_sigma * z)

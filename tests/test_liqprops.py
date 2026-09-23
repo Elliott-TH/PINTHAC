@@ -1,5 +1,4 @@
-"""
-Smoke tests for pinthac.properties.liqprops: does it import, does each of the eighteen
+"""Smoke tests for pinthac.properties.liqprops: does it import, does each of the eighteen
 property functions (Sodium/Lead/LBE x rho/sigma/cp/h/mu/k) accept a float, a numpy
 array and a torch tensor and return the matching type, does a torch input keep a
 finite gradient, does an out-of-range temperature warn exactly once.
@@ -7,21 +6,6 @@ finite gradient, does an out-of-range temperature warn exactly once.
 No number here was obtained by running the code under test -- the range/uncertainty
 bounds asserted are literal class attributes (Tm, Tb, range_*, uncert_*) copied straight
 out of the source, not values liqprops itself computed.
-
-Phase 3 (docs/brief/PHASE3_BRIEF.md item 4) adds SOBOLEV_TABLE-anchored tests below: at T = Tm,
-rho(T) and sigma(T) must equal Sobolev (2020) Table 7's/Table 9's rho_M,0/sigma_M,0
-constant exactly (the (T - Tm) term in both formulas is exactly zero there, so this is
-not a tolerance check -- it is the published table constant itself, read directly out of
-the PDF, not a value this module computed). cp, mu and k are anchored the same way, at
-T = Tm, against Sobolev's own Equation [12]/[17]/[22] evaluated with the coefficients
-transcribed independently below from Sobolev's Tables 10/11/13 (visually confirmed
-against the PDF page image, since pdftotext drops unicode minus signs in these tables) --
-an independent restatement of the published formula, not a call into liqprops itself.
-h(Tm) = 0 by construction (referenced to the melting point) is checked as a structural
-invariant; the T > Tm behavior of h() cannot be anchored to Sobolev's Equation [14] at
-all, because of the sign defect documented in Sodium.h's docstring and
-docs/OPEN_QUESTIONS.md -- not something this test suite can paper over by asserting a
-value this module's own (defective) formula happens to produce.
 """
 import math
 import warnings
@@ -120,12 +104,6 @@ def test_lead_range_rho_is_a_pair_not_a_bare_scalar():
     assert lm.Lead.range_rho[0] < lm.Lead.range_rho[1]
 
 
-# --------------------------------------------------- Sobolev (2020) anchors (Phase 3)
-# Every constant below is transcribed independently from Useful_pdfs/sobolev2020.pdf
-# (Tables 7, 9, 10, 11, 13; visually confirmed against the PDF page image where
-# pdftotext drops the unicode minus sign) -- not imported from liqprops.py, so a match
-# against the module's output is a genuine check against the published source, not a
-# self-referential run of the code under test.
 
 # Table 7: rho(T,p0) = rho_M,0 - A_rho,0*(T-TM,0); at T=Tm the second term vanishes, so
 # rho(Tm) must equal Table 7's rho_M,0 exactly, without any Sobolev-formula arithmetic.
@@ -214,24 +192,12 @@ def test_h_is_zero_at_the_melting_point(metal):
     assert metal.h(metal.Tm) == pytest.approx(0.0, abs=1.0E-6)
 
 
-# ---------------------------------------------------------------------------------------
-# Internal consistency: h must be the integral of cp.
-#
-# This is the check that caught the sign error on the d/T^2 term. It is worth keeping as a
-# permanent invariant because it needs no external data at all -- it holds the module
-# against itself, so it stays valid even for a metal or a temperature range nobody has
-# published a check value for. scipy's quadrature is the reference here, and it knows
-# nothing about h(); only cp() is passed to it.
-# ---------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
+# - Internal consistency: h must be the integral of cp.
 def test_enthalpy_is_the_integral_of_heat_capacity():
     from scipy.integrate import quad
 
     for metal in (lm.Sodium, lm.Lead, lm.LBE):
-        # Sample inside each metal's own validated enthalpy range rather than at fixed
-        # offsets from Tm. Fixed offsets overshoot: Lead's h is validated only to 1100 K,
-        # so Tm + 500 lands 0.6 K outside it and trips the RangeWarning that
-        # pyproject.toml escalates to an error in tests -- correctly, since that is a bad
-        # test input rather than a bad result.
         T_lo, T_hi = metal.range_h
         for frac in (0.1, 0.4, 0.9):
             T = T_lo + frac * (T_hi - T_lo)
@@ -248,6 +214,7 @@ def test_enthalpy_is_the_integral_of_heat_capacity():
 def test_enthalpy_is_zero_at_the_melting_point():
     """h is referenced to the melting point, so h(Tm) = 0 identically. This is what pins
     the constant of integration, and it is the half of the formula the sign error left
-    intact -- which is why the defect survived any check made at Tm alone."""
+    intact -- which is why the defect survived any check made at Tm alone.
+    """
     for metal in (lm.Sodium, lm.Lead, lm.LBE):
         assert float(np.atleast_1d(metal.h(np.array([metal.Tm])))[0]) == pytest.approx(0.0, abs=1e-12)

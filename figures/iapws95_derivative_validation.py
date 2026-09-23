@@ -1,6 +1,4 @@
-"""
-Validates IAPWS95 autograd derivatives against an independent finite-difference
-reference (docs/brief/PHASE67_BRIEF.md figure 2).
+"""Validates IAPWS95 autograd derivatives against an independent finite-difference
 
 rho_Tp() finds the density at fixed (T,p) with a Newton solve and then detaches the
 result (see its own docstring), so a naive torch.autograd.grad(rho_Tp(T,p), T) returns
@@ -39,8 +37,7 @@ OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 
 
 def ift_drho_dT(T, p):
-    """
-    drho/dT|_p via the implicit function theorem, reattaching rho_Tp's detached Newton
+    """drho/dT|_p via the implicit function theorem, reattaching rho_Tp's detached Newton
     solution to T's autograd graph.
 
     Inputs:
@@ -61,8 +58,7 @@ def ift_drho_dT(T, p):
 
 
 def finite_difference_drho_dT(T, p, eps=1e-3):
-    """
-    Independent reference: central finite difference of the black-box rho_Tp(T,p)
+    """Independent reference: central finite difference of the black-box rho_Tp(T,p)
     itself (two fresh Newton solves per point), not the IFT's analytic expression.
 
     Inputs:

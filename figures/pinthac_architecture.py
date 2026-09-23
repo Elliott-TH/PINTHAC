@@ -1,16 +1,9 @@
-"""
-PINTHAC module dependency diagram (docs/brief/PHASE67_BRIEF.md figure 6).
-
-Parses the actual import statements out of every pinthac/**/*.py source file with the
-`ast` module and draws the resulting package-level graph -- "the real import graph, not
-an idealized one," per the brief. This is a static-analysis tool, not a physics model:
-it reads source text and reports what it finds, so there are no numbers to validate here,
-only a faithful transcription of the repository's own `import` lines.
+"""PINTHAC module dependency diagram
 
 Package-level grouping (not per-file) so the diagram stays legible: every pinthac/foo/*.py
 file's imports are attributed to the `pinthac.foo` package node. Edges are deduplicated
 and, where they would violate the documented import direction
-(properties <- correlations <- pin <- sca <- ml, CLAUDE.md section 8), flagged in the
+(properties <- correlations <- pin <- sca <- ml, CONTRIBUTING.md section 8), flagged in the
 printed report so a genuine layering violation cannot silently vanish into "the diagram
 looked fine."
 """
@@ -23,15 +16,14 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PKG_ROOT = os.path.join(REPO_ROOT, "pinthac")
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 
-# Layer order per CLAUDE.md section 8 -- used only to flag upward edges in the printed
+# Layer order per CONTRIBUTING.md section 8 -- used only to flag upward edges in the printed
 # report, not to hide or reroute anything drawn.
 LAYER_ORDER = ["backend", "ranges", "uncertainty", "solvers", "paths",
                "properties", "correlations", "pin", "sca", "ml"]
 
 
 def module_package(rel_path):
-    """
-    'pinthac/sca/rod.py' -> 'sca'; 'pinthac/backend.py' -> 'backend'.
+    """'pinthac/sca/rod.py' -> 'sca'; 'pinthac/backend.py' -> 'backend'.
 
     Inputs:
         rel_path : path of a .py file relative to the pinthac/ package root
@@ -45,8 +37,7 @@ def module_package(rel_path):
 
 
 def collect_imports():
-    """
-    Walk every pinthac/**/*.py file and record, per source package, every module it
+    """Walk every pinthac/**/*.py file and record, per source package, every module it
     imports -- both other pinthac packages and external third-party packages.
 
     Inputs: none
@@ -90,8 +81,7 @@ def _record(dotted_name, src_pkg, internal_edges, external_edges):
 
 
 def report_layering_violations(internal_edges):
-    """
-    Print any edge that points from a later layer to an earlier one, per CLAUDE.md's
+    """Print any edge that points from a later layer to an earlier one, per CONTRIBUTING.md's
     stated one-way import direction -- a real finding if any turn up, not decoration.
     """
     rank = {name: i for i, name in enumerate(LAYER_ORDER)}
@@ -127,10 +117,6 @@ def main():
     draw(internal_edges, external_edges, os.path.join(OUT_DIR, "pinthac-architecture.svg"))
 
 
-# Fixed layout: hand-placed per layer so the diagram reads top-to-bottom in the documented
-# import order, rather than a force-directed layout that would place nodes differently on
-# every run. Positions are cosmetic only -- the edges drawn are exactly what collect_imports()
-# found in the source, not an idealized subset.
 LAYOUT = {
     "backend": (0.5, 5), "ranges": (2.3, 5), "uncertainty": (4.1, 5), "solvers": (5.9, 5),
     "paths": (7.7, 5),
@@ -140,16 +126,11 @@ LAYOUT = {
     "sca": (1.5, 1),
     "ml": (1.5, 0),
 }
-# External nodes sit in one shared column to the right of the internal packages --
-# deduplicated across all of pinthac (torch, say, is used by six different packages, and
-# is drawn once with six incoming edges) rather than repeated per package, which is what
-# made an earlier version of this diagram an unreadable wall of overlapping text.
 EXTERNAL_X = 9.8
 
 
 def layer_stats():
-    """
-    Module names and line counts per layer, read off the repository.
+    """Module names and line counts per layer, read off the repository.
 
     Why this is here: the first version of this figure showed only which layer imports
     which, which is true but tells a reader almost nothing they could not guess from the
@@ -179,8 +160,7 @@ def layer_stats():
 
 
 def draw(internal_edges, external_edges, out_path):
-    """
-    Draw the layer stack, with each layer's contents and size.
+    """Draw the layer stack, with each layer's contents and size.
 
     The drawing is deliberately lossy where the printed report is not. Internal edges
     become the layer chain; anything that skips a layer is still counted and printed by

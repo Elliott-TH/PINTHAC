@@ -1,5 +1,4 @@
-"""
-DeepONet-PINN surrogate for the rod SCA (SCA_IAPWS95_Rod.run_SCA_batch()).
+"""DeepONet-PINN surrogate for the rod SCA (SCA_IAPWS95_Rod.run_SCA_batch()).
 
 SCA_PINN.py's plain MLP-PINN maps (z, *scalar params*) -> outputs, which
 works because every training run there shares the *same* q0*cos(pi z/L)
@@ -36,10 +35,6 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 from pytorch_optimizer.optimizer.soap import SOAP as Soap
-# SSBroyden (Urban, Stefanou & Pons 2025) is used only for the optional polish stage
-# at the end of training. Its source is not in this repository -- see
-# docs/OPEN_QUESTIONS.md Q24 -- so the import is guarded and training falls back to
-# SOAP alone when it is absent, rather than making the whole module unimportable.
 try:
     from ssbroyden import SSBroyden
     SSBROYDEN_AVAILABLE = True
@@ -174,13 +169,15 @@ class DeepONet(nn.Module):
     def combine(self, branch_out, trunk_out):
         """branch_out: (batch, n_out, p), trunk_out: (batch, p) -- already
         row-aligned (one branch embedding per row, pre-expanded by the
-        caller). Returns (batch, n_out) normalized predictions."""
+        caller). Returns (batch, n_out) normalized predictions.
+        """
         return (branch_out * trunk_out.unsqueeze(1)).sum(dim=-1) + self.out_bias
 
     def predict(self, branch_phys, z_phys):
         """branch_phys: (batch, n_branch_in), z_phys: (batch,1), both
         already row-aligned and in physical units. Returns (batch, n_out)
-        in physical units."""
+        in physical units.
+        """
         xb_n = (branch_phys - Xb_mean) / Xb_std
         z_n = (z_phys - z_mean) / z_std
         y_n = self.combine(self.branch_forward(xb_n), self.trunk_forward(z_n))
@@ -218,7 +215,8 @@ def sample_collocation(n):
     """Fresh random (geometry, LHGR shape, z) collocation draws, from the
     exact same distribution SCA_Rod_DataGen.py used to build the training
     set -- so the physics term regularizes the same input space the data
-    loss covers, not some separately-tuned box."""
+    loss covers, not some separately-tuned box.
+    """
     lo = np.array([PARAM_BOUNDS[k][0] for k in SCALAR_NAMES])
     hi = np.array([PARAM_BOUNDS[k][1] for k in SCALAR_NAMES])
     scalars = lo + np.random.rand(n, len(SCALAR_NAMES))*(hi - lo)
@@ -289,20 +287,6 @@ def relative_errors(run_ids):
     return {name: (rel[:, i].mean(), rel[:, i].max()) for i, name in enumerate(OUT_NAMES)}
 
 
-# =====================================================================
-# Training: SOAP (mini-batch, noisy objective) gets most of the way
-# there, same structure as SCA_PINN.py; SSBroyden -- Urban, Stefanou &
-# Pons (2025), see ssbroyden.py -- then polishes the last stretch with
-# second-order steps and a strong-Wolfe line search, the way that paper
-# refines PINNs/DeepONets past SOAP/Adam. The loss-history plot from an
-# earlier run of this script (sca_rod_deeponet_loss.png) plateaus in val
-# loss well before its 200k SOAP epochs finish -- occasional raw-loss
-# spikes after that from rare bad physics-residual collocation draws
-# (clipped before they reach the optimizer, so harmless to the fit) are
-# the only thing still moving -- hence cutting SOAP off around 25k and
-# handing the rest to a method suited to fine convergence instead of
-# grinding out another 175k noisy-batch epochs for no further gain.
-# =====================================================================
 if __name__ == '__main__':
     soap_epochs = 25000
     phys_warmup_epochs = 2000
@@ -360,10 +344,6 @@ if __name__ == '__main__':
     branch_phys_c, z_c, q_sensors_c, pitch_c, rco_c, G_c = sample_collocation(polish_colloc)
 
     if not SSBROYDEN_AVAILABLE:
-        # The import at the top of this module is already guarded, but the use site was
-        # not -- so a full training run completed its SOAP phase and then died here.
-        # Nothing is lost when this stage is skipped: the best checkpoint is saved during
-        # the main loop, and this is a polish pass on an already-converged model.
         print('SSBroyden unavailable (see docs/OPEN_QUESTIONS.md Q24) -- '
               'skipping the polish stage; the SOAP checkpoint is already saved.')
         # SystemExit rather than return: this block is the script's __main__ body, not a
@@ -409,12 +389,6 @@ if __name__ == '__main__':
                 torch.save(model.state_dict(), WEIGHTS_FILE)
             print(f"  polish {it:5d}  loss {loss:.6e}  val {val_loss:.6e}")
 
-    # Eval/plotting on CPU, same as SCA_PINN.py -- it's a few thousand
-    # points through a small net either way, so there's no real cost to
-    # not gambling on the GPU context still being alive by the time this
-    # runs, and it sidesteps the batch-size-vs-VRAM tradeoff entirely for
-    # this part. model.predict()/relative_errors() close over Xb_mean/
-    # Xb_std/z_mean/z_std/Y_mean/Y_std, so those move too.
     device = torch.device('cpu')
     model.to(device)
     model.load_state_dict(torch.load(WEIGHTS_FILE, map_location=device, weights_only=True))

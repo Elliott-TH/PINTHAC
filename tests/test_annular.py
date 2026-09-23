@@ -1,10 +1,4 @@
-"""
-Smoke tests for pinthac.pin.annular: does it import, does Ann_HT/Ann_qpp accept a
-float / numpy array / torch tensor and return the matching type with a finite gradient
-(including the pre-cleanup failure case of float radii paired with tensor Theta_i/
-Theta_o), does Ann_Theta build a working interpolant, does the energy-balance invariant
-q_i + q_o = q'''*pi*(ro^2-ri^2) hold -- the check docs/DECISIONS.md names for the
-Q18 sign-convention decision.
+"""Smoke tests for pinthac.pin.annular: does it import, does Ann_HT/Ann_qpp accept a
 
 No RANGES table exists in this module, so there is no out-of-range-warns test here. No
 asserted number was obtained by running the code under test.
@@ -41,8 +35,6 @@ def test_ann_theta_zero_at_T_ref():
 
 # -------------------------------------------------------------------------------- Ann_HT
 def test_ann_ht_backend_contract_with_float_radii_and_tensor_theta():
-    # The pre-cleanup failure this targets: lib.log(ri) with float radii, resolved via
-    # a tensor Theta_i/Theta_o/q3 -- torch.log rejects a bare float outright.
     Theta_i = torch.tensor([2500.0, 2600.0], dtype=torch.float64, requires_grad=True)
     Theta_o = torch.tensor([2100.0, 2150.0], dtype=torch.float64, requires_grad=True)
     q3 = torch.tensor([3.0e8, 3.1e8], dtype=torch.float64, requires_grad=True)
@@ -76,10 +68,6 @@ def test_ann_qpp_backend_contract():
 
 # ------------------------------------------------------------------- energy balance
 def test_energy_balance_invariant_q_i_plus_q_o_equals_generation():
-    # docs/DECISIONS.md closes Q18 by naming this invariant, q_i + q_o =
-    # q'''*pi*(ro^2-ri^2), as the annular closure's own test -- checked here directly
-    # against Ann_HT/Ann_qpp with the signed +r convention and the minus sign at the
-    # inner surface that Ann_HT's docstring documents.
     ri, ro = 0.0035, 0.0055
     q3 = 3.0e8
     Theta = ann.Ann_Theta(kf_const, T_ref=300.0, T_max=3600.0, n=4000)
@@ -150,14 +138,16 @@ def test_flux_split_matches_an_independent_root_solve(label, q_lin, Tm_i, Tm_o, 
 def test_flux_split_conserves_energy_exactly(label, q_lin, Tm_i, Tm_o, htc_i, htc_o):
     """The C1 terms cancel out of q_i + q_o identically, so energy balance holds at every
     iterate and not merely at convergence. Checked to machine precision, not a tolerance:
-    anything looser would hide a real error in the flux relation."""
+    anything looser would hide a real error in the flux relation.
+    """
     q_i, q_o, _, _ = ann.Ann_flux_split(RI, RO, q_lin, Tm_i, Tm_o, htc_i, htc_o, _theta)
     assert float(q_i + q_o) == pytest.approx(q_lin, rel=1.0e-12)
 
 
 def test_energy_balance_holds_even_when_unconverged():
     """The invariant above is the reason an unconverged result is still usable: it is
-    wrong about the split, never about the total."""
+    wrong about the split, never about the total.
+    """
     for n_iter in (1, 2, 3, 7):
         q_i, q_o, _, _ = ann.Ann_flux_split(RI, RO, 25.0e3, 600.0, 750.0, 2.0e4, 8.0e3,
                                              _theta, n_iter=n_iter)
@@ -166,7 +156,8 @@ def test_energy_balance_holds_even_when_unconverged():
 
 def test_more_heat_goes_to_the_better_cooled_surface():
     """Structural check with no fitted number in it. Hold everything symmetric, then make
-    the inner side both colder and better cooled; its share must rise."""
+    the inner side both colder and better cooled; its share must rise.
+    """
     balanced = ann.Ann_flux_split(RI, RO, 25.0e3, 650.0, 650.0, 1.5e4, 1.5e4, _theta)[0]
     favoured = ann.Ann_flux_split(RI, RO, 25.0e3, 600.0, 750.0, 2.0e4, 8.0e3, _theta)[0]
     assert float(favoured) > float(balanced)
@@ -175,7 +166,8 @@ def test_more_heat_goes_to_the_better_cooled_surface():
 def test_inner_flux_reverses_when_its_coolant_is_hotter_than_the_fuel():
     """A dual-cooled pin whose inner channel has run hot genuinely absorbs heat into the
     fuel there. Negative q_i is a physical regime, not a solver failure -- this pins that
-    behaviour so a future 'fix' that clamps it to zero fails here."""
+    behaviour so a future 'fix' that clamps it to zero fails here.
+    """
     q_i, _, _, _ = ann.Ann_flux_split(RI, RO, 25.0e3, 780.0, 600.0, 1.5e4, 2.5e4, _theta)
     assert float(q_i) < 0.0
 

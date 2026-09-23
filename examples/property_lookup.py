@@ -1,5 +1,4 @@
-"""
-Example 1: property lookup -- water (IAPWS-95) and a liquid metal (sodium).
+"""Example 1: property lookup -- water (IAPWS-95) and a liquid metal (sodium).
 
 The most basic thing this library does: given a temperature (and, for water, a
 pressure), return a physically consistent set of thermophysical properties. Everything
@@ -8,7 +7,7 @@ built on top of exactly this call.
 
 Two paths are shown:
   1. Direct use of properties.iapws95.IAPWS95 -- the differentiable GPU/CPU equation of
-     state, verified against 27 published IAPWS check values
+     state, verified against the published IAPWS check tables
      (tests/test_iapws_verification.py; see README.md's validation section).
   2. properties.getprop._getprop, the single dispatcher every correlation in this
      library actually calls, shown here for both water and sodium so the same function
@@ -25,10 +24,12 @@ from pinthac.properties import liqprops
 
 
 def scalar(x):
-    """First element as a plain float, whether x is a numpy array or a torch tensor
-    (IAPWS-97's Sigma.sigma -- reached through getprop's 'sigma' key -- returns a torch
-    tensor even for a numpy input; this is a print helper only, not part of the
-    library's own backend contract)."""
+    """First element as a plain float, whether x is a numpy array or a torch tensor.
+
+    A print helper only, not part of the library's own backend contract -- every
+    property call below returns the same kind of object it was given, so on the numpy
+    inputs used here they all come back as numpy arrays.
+    """
     if hasattr(x, "detach"):
         x = x.detach().cpu().numpy()
     return float(np.ravel(np.asarray(x))[0])
@@ -57,11 +58,6 @@ def main():
     print(f"  mu  = {scalar(mu):.6e} Pa-s")
     print(f"  k   = {scalar(k):.4f} W/m-K")
 
-    # --- Water, through the shared dispatcher --------------------------------------
-    # This is the call every correlation in correlations/htc.py and
-    # correlations/friction.py actually makes -- same numbers as above (h, cp here come
-    # back in getprop's own default units -- J/kg, J/kg-K), uniform 'Props' dict shape
-    # (plus surface tension, from IAPWS-97's Sigma module).
     props_water = _getprop("Water", T, p)
     print("\nWater via getprop._getprop('Water', ...): keys =", sorted(props_water.keys()))
     print(f"  sigma = {scalar(props_water['sigma']):.5f} N/m")

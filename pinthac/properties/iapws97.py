@@ -1,792 +1,1409 @@
+"""IAPWS-IF97: the Industrial Formulation 1997 for the Thermodynamic Properties of Water
+and Steam.
+
+Why this module is here:
+    IF97 is the fast, non-iterative counterpart to the IAPWS-95 scientific formulation in
+    iapws95.py. IAPWS-95 is a single Helmholtz surface in (rho, T) that has to be
+    inverted whenever the state is given as (p, T) or (p, h), which is almost always;
+    IF97 instead divides the (p, T) plane into five regions, each with its own explicit
+    equation in the variables a plant engineer actually has, plus backward equations that
+    give T(p,h) and T(p,s) with no iteration at all. That is why it is the formulation
+    every system code uses for steady-state property lookups, and why it is worth having
+    beside IAPWS-95 rather than instead of it.
+
+    Accuracy is the trade. IF97 reproduces IAPWS-95 to within the tolerances of Table 23
+    and Table 28 rather than exactly, and the region boundaries are visible as small
+    discontinuities. Where the answer has to be thermodynamically consistent -- inside a
+    solver, or anywhere a derivative is taken -- use iapws95.py. Where a fast, repeatable
+    (p, T) or (p, h) lookup is wanted, use this.
+
+The five regions, in the same order as the release:
+
+    Region 1 : compressed liquid, 273.15 K <= T <= 623.15 K, p_sat(T) <= p <= 100 MPa
+    Region 2 : steam, 273.15 K <= T <= 1073.15 K, p up to the B23 line / 100 MPa
+    Region 3 : the region around the critical point, bounded below by 623.15 K and above
+               by the B23 line. Its basic equation is a Helmholtz energy in (rho, T),
+               not a Gibbs energy in (p, T), so it is the one region that has to be
+               inverted for density.
+    Region 4 : the saturation line itself -- one equation, p_sat(T), and its inverse.
+    Region 5 : high-temperature steam, 1073.15 K <= T <= 2273.15 K, p <= 50 MPa.
+
+Shape of the interface, which is the same as iapws95.py's:
+    Each region class has one function that evaluates the dimensionless potential and
+    every derivative of it that any property needs, and returns them in a dict -- gibbs()
+    for regions 1, 2 and 5, helmholtz() for region 3. Every property is then a cheap,
+    closed-form read off that dict:
+
+        d = R1.gibbs(3.0, 300.0)      # p [MPa], T [K]
+        R1.h(d)                        # J/kg
+        R1.rho(d)                      # kg/m^3
+
+    Doing it this way means a state is evaluated once no matter how many properties are
+    wanted from it, and it keeps the published derivative tables (Tables 4, 13, 14, 32,
+    40 and 41) in one place each, where they can be checked against the release.
+
+    Transport properties are deliberately NOT here. Viscosity, thermal conductivity and
+    surface tension are separate IAPWS releases on a different variable basis, and they
+    live in properties/iapws_transport.py.
+
+Reference:
+    IAPWS R7-97(2012), "Revised Release on the IAPWS Industrial Formulation 1997 for the
+    Thermodynamic Properties of Water and Steam" (IAPWS_97.pdf). Equation,
+    table and section numbers in the docstrings below all refer to that document.
+"""
+import os
+
 import numpy as np
 import torch
-import functools
-import os
-torch.set_default_dtype(torch.float64)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# The published coefficient tables are data, not code, so they sit in their own
-# directory beside this module rather than alongside the source files.
+
+from pinthac.properties import iapws_backend as w
+
+# The published coefficient tables are data, not code, so they sit in their own directory
+# beside this module rather than alongside the source files.
 pth = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'iapws_data')
 
-#====================
-#Critical Properties
-#====================
+device = w.device
+accelerator = w.accelerator
 
-Tc = 647.096 #Critical temperature [K]
-rhoc = 322  #Critical density	[kg m⁻³]
-#R = 0.46151805 #Specific gas constant [kJ kg⁻¹ K⁻¹]
-R = 0.461526
-Tt = 273.16 #Triple-point temperature [K]
-pt = 0.000611654771 #Triple-point pressure [MPa]
-pc = 22.064 #MPa
+# ====================
+# Reference Constants
+# ====================
+# IF97 Eq. (1) fixes its own specific gas constant, and it is NOT the IAPWS-95 value
+# (0.46151805 kJ/kg/K). The difference is 8e-6 relative, far below the formulation's own
+# tolerances, but each release must be evaluated with the constant it was fitted with.
 
-def iapws_input(func):
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        new_args = []
-        for a in args:
-            if isinstance(a, torch.Tensor):
-                new_args.append(a.reshape(-1).to(dtype=torch.float64, device=device))
-            elif isinstance(a, str) or isinstance(a, type):  # skip str and cls
-                new_args.append(a)
-            else:
-                new_args.append(torch.atleast_1d(torch.tensor(a, dtype=torch.float64, device=device)))
-        result = func(*new_args, **kwargs)
-        if isinstance(result, torch.Tensor):
-            return result.squeeze()
-        return result
-    return wrapper
+R = 0.461526         # Specific gas constant [kJ kg^-1 K^-1], Eq. (1)
+Tc = 647.096         # Critical temperature [K], Eq. (2)
+pc = 22.064          # Critical pressure [MPa], Eq. (3)
+rhoc = 322.0         # Critical density [kg m^-3], Eq. (4)
+Tt = 273.16          # Triple-point temperature [K]
+pt = 611.657e-6      # Triple-point pressure [MPa]
 
-class R1():
-    #============
-    # Region One
-    #============
+# ====================
+# Region boundaries
+# ====================
 
-    #Range
-    #273.15 K < T < 623.15 K
-    #p_s(T) < p < 100 MPa
-
-    pstar = 16.53
-    Tstar = 1386
-
-    Coeff = np.loadtxt(f'{pth}/IAPWS_97_Region1.txt')
-    Coeff = torch.from_numpy(Coeff).to(device)
-    I, J, n = Coeff[:,0:1], Coeff[:,1:2], Coeff[:,2:3]
+T_min = 273.15       # Lower temperature limit of regions 1 and 2 [K]
+T_13 = 623.15        # Region 1 / region 3 boundary temperature [K]
+T_25 = 1073.15       # Region 2 / region 5 boundary temperature [K]
+# The two ends of the B23 line, Sec. 4: it runs from 623.15 K at 16.5292 MPa to 863.15 K
+# at 100 MPa. Those are therefore also the lowest pressure and the highest temperature
+# anywhere in region 3, which is what makes them worth naming.
+p_13 = 16.5291643    # Lowest pressure in region 3 [MPa]
+T_3max = 863.15      # Highest temperature in region 3 [K]
+T_max = 2273.15      # Upper temperature limit of region 5 [K]
+p_max = 100.0        # Upper pressure limit of regions 1, 2 and 3 [MPa]
+p_5max = 50.0        # Upper pressure limit of region 5 [MPa]
 
 
-    Tph_coeff = np.loadtxt(f'{pth}/Region1_ph.txt')
-    Tph_coeff = torch.from_numpy(Tph_coeff).to(device)
-    Iph, Jph, nph = Tph_coeff[:,0:1], Tph_coeff[:,1:2], Tph_coeff[:,2:3]
-
-    Tps_coeff = np.loadtxt(f'{pth}/Region1_ps.txt')
-    Tps_coeff = torch.from_numpy(Tps_coeff).to(device)
-    Ips, Jps, nps = Tps_coeff[:,0:1], Tps_coeff[:,1:2], Tps_coeff[:,2:3]
-
+class B23:
+    # =========================================
+    # Table 1: B23-equation coefficients
+    # =========================================
+    n = torch.tensor([
+        0.34805185628969e3, -0.11671859879975e1, 0.10192970039326e-2,
+        0.57254459862746e3, 0.13918839778870e2
+    ], dtype=w.dtype)
 
     @classmethod
-    @iapws_input
-    def Gamma(cls,p,T):
-        T = T.unsqueeze(0)
-        p = p.unsqueeze(0)
-        pi = p/cls.pstar
-        tau = cls.Tstar/T
-        n, I, J = cls.n, cls.I,cls.J
-        A = 7.1 - pi
-        B = tau - 1.222
-        g = (n * (A)**I * (B)**J).sum(dim=0)
-        g_p = (-n * I * (A)**(I-1) * (B)**J).sum(dim=0)
-        g_pp = (-n * I *(I-1)* (A)**(I-2) * (B)**J).sum(dim=0)
-        g_t = (n * J * (A)**I * (B)**(J-1)).sum(dim=0)
-        g_tt = (n * J * (J-1) * (A)**I * (B)**(J-2)).sum(dim=0)
-        g_pt = (-n*J*I*A**(I-1)*B**(J-1)).sum(dim=0)
-        return g, g_p, g_pp, g_t, g_tt, g_pt
-
-    @classmethod
-    @iapws_input
-    def Prop(cls,p,T,prop):
-        pi = p/cls.pstar
-        tau = cls.Tstar/T
-        g, g_p, g_pp, g_t, g_tt, g_pt = cls.Gamma(p,T)
-
-        def vol():
-            val = pi * g_p
-            out = R*T/p * val * 1e-3
-            return out
-        def u():
-            val = tau*g_t - pi*g_p
-            out = R*T*val
-            return out
-
-        def h():
-            val = tau*g_t
-            out = R*T*val
-            return out
-
-        def s():
-            val = R*(tau*g_t - g)
-            return val
-
-        def cp():
-            val = -R*tau**2 * g_tt
-            return val
-
-        def cv():
-            numr = (g_p - tau*g_pt)**2
-            val = R*(numr/g_pp-tau**2*g_tt)
-            return val
-
-        props = {
-            "vol": vol,
-            "u": u,
-            "s": s,
-            "h": h,
-            "cp":cp,
-            "cv":cv
-        }
-        return props[prop]()
-
-    @classmethod
-    @iapws_input
-    def Tph(cls,p,h):
-        Tstar = 1 #K
-        pstar = 1
-        p = p.unsqueeze(0)#p[None,:]
-        h = h.unsqueeze(0)#h[None,:]
-        pi = p/pstar
-        hstar = 2500
-        eta = h/hstar
-        val = cls.nph * pi**cls.Iph * (eta+1)**cls.Jph
-        val_sum = val.sum(dim=0)
-        out = Tstar * val_sum
-        return out
-
-    @classmethod
-    @iapws_input
-    def Tps(cls,p,s):
-        Tstar = 1 #K
-        s_star = 1
-        pstar = 1
-        p = p.unsqueeze(0)#p[None,:]
-        s = s.unsqueeze(0)#s[None,:]
-        pi = p/pstar
-        sigma = s/s_star
-        val = cls.nps * pi**cls.Ips * (sigma+2)**cls.Jps
-        val_sum = val.sum(dim=0)
-        out = Tstar * val_sum
-        return out
-'''
-pval = torch.tensor([6.89])
-Tval = torch.tensor([265+273.15])
-hval = torch.tensor([1159.3766])
-print(R1.Prop(pval,Tval,'h'))
-print(R1.Tph(pval,hval)-273.15)
-'''
-class R2:
-    Coeff_Ideal = np.loadtxt(f'{pth}/Region2_Ideal.txt')
-    Coeff_Res = np.loadtxt(f'{pth}/Region2_Res.txt')
-    Coeff_I = torch.from_numpy(Coeff_Ideal).to(device)
-    Coeff_R = torch.from_numpy(Coeff_Res).to(device)
-
-    #Ideal model Coeffs
-    J_id, n_id = Coeff_I[:,0:1], Coeff_I[:,1:2]
-
-    #Res Coeffs
-    I_r, J_r, n_r = Coeff_R[:,0:1], Coeff_R[:,1:2], Coeff_R[:,2:3]
-    @classmethod
-    @iapws_input
-    def Ideal(cls,p,T):
-        p = p.unsqueeze(0)
-        T = T.unsqueeze(0)
-        pstar = 1
-        Tstar = 540
-        tau = Tstar/T
-        pi = p/pstar
-        n, J = cls.n_id, cls.J_id
-        seq = n* tau**(J)
-
-        g = torch.log(pi) + seq.sum(dim=0) #gamma
-        g_p = 1/pi
-        g_pp = -1/pi**2
-        g_t = (n*J*tau**(J-1)).sum(dim=0)
-        g_tt = (n*J*(J-1)*tau**(J-2)).sum(dim=0)
-
-        return g, g_p, g_pp, g_t, g_tt
-
-    @classmethod
-    @iapws_input
-    def Residual(cls,p,T):
-        T = T.unsqueeze(0)
-        p = p.unsqueeze(0)
-        pstar = 1
-        Tstar = 540
-        tau = Tstar/T
-        pi = p/pstar
-        n, J, I = cls.n_r, cls.J_r, cls.I_r
-
-        t_1 = tau-0.5
-        g = (n*pi**I*t_1**J).sum(dim=0)
-        g_p = (n*I*pi**(I-1)*t_1**J).sum(dim=0)
-        g_pp = (n*I*(I-1)*pi**(I-2)*t_1**J).sum(dim=0)
-        g_t = (n*J*pi**I*t_1**(J-1)).sum(dim=0)
-        g_tt = (n*J*(J-1)*pi**(I)*t_1**(J-2)).sum(dim=0)
-        g_pt = (n*I*J*pi**(I-1)*t_1**(J-1)).sum(dim=0)
-        return g, g_p, g_pp, g_t, g_tt, g_pt
-
-    @classmethod
-    @iapws_input
-    def Prop(cls, p,T,prop):
-        g0, g0_p, g0_pp, g0_t, g0_tt = cls.Ideal(p,T)
-        gr, gr_p, gr_pp, gr_t, gr_tt, gr_pt = cls.Residual(p,T)
-        pstar = 1
-        Tstar = 540
-        pi = p/pstar
-        tau = Tstar/T
-        def vol():
-            val = R*T/p * pi * (g0_p + gr_p) * 1e-3
-            return val
-        def u():
-            val = R*T*(tau*(g0_t+gr_t)-pi*(g0_p + gr_p))
-            return val
-        def s():
-            val = R*(tau*(g0_t+gr_t)-(g0+gr))
-            return val
-        def h():
-            val = R*T*(tau*(g0_t+gr_t))
-            return val
-
-        def cp():
-            val = -R*(g0_tt+gr_tt)
-            return val
-        def cv():
-            numr = (1+pi*gr_p-tau*pi*gr_pt)**2
-            denom = 1-pi**2 * gr_pp
-            val = -R*((g0_tt+gr_tt)-numr/denom)
-            return val
-        props = {
-            "vol": vol,
-            "u": u,
-            "s": s,
-            "h": h,
-            "cp":cp,
-            "cv":cv
-        }
-        return props[prop]()
-
-    # Load backward coefficients
-    Tph_2a = torch.from_numpy(np.loadtxt(f'{pth}/Region2_ph_2a.txt')).to(device)
-    Tph_2b = torch.from_numpy(np.loadtxt(f'{pth}/Region2_ph_2b.txt')).to(device)
-    Tph_2c = torch.from_numpy(np.loadtxt(f'{pth}/Region2_ph_2c.txt')).to(device)
-
-    Tps_2a = torch.from_numpy(np.loadtxt(f'{pth}/Region2_ps_2a.txt')).to(device)
-    Tps_2b = torch.from_numpy(np.loadtxt(f'{pth}/Region2_ps_2b.txt')).to(device)
-    Tps_2c = torch.from_numpy(np.loadtxt(f'{pth}/Region2_ps_2c.txt')).to(device)
-
-    # B2bc boundary coefficients (Table 19)
-    B2bc_n = torch.tensor([
-        0.90584278514723e3,
-        -0.67955786399241,
-        0.12809002730136e-1,
-        0.26526571908428e4,
-        0.45257578905948e1,
-    ], dtype=torch.float64, device=device)
-
-    @classmethod
-    @iapws_input
-    def _h_B2bc(cls, p):
-        """Boundary enthalpy between 2b and 2c given p [MPa], Eq. (21)"""
-        n = cls.B2bc_n
-        pi = p / 1.0  # p* = 1 MPa
-        eta = n[3] + ((pi - n[4]) / n[2])**0.5
-        return eta * 1.0  # h* = 1 kJ/kg
-
-    @classmethod
-    @iapws_input
-    def _eval_backward(cls, coeff, p, x, pstar, xstar, x_shift):
-        """Generic backward equation evaluator"""
-        I = coeff[:, 0:1]
-        J = coeff[:, 1:2]
-        n = coeff[:, 2:3]
-        p = p[None, :]
-        x = x[None, :]
-        pi    = p / pstar
-        sigma = x / xstar
-        val   = n * pi**I * (sigma + x_shift)**J
-        return val.sum(dim=0)
-
-    @classmethod
-    @iapws_input
-    def Tph(cls, p, h):
-        """T(p,h) for region 2, auto-selects subregion 2a/2b/2c
-        p [MPa], h [kJ/kg] -> T [K]
-        Subregions: 2a: p<=4, 2b: p>4 and h>=h_B2bc(p), 2c: p>4 and h<h_B2bc(p)
-        """
-        # pstar=1 MPa, hstar=2000 kJ/kg for all three subregions
-        pstar = 1.0
-        hstar = 2000.0
-
-        # Build output tensor
-        T_out = torch.zeros_like(p)
-
-        mask_2a = p <= 4.0
-        mask_hi = p > 4.0
-
-        # Subregion 2a
-        if mask_2a.any():
-            p_ = p[mask_2a]
-            h_ = h[mask_2a]
-            T_out[mask_2a] = cls._eval_backward(
-                cls.Tph_2a, p_, h_, pstar, hstar, x_shift=1.0)
-
-        # Subregions 2b and 2c
-        if mask_hi.any():
-            p_hi = p[mask_hi]
-            h_hi = h[mask_hi]
-            h_bnd = cls._h_B2bc(p_hi)
-
-            mask_2b = h_hi >= h_bnd
-            mask_2c = h_hi <  h_bnd
-
-            if mask_2b.any():
-                T_out[mask_hi.nonzero(as_tuple=True)[0][mask_2b]] = \
-                    cls._eval_backward(cls.Tph_2b, p_hi[mask_2b], h_hi[mask_2b],
-                                       pstar, hstar, x_shift=1.0)
-            if mask_2c.any():
-                T_out[mask_hi.nonzero(as_tuple=True)[0][mask_2c]] = \
-                    cls._eval_backward(cls.Tph_2c, p_hi[mask_2c], h_hi[mask_2c],
-                                       pstar, hstar, x_shift=1.0)
-        return T_out
-
-    @classmethod
-    @iapws_input
-    def Tps(cls, p, s):
-        """T(p,s) for region 2, auto-selects subregion 2a/2b/2c
-        p [MPa], s [kJ/kg·K] -> T [K]
-        Subregions: 2a: p<=4, 2b: p>4 and s>=5.85, 2c: p>4 and s<5.85
-        """
-        T_out = torch.zeros_like(p)
-
-        mask_2a = p <= 4.0
-        mask_hi = p > 4.0
-
-        # Subregion 2a: pstar=1, sstar=2
-        if mask_2a.any():
-            T_out[mask_2a] = cls._eval_backward(
-                cls.Tps_2a, p[mask_2a], s[mask_2a],
-                pstar=1.0, xstar=2.0, x_shift=2.0)
-
-        # Subregions 2b/2c split at s=5.85 kJ/kg·K
-        if mask_hi.any():
-            p_hi = p[mask_hi]
-            s_hi = s[mask_hi]
-            idx_hi = mask_hi.nonzero(as_tuple=True)[0]
-
-            mask_2b = s_hi >= 5.85
-            mask_2c = s_hi <  5.85
-
-            # Subregion 2b: pstar=1, sstar=0.7853
-            if mask_2b.any():
-                T_out[idx_hi[mask_2b]] = cls._eval_backward(
-                    cls.Tps_2b, p_hi[mask_2b], s_hi[mask_2b],
-                    pstar=1.0, xstar=0.7853, x_shift=10.0)
-
-            # Subregion 2c: pstar=1, sstar=2.9251
-            if mask_2c.any():
-                T_out[idx_hi[mask_2c]] = cls._eval_backward(
-                    cls.Tps_2c, p_hi[mask_2c], s_hi[mask_2c],
-                    pstar=1.0, xstar=2.9251, x_shift=2.0)
-
-        return T_out
-
-class RSAT():
-    Coeff = np.loadtxt(f'{pth}/Region4.txt')
-    C = torch.from_numpy(Coeff).to(device)
-    pstar = 1
-    tstar = 1
-    @classmethod
-    @iapws_input
     def p(cls, T):
-        tstar = cls.tstar
-        pstar = cls.pstar
-        c = cls.C
-        a = T/tstar
-        thet = a + c[8]/(a - c[9])
-        A = thet**2 + c[0]*thet + c[1]
-        B = c[2]*thet**2 + c[3]*thet + c[4]
-        C = c[5]*thet**2 + c[6]*thet + c[7]
-        val = pstar*((2*C)/(-B+(B**2-4*A*C)**0.5))**4
-        return val
-    @classmethod
-    @iapws_input
-    def T(cls, p):
-        tstar = cls.tstar
-        pstar = cls.pstar
-        n = cls.C
-        beta = (p/pstar)**(0.25)
-        G = n[1]*beta**2 + n[4]*beta+n[7]
-        F = n[0]*beta**2 + n[3]*beta+n[6]
-        E = beta**2 + n[2]*beta + n[5]
-        D = 2*G/(-F -(F**2-4*E*G)**(0.5))
-        numr = n[9]+D-((n[9]+D)**2-4*(n[8]+n[9]*D))**(0.5)
-        val = tstar/2 * numr
-        return val
-
-
-T_star   = 647.096   # K
-rho_star = 322.0     # kg/m³
-mu_star  = 1.00e-6   # Pa.s
-
-# ── Table 1: H_i for mu0 (dilute gas) ─────────────────────────────────────────
-H = torch.tensor([1.67752, 2.20462, 0.6366564, -0.241605], dtype=torch.float64, device=device)
-
-# ── Table 2: H_ij for mu1 (finite density) ────────────────────────────────────
-# Eq 12: mu1 = exp( rho_bar * SUM_i (1/T_bar - 1)^i * SUM_j H_ij*(rho_bar-1)^j )
-# i (rows, 0-5) -> temperature term
-# j (cols, 0-6) -> density term
-Hij = torch.zeros((6, 7), dtype=torch.float64)
-Hij[0,0] =  5.20094e-1;  Hij[1,0] =  8.50895e-2
-Hij[2,0] = -1.08374;     Hij[3,0] = -2.89555e-1
-Hij[0,1] =  2.22531e-1;  Hij[1,1] =  9.99115e-1
-Hij[2,1] =  1.88797;     Hij[3,1] =  1.26613
-Hij[5,1] =  1.20573e-1;  Hij[0,2] = -2.81378e-1
-Hij[1,2] = -9.06851e-1;  Hij[2,2] = -7.72479e-1
-Hij[3,2] = -4.89837e-1;  Hij[4,2] = -2.57040e-1
-Hij[0,3] =  1.61913e-1;  Hij[1,3] =  2.57399e-1
-Hij[0,4] = -3.25372e-2;  Hij[3,4] =  6.98452e-2
-Hij[4,5] =  8.72102e-3;  Hij[3,6] = -4.35673e-3
-Hij[5,6] = -5.93264e-4
-Hij = Hij.to(device)
-
-
-class VISC:
-
-    @classmethod
-    @iapws_input
-    def mu(cls, rho, T, drhodp_T=None, drhodp_TR=None):
-        """
-        Dynamic viscosity of water, IAPWS R12-08 Eq. (10).
-
-        Supply drhodp_T and drhodp_TR -- the isothermal compressibility (drho/dp)_T at
-        T and at T_R = 1.5*T* = 970.644 K, both in kg/m^3/MPa -- to include the critical
-        enhancement mu2. Omit them for the industrial simplification mu2 = 1 sanctioned
-        by Sec. 2.8 and Sec. 3.
-
-        Args:
-            rho : density      [kg/m³]   torch tensor, any shape
-            T   : temperature  [K]       torch tensor, same shape as rho
-        Returns:
-            mu  : viscosity    [Pa.s]    torch tensor, same shape as rho
-        """
-        T_bar   = T   / T_star
-        rho_bar = rho / rho_star
-
-        # ── mu0: dilute-gas contribution, Eq (11) ─────────────────────────────
-        # mu0_bar = 100 * sqrt(T_bar) / sum_k( H_k / T_bar^k )
-        T_pows = torch.stack([T_bar**(-k) for k in range(4)], dim=0)  # (4, ...)
-        denom  = (H.view(-1, *([1]*T_bar.dim())) * T_pows).sum(dim=0)
-        mu0    = 100.0 * torch.sqrt(T_bar) / denom
-
-        # ── mu1: finite-density contribution, Eq (12) ─────────────────────────
-        # mu1_bar = exp( rho_bar * SUM_i (1/T_bar-1)^i * SUM_j H_ij*(rho_bar-1)^j )
-        t_term   = 1.0 / T_bar - 1.0
-        rho_term = rho_bar - 1.0
-
-        t_pows   = torch.stack([t_term  **i for i in range(6)], dim=0)  # (6, ...)
-        rho_pows = torch.stack([rho_term**j for j in range(7)], dim=0)  # (7, ...)
-
-        # inner[i] = SUM_j H_ij * (rho_bar-1)^j
-        inner = (Hij[:, :, *([None]*rho_bar.dim())] * rho_pows[None]).sum(dim=1)  # (6, ...)
-
-        outer = (t_pows * inner).sum(dim=0)
-        mu1   = torch.exp(rho_bar * outer)
-
-        # ── mu2: critical enhancement, Eqs. (14)-(21) ─────────────────────────
-        # Omitted (mu2 = 1) unless the caller supplies the two isothermal
-        # compressibilities it needs. That is not a shortcut -- R12-08 Sec. 2.8 and
-        # Sec. 3 explicitly sanction mu2 = 1 for industrial use, and Table 4's check
-        # values are quoted for exactly that simplification. It is also why this
-        # module cannot compute mu2 on its own: Eq. (21) needs (drho/dp)_T from
-        # IAPWS-95, and IAPWS-95 imports this module, so the values have to come
-        # down from the caller rather than be fetched from here.
-        if drhodp_T is None or drhodp_TR is None:
-            mu2 = torch.ones_like(mu0)
-        else:
-            mu2 = cls._mu2(rho_bar, T_bar, drhodp_T, drhodp_TR)
-
-        return mu_star * mu0 * mu1 * mu2
-
-    # ── Critical-region constants, R12-08 Table 3 ─────────────────────────────
-    p_star  = 22.064      # MPa, R12-08 Eq. (3) -- module scope carries T*, rho* and mu*
-                          # but not p*, which only the critical enhancement needs
-    x_mu    = 0.068       # critical exponent for viscosity
-    qC_inv  = 1.9e-9      # m
-    qD_inv  = 1.1e-9      # m  (note: R15-11 uses 0.40 nm for conductivity)
-    nu      = 0.630
-    gamma_c = 1.239
-    xi0     = 0.13e-9     # m
-    Gamma0  = 0.06
-    T_R     = 1.5         # dimensionless reference temperature
-
-    @classmethod
-    def _mu2(cls, rho_bar, T_bar, drhodp_T, drhodp_TR):
-        """
-        Critical enhancement of the viscosity, R12-08 Eqs. (14)-(21).
-
-        Why this model is here:
-            The viscosity of water diverges at the critical point, and the dilute-gas
-            and finite-density terms alone miss that entirely. Within roughly
-            645.91 K < T < 650.77 K and 245.8 < rho < 405.3 kg/m^3 the enhancement is
-            worth more than 2 percent (R12-08 Eq. 13); at rho_c on the 647.35 K
-            isotherm it is 9.2 percent. Outside that region it falls below the
-            correlation's own uncertainty, which is why omitting it is a sanctioned
-            simplification rather than an error.
-
-            It also matters well beyond viscosity itself: the thermal-conductivity
-            critical enhancement, R15-11 Eq. (18), divides by this viscosity, so a mu
-            missing its enhancement makes lambda_2 too large by the same proportion.
+        """Pressure on the boundary between regions 2 and 3, IF97 Eq. (5).
 
         Formulation:
-            xi   = xi0 * (dchi/Gamma0)^(nu/gamma),  dchi = rho_bar*(zeta_T - zeta_TR*T_R/T_bar)
-            Y    = Eq. (15) for xi <= 0.3817016416 nm, Eq. (16) above it
-            mu2  = exp(x_mu * Y)
+            pi = n1 + n2*theta + n3*theta^2,   theta = T/1 K,  pi = p/1 MPa
 
-        Inputs (torch tensors, all the same shape):
-            rho_bar   : reduced density rho/rho*, dimensionless
-            T_bar     : reduced temperature T/T*, dimensionless
-            drhodp_T  : (drho/dp)_T at T,   kg/m^3/MPa
-            drhodp_TR : (drho/dp)_T at T_R*T*, kg/m^3/MPa
+        Valid range:
+            623.15 K <= T <= 863.15 K, which maps to 16.5292 MPa <= p <= 100 MPa.
+
+        Uncertainty:
+            Not applicable -- a defined boundary, not a fitted property.
+
+        Reference:
+            IAPWS-IF97 Eq. (5) and Table 1.
+
+        Inputs:
+            T : temperature, K (float, numpy array, or torch tensor)
+
         Returns:
-            mu2 : dimensionless enhancement factor, >= 1
+            p : boundary pressure, MPa, same type as the input
         """
-        # The two compressibilities arrive as keyword arguments, which the iapws_input
-        # decorator does not touch, so they can still be numpy while everything else here
-        # is already a tensor. Normalize them at this boundary rather than leaving a
-        # numpy/torch mix to surface several lines later.
-        drhodp_T  = torch.as_tensor(drhodp_T,  dtype=torch.float64, device=device).reshape(-1)
-        drhodp_TR = torch.as_tensor(drhodp_TR, dtype=torch.float64, device=device).reshape(-1)
+        (T_,), state = w.prepare(T)
+        n = w.on(cls.n, T_)
 
-        # Eq. (21): dchi from the two compressibilities, made dimensionless by p*/rho*.
-        zeta_T  = drhodp_T  * cls.p_star / rho_star
-        zeta_TR = drhodp_TR * cls.p_star / rho_star
-        dchi = rho_bar * (zeta_T - zeta_TR * cls.T_R / T_bar)
-        dchi = torch.clamp(dchi, min=0.0)          # Eq. (21): dchi < 0 must be set to 0
+        theta = T_ / 1.0
+        pi = n[0] + n[1] * theta + n[2] * theta**2
 
-        # Eq. (20): correlation length. dchi = 0 gives xi = 0, hence Y = 0 and mu2 = 1.
-        xi = cls.xi0 * (dchi / cls.Gamma0) ** (cls.nu / cls.gamma_c)
-
-        qC_xi = xi / cls.qC_inv
-        qD_xi = xi / cls.qD_inv
-
-        # Eq. (15), the small-xi branch: a series that stays well conditioned as xi -> 0,
-        # where the Eq. (16) form would divide by (qC_xi)^3.
-        Y_small = (qC_xi * qD_xi**5 / 5.0
-                   * (1.0 - qC_xi + qC_xi**2 - (765.0/504.0) * qD_xi**2))
-
-        # Eq. (16)-(19), the large-xi branch. Both branches are evaluated everywhere and
-        # selected with `where` rather than an `if`, so this stays batched and
-        # differentiable; the guards below keep the unused branch finite so its NaNs
-        # cannot poison the gradient of the branch that was actually chosen.
-        qC_safe = torch.clamp(qC_xi, min=1.0e-12)
-        psi_D = torch.arccos(torch.clamp((1.0 + qD_xi**2) ** (-0.5), -1.0, 1.0))   # Eq. (17)
-
-        # Eq. (19). The sign of (qC_xi - 1) selects which form of L(w) applies, so take
-        # the magnitude here and branch on qC_xi below.
-        w = torch.sqrt(torch.abs((qC_safe - 1.0) / (qC_safe + 1.0))) * torch.tan(psi_D / 2.0)
-        w_abs = torch.abs(w)
-        L_gt = torch.log((1.0 + w_abs) / torch.clamp(1.0 - w_abs, min=1.0e-15))
-        L_le = 2.0 * torch.arctan(w_abs)
-        L_w = torch.where(qC_safe > 1.0, L_gt, L_le)                                # Eq. (18)
-
-        Y_large = (torch.sin(3.0 * psi_D) / 12.0
-                   - torch.sin(2.0 * psi_D) / (4.0 * qC_safe)
-                   + (1.0 - 1.25 * qC_safe**2) * torch.sin(psi_D) / qC_safe**2
-                   - ((1.0 - 1.5 * qC_safe**2) * psi_D
-                      - torch.abs(qC_safe**2 - 1.0)**1.5 * L_w) / qC_safe**3)
-
-        Y = torch.where(xi <= 0.3817016416e-9, Y_small, Y_large)
-        return torch.exp(cls.x_mu * Y)                                              # Eq. (14)
-
-
-# =============================================================================
-# COND — IAPWS 2011 Thermal Conductivity of Ordinary Water Substance
-# Reference: IAPWS R15-11, "Release on the IAPWS Formulation 2011 for the
-#            Thermal Conductivity of Ordinary Water Substance"
-# Coefficient tables are loaded from external text files:
-#   ThCond_Lk.txt  — Table 1: L_k  (dilute-gas,    Eq. 16)
-#   ThCond_Lij.txt — Table 2: L_ij (finite-density, Eq. 17)
-#   ThCond_Aij.txt — Table 6: A_ij (ref. compressibility at T_R, Eq. 25)
-# =============================================================================
-
-class COND:
-
-    # ── Reference constants (Section 2.2) ────────────────────────────────────
-    T_star   = 647.096    # K
-    rho_star = 322.0      # kg/m³
-    p_star   = 22.064     # MPa
-    lam_star = 1.00e-3    # W/m/K
-    mu_star  = 1.00e-6    # Pa·s
-    R_gas    = 0.46151805 # kJ/kg/K  (specific gas constant, Eq. 6)
-
-    # ── Critical-enhancement constants (Table 3) ──────────────────────────────
-    Lambda  = 177.8514    # numerical prefactor, Eq. (18)
-    qD_inv  = 0.40e-9     # m  — 1/q_D (reference wave-number inverse)
-    xi0     = 0.13e-9     # m  — amplitude of correlation length, Eq. (22)
-    Gamma0  = 0.06        # amplitude of dimensionless compressibility, Eq. (22)
-    nu      = 0.630       # critical exponent
-    gamma_c = 1.239       # critical exponent
-    T_R     = 1.5         # dimensionless reference temperature, Eq. (23)
-
-    # ── Density-range boundaries for A_ij column selection (Eq. 26) ──────────
-    rho_bounds = torch.tensor(
-        [0.310559006, 0.776397516, 1.242236025, 1.863354037],
-        dtype=torch.float64, device=device)
-
-    # ── Coefficient tables ────────────────────────────────────────────────────
-    Lk  = torch.from_numpy(np.loadtxt(f'{pth}/ThCond_Lk.txt')).to(device)   # shape (5,)
-    Lij = torch.from_numpy(np.loadtxt(f'{pth}/ThCond_Lij.txt')).to(device)  # shape (5, 6)
-    Aij = torch.from_numpy(np.loadtxt(f'{pth}/ThCond_Aij.txt')).to(device)  # shape (6, 5)
-
-    # ── lambda_0: dilute-gas term, Eq. (16) ───────────────────────────────────
-    @classmethod
-    @iapws_input
-    def _lam0(cls, T_bar):
-        T_pows = torch.stack([T_bar**(-k) for k in range(5)], dim=0)      # (5,...)
-        Lk     = cls.Lk.view(-1, *([1]*T_bar.dim()))                       # (5,1,...)
-        denom  = (Lk * T_pows).sum(dim=0)
-        return torch.sqrt(T_bar) / denom
-
-    # ── lambda_1: finite-density term, Eq. (17) ───────────────────────────────
-    @classmethod
-    @iapws_input
-    def _lam1(cls, T_bar, rho_bar):
-        t_pows   = torch.stack([(1.0/T_bar - 1.0)**i for i in range(5)], dim=0)  # (5,...)
-        rho_pows = torch.stack([(rho_bar   - 1.0)**j for j in range(6)], dim=0)  # (6,...)
-        # Lij: (5,6) -> broadcast to (5,6,...) against rho_pows (1,6,...)
-        Lij   = cls.Lij[:, :, *([None]*rho_bar.dim())]   # (5, 6, ...)
-        inner = (Lij * rho_pows[None]).sum(dim=1)         # (5, ...)
-        outer = (t_pows * inner).sum(dim=0)               # (...)
-        return torch.exp(rho_bar * outer)
-
-    # ── zeta(T_R, rho_bar): reference isothermal compressibility, Eq. (25) ───
-    @classmethod
-    @iapws_input
-    def _zeta_TR(cls, rho_bar):
-        """Returns SUM_i A_ij(rho_bar) * rho_bar^i (the denominator of Eq. 25)."""
-        rho_pows = torch.stack([rho_bar**i for i in range(6)], dim=0)  # (6,...)
-        j = torch.zeros_like(rho_bar, dtype=torch.long)
-        j = torch.where(rho_bar > cls.rho_bounds[0], torch.ones_like(j),     j)
-        j = torch.where(rho_bar > cls.rho_bounds[1], torch.full_like(j, 2),  j)
-        j = torch.where(rho_bar > cls.rho_bounds[2], torch.full_like(j, 3),  j)
-        j = torch.where(rho_bar > cls.rho_bounds[3], torch.full_like(j, 4),  j)
-        A_col = cls.Aij[:, j]                   # (6, ...)
-        return (A_col * rho_pows).sum(dim=0)    # (...)
-
-    # ── lambda_2: critical-enhancement term, Eqs. (18)–(25) ──────────────────
-    @classmethod
-    @iapws_input
-    def _lam2(cls, rho_bar, T_bar, drhodp_T, cp, cv, mu):
-        # Dimensionless isothermal compressibility: zeta = (d rho_bar / d p_bar)_T
-        zeta_T  = drhodp_T * cls.p_star / cls.rho_star   # at temperature T, Eq. (24)
-        zeta_TR = 1.0 / cls._zeta_TR(rho_bar)            # at T_R,          Eq. (25)
-
-        # Delta chi_bar, Eq. (23); must be >= 0
-        dchi = rho_bar * (zeta_T - cls.T_R / T_bar * zeta_TR)
-        dchi = torch.clamp(dchi, min=0.0)
-
-        # Correlation length xi [m], Eq. (22)
-        xi = cls.xi0 * (dchi / cls.Gamma0) ** (cls.nu / cls.gamma_c)
-
-        # Dimensionless argument y = q_D * xi, Eq. (20)
-        y = xi / cls.qD_inv
-
-        # Z(y), Eq. (19); set to 0 for y < 1.2e-7 to avoid truncation error
-        kappa = cp / cv
-        arg   = 1.0 / (1.0/y + y**2 / (3.0 * rho_bar**2))
-        Zy = (2.0 / (torch.pi * y)) * (
-                  (1.0 - 1.0/kappa) * torch.arctan(y) + y/kappa
-                - (1.0 - torch.exp(-arg))
-             )
-        Zy = torch.where(y < 1.2e-7, torch.zeros_like(Zy), Zy)
-
-        # lambda_2 bar, Eq. (18)
-        mu_bar = mu / cls.mu_star
-        cp_bar = cp / cls.R_gas      # c_bar_p = c_p / R  (dimensionless)
-        return cls.Lambda * rho_bar * T_bar * cp_bar / mu_bar * Zy
-
-    # ── Public interface ──────────────────────────────────────────────────────
+        return w.restore(pi * 1.0, state)
 
     @classmethod
-    @iapws_input
-    def lam(cls, rho, T, drhodp_T, cp, cv, mu):
-        """
-        Thermal conductivity [W/m/K], IAPWS 2011.
+    def T(cls, p):
+        """Temperature on the boundary between regions 2 and 3, IF97 Eq. (6).
 
-        Args:
-            rho      : density              [kg/m³]
-            T        : temperature          [K]
-            drhodp_T : (∂ρ/∂p)_T           [kg/m³/MPa]
-            cp       : isobaric heat cap.   [kJ/kg/K]
-            cv       : isochoric heat cap.  [kJ/kg/K]
-            mu       : dynamic viscosity    [Pa·s]
+        Formulation:
+            theta = n4 + sqrt((pi - n5)/n3),   pi = p/1 MPa,  theta = T/1 K
+
+        Valid range:
+            16.5292 MPa <= p <= 100 MPa.
+
+        Uncertainty:
+            Not applicable -- a defined boundary, not a fitted property.
+
+        Reference:
+            IAPWS-IF97 Eq. (6) and Table 1.
+
+        Inputs:
+            p : pressure, MPa (float, numpy array, or torch tensor)
+
         Returns:
-            lam      : thermal conductivity [W/m/K]
+            T : boundary temperature, K, same type as the input
         """
-        T_bar   = T   / cls.T_star
-        rho_bar = rho / cls.rho_star
-        lam0 = cls._lam0(T_bar)
-        lam1 = cls._lam1(T_bar, rho_bar)
-        lam2 = cls._lam2(rho_bar, T_bar, drhodp_T, cp, cv, mu)
-        return cls.lam_star * (lam0 * lam1 + lam2)   # W/m/K
+        (p_,), state = w.prepare(p)
+        n = w.on(cls.n, p_)
+
+        pi = p_ / 1.0
+        # Below 16.5292 MPa the square root has no real value because the boundary does
+        # not exist there. Clamping rather than letting it go NaN keeps a batch that
+        # straddles the lower limit usable, and keeps the backward pass finite.
+        root = torch.clamp((pi - n[4]) / n[2], min=0.0)
+        theta = n[3] + torch.sqrt(root)
+
+        return w.restore(theta * 1.0, state)
+
+
+class R1:
+    # =========================================
+    # Table 2: Region 1 Gibbs coefficients
+    # =========================================
+    pstar = 16.53        # Reducing pressure [MPa]
+    Tstar = 1386.0       # Reducing temperature [K]
+
+    Coeff = torch.from_numpy(np.loadtxt(f'{pth}/IAPWS_97_Region1.txt')).to(w.dtype)
+    I, J, n = Coeff[:, 0:1], Coeff[:, 1:2], Coeff[:, 2:3]
+
+    # Table 6: backward equation T(p,h), Eq. (11)
+    Cph = torch.from_numpy(np.loadtxt(f'{pth}/Region1_ph.txt')).to(w.dtype)
+    # Table 8: backward equation T(p,s), Eq. (13)
+    Cps = torch.from_numpy(np.loadtxt(f'{pth}/Region1_ps.txt')).to(w.dtype)
 
     @classmethod
-    @iapws_input
-    def lam_R1(cls, p, T):
+    def gibbs(cls, p, T):
+        """Dimensionless Gibbs free energy of region 1 and all of its derivatives, Eq. (7).
+
+        Formulation:
+            gamma(pi, tau) = sum_i n_i * (7.1 - pi)^I_i * (tau - 1.222)^J_i
+            with pi = p/16.53 MPa and tau = 1386 K/T. The derivatives are Table 4,
+            taken with respect to pi and tau, and the subscripts _p and _t below mean
+            exactly that -- not derivatives with respect to p and T.
+
+        Valid range:
+            273.15 K <= T <= 623.15 K with p_sat(T) <= p <= 100 MPa, and the metastable
+            extension a little beyond the saturation line. Nothing is range-checked here;
+            use region() to decide which equation applies.
+
+        Uncertainty:
+            Reproduces IAPWS-95 to within the tolerances of IF97 Sec. 12.
+
+        Reference:
+            IAPWS-IF97 Eq. (7), Table 2 (coefficients) and Table 4 (derivatives).
+
+        Inputs (float, numpy array, or torch tensor; broadcastable):
+            p : pressure, MPa
+            T : temperature, K
+
+        Returns:
+            d : dict of pi, tau, g, g_p, g_pp, g_t, g_tt, g_pt -- each the same type and
+                shape the inputs broadcast to. Pass it to the accessors below.
         """
-        Thermal conductivity for Region 1 (subcooled liquid) [W/m/K].
-        Args: p [MPa], T [K]  — torch tensors
-        """
-        g, g_p, g_pp, g_t, g_tt, g_pt = R1.Gamma(p, T)
-        tau = R1.Tstar / T
+        (p_, T_), state = w.prepare(p, T)
+        I, J, n = (w.on(t, p_) for t in (cls.I, cls.J, cls.n))
 
-        # Specific volume [m³/kg]: v = R * T * g_p / pstar * 1e-3
-        # (R [kJ/kg/K], T [K], pstar [MPa] → kJ/kg/MPa = 1e-3 m³/kg)
-        vol    = R * T * g_p / R1.pstar * 1e-3
-        rho    = 1.0 / vol
+        pi = p_ / cls.pstar
+        tau = cls.Tstar / T_
 
-        # cp, cv [kJ/kg/K]
-        # Note: R1.Gamma returns g_pp = -γ_ππ (sign-flipped vs IF97 definition),
-        # so the cv formula and dvdp must compensate with an extra minus sign.
-        cp = -R * tau**2 * g_tt
-        cv =  R * (-(g_p - tau*g_pt)**2 / g_pp - tau**2 * g_tt)
+        # Both bases stay strictly positive over region 1 and its metastable surroundings:
+        # A = 7.1 - pi is positive for p < 117 MPa, and B = tau - 1.222 exceeds 1 for
+        # T < 623.15 K. The I = 0 and J = 0 terms below raise them to negative powers,
+        # which is harmless only because of that.
+        A = 7.1 - pi
+        B = tau - 1.222
 
-        # (∂ρ/∂p)_T [kg/m³/MPa]: γ_ππ = -g_pp, so dvdp = R*T*γ_ππ/pstar² * 1e-3
-        dvdp   = -R * T * g_pp / R1.pstar**2 * 1e-3   # < 0 for liquid ✓
-        drhodp = -rho**2 * dvdp                         # > 0 for liquid ✓
+        g = (n * A**I * B**J).sum(dim=0)
+        g_p = -(n * I * A**(I - 1) * B**J).sum(dim=0)
+        g_pp = (n * I * (I - 1) * A**(I - 2) * B**J).sum(dim=0)
+        g_t = (n * J * A**I * B**(J - 1)).sum(dim=0)
+        g_tt = (n * J * (J - 1) * A**I * B**(J - 2)).sum(dim=0)
+        g_pt = -(n * I * J * A**(I - 1) * B**(J - 1)).sum(dim=0)
 
-        mu = VISC.mu(rho, T)
-        return cls.lam(rho, T, drhodp, cp, cv, mu)
+        vals = {'pi': pi, 'tau': tau, 'g': g, 'g_p': g_p, 'g_pp': g_pp,
+                'g_t': g_t, 'g_tt': g_tt, 'g_pt': g_pt}
+        return {key: w.restore(val, state) for key, val in vals.items()}
 
     @classmethod
-    @iapws_input
-    def lam_R2(cls, p, T):
-        """
-        Thermal conductivity for Region 2 (superheated steam) [W/m/K].
-        Args: p [MPa], T [K]  — torch tensors
-        """
-        g0, g0_p, g0_pp, g0_t, g0_tt = R2.Ideal(p, T)
-        gr, gr_p, gr_pp, gr_t, gr_tt, gr_pt = R2.Residual(p, T)
+    def v(cls, d):
+        """Specific volume [m^3/kg] from a gibbs() state. v*p/(RT) = pi*gamma_pi."""
+        T = cls.Tstar / d['tau']
+        p = cls.pstar * d['pi']
+        # R [kJ/kg/K] * T [K] / p [MPa] is kJ/kg/MPa, which is 1e-3 m^3/kg.
+        return R * T / p * d['pi'] * d['g_p'] * 1.0e-3
 
-        pstar2 = 1.0    # MPa
-        Tstar2 = 540.0  # K
-        pi  = p / pstar2
-        tau = Tstar2 / T
-
-        # Specific volume [m³/kg]: v = R * T * (g0_p + gr_p) / pstar2 * 1e-3
-        vol    = R * T * (g0_p + gr_p) / pstar2 * 1e-3
-        rho    = 1.0 / vol
-
-        # cp, cv [kJ/kg/K]
-        cp  = -R * tau**2 * (g0_tt + gr_tt)
-        num =  (1.0 + pi*gr_p - tau*pi*gr_pt)**2
-        den =  1.0 - pi**2 * gr_pp
-        cv  = -R * tau**2 * (g0_tt + gr_tt) + R * num/den
-
-        # (∂ρ/∂p)_T [kg/m³/MPa]: dv/dp = R*T*(g0_pp + gr_pp) / pstar2² * 1e-3
-        dvdp   =  R * T * (g0_pp + gr_pp) / pstar2**2 * 1e-3
-        drhodp = -rho**2 * dvdp
-
-        mu = VISC.mu(rho, T)
-        return cls.lam(rho, T, drhodp, cp, cv, mu)
-    
-    
-
-class Sigma:
     @classmethod
-    @iapws_input
-    def sigma(cls,T):
-        Tc = 647.096
-        tau = 1 - T/Tc
-        B = 235.8/1E3
-        b = -0.625
-        mu = 1.256
-        sig = B*tau**mu *(1+b*tau)
-        return sig
+    def rho(cls, d):
+        """Density [kg/m^3] from a gibbs() state."""
+        return 1.0 / cls.v(d)
+
+    @classmethod
+    def drhodp(cls, d):
+        """Isothermal compressibility (drho/dp)_T [kg/m^3/MPa] from a gibbs() state.
+
+        This is the derivative properties/iapws_transport.py needs for both critical
+        enhancements, which is why it is a named accessor rather than left to the caller.
+        dv/dp = R*T*gamma_pipi / pstar^2 * 1e-3, and drho/dp = -rho^2 * dv/dp.
+        """
+        T = cls.Tstar / d['tau']
+        dvdp = R * T * d['g_pp'] / cls.pstar**2 * 1.0e-3   # m^3/kg/MPa, < 0 for a liquid
+        return -cls.rho(d)**2 * dvdp
+
+    @classmethod
+    def u(cls, d, units='J'):
+        """Specific internal energy [J/kg by default]. u/(RT) = tau*gamma_tau - pi*gamma_pi."""
+        scale = w.energy_units[units]
+        T = cls.Tstar / d['tau']
+        return scale * R * T * (d['tau'] * d['g_t'] - d['pi'] * d['g_p'])
+
+    @classmethod
+    def s(cls, d, units='J'):
+        """Specific entropy [J/kg-K by default]. s/R = tau*gamma_tau - gamma."""
+        scale = w.energy_units[units]
+        return scale * R * (d['tau'] * d['g_t'] - d['g'])
+
+    @classmethod
+    def h(cls, d, units='J'):
+        """Specific enthalpy [J/kg by default]. h/(RT) = tau*gamma_tau."""
+        scale = w.energy_units[units]
+        T = cls.Tstar / d['tau']
+        return scale * R * T * d['tau'] * d['g_t']
+
+    @classmethod
+    def cp(cls, d, units='J'):
+        """Isobaric heat capacity [J/kg-K by default]. cp/R = -tau^2*gamma_tautau."""
+        scale = w.energy_units[units]
+        return scale * (-R * d['tau']**2 * d['g_tt'])
+
+    @classmethod
+    def cv(cls, d, units='J'):
+        """Isochoric heat capacity [J/kg-K by default].
+
+        cv/R = -tau^2*gamma_tautau + (gamma_pi - tau*gamma_pitau)^2 / gamma_pipi
+
+        The second term is positive here because gamma_pipi is negative for a liquid,
+        which makes cv smaller than cp as it must be.
+        """
+        scale = w.energy_units[units]
+        num = (d['g_p'] - d['tau'] * d['g_pt'])**2
+        return scale * R * (-d['tau']**2 * d['g_tt'] + num / d['g_pp'])
+
+    @classmethod
+    def c(cls, d):
+        """Speed of sound [m/s] from a gibbs() state.
+
+        w^2/(RT) = pi^2*gamma_pi^2
+                   / [ (pi*gamma_pi - tau*pi*gamma_pitau)^2/(tau^2*gamma_tautau)
+                       - pi^2*gamma_pipi ]
+
+        R is in kJ/kg/K, so the factor of 1000 turns R*T into m^2/s^2.
+        """
+        T = cls.Tstar / d['tau']
+        num = d['pi']**2 * d['g_p']**2
+        den = ((d['pi'] * d['g_p'] - d['tau'] * d['pi'] * d['g_pt'])**2
+               / (d['tau']**2 * d['g_tt']) - d['pi']**2 * d['g_pp'])
+        val = R * 1000.0 * T * num / den
+        return w.sqrt(val)
+
+    @classmethod
+    def Prop(cls, p, T, prop):
+        """Legacy one-shot accessor: build the region 1 state and read one property off it.
+
+        Kept because this was the module's original interface. New code should call
+        gibbs() once and then the named accessors, which is both faster when several
+        properties are wanted and explicit about units.
+
+        Inputs:
+            p    : pressure, MPa
+            T    : temperature, K
+            prop : one of 'vol', 'rho', 'u', 's', 'h', 'cp', 'cv', 'w'
+
+        Returns:
+            the requested property in this module's default units -- m^3/kg, kg/m^3,
+            J/kg, J/kg-K, J/kg, J/kg-K, J/kg-K, m/s respectively. Note that these are
+            SI base units; the pre-cleanup version of this function returned the
+            kilojoule forms.
+        """
+        d = cls.gibbs(p, T)
+        if prop == 'vol':
+            return cls.v(d)
+        if prop == 'rho':
+            return cls.rho(d)
+        if prop == 'u':
+            return cls.u(d)
+        if prop == 's':
+            return cls.s(d)
+        if prop == 'h':
+            return cls.h(d)
+        if prop == 'cp':
+            return cls.cp(d)
+        if prop == 'cv':
+            return cls.cv(d)
+        if prop == 'w':
+            return cls.c(d)
+        raise ValueError(f"R1.Prop: unrecognized property {prop!r} -- expected one of "
+                         "'vol', 'rho', 'u', 's', 'h', 'cp', 'cv', 'w'")
+
+    @classmethod
+    def Tph(cls, p, h):
+        """Backward equation T(p,h) for region 1, IF97 Eq. (11).
+
+        Formulation:
+            T/1 K = sum_i n_i * (p/1 MPa)^I_i * (h/2500 kJ/kg + 1)^J_i
+
+        Valid range:
+            The whole of region 1: 273.15 K <= T <= 623.15 K, p_sat(T) <= p <= 100 MPa.
+
+        Uncertainty:
+            Maximum deviation from the basic equation 0.023 K, RMS 0.0038 K (Sec. 5.2.1).
+
+        Reference:
+            IAPWS-IF97 Eq. (11) and Table 6.
+
+        Inputs (float, numpy array, or torch tensor; broadcastable):
+            p : pressure, MPa
+            h : specific enthalpy, kJ/kg
+
+        Returns:
+            T : temperature, K, same type as the inputs
+        """
+        (p_, h_), state = w.prepare(p, h)
+        C = w.on(cls.Cph, p_)
+        I, J, n = C[:, 0:1], C[:, 1:2], C[:, 2:3]
+
+        pi = p_ / 1.0
+        eta = h_ / 2500.0
+        T = (n * pi**I * (eta + 1.0)**J).sum(dim=0)
+
+        return w.restore(T, state)
+
+    @classmethod
+    def Tps(cls, p, s):
+        """Backward equation T(p,s) for region 1, IF97 Eq. (13).
+
+        Formulation:
+            T/1 K = sum_i n_i * (p/1 MPa)^I_i * (s/1 kJ/kg-K + 2)^J_i
+
+        Valid range:
+            The whole of region 1.
+
+        Uncertainty:
+            Maximum deviation from the basic equation 0.039 K, RMS 0.0084 K (Sec. 5.2.2).
+
+        Reference:
+            IAPWS-IF97 Eq. (13) and Table 8.
+
+        Inputs (float, numpy array, or torch tensor; broadcastable):
+            p : pressure, MPa
+            s : specific entropy, kJ/kg-K
+
+        Returns:
+            T : temperature, K, same type as the inputs
+        """
+        (p_, s_), state = w.prepare(p, s)
+        C = w.on(cls.Cps, p_)
+        I, J, n = C[:, 0:1], C[:, 1:2], C[:, 2:3]
+
+        pi = p_ / 1.0
+        sigma = s_ / 1.0
+        T = (n * pi**I * (sigma + 2.0)**J).sum(dim=0)
+
+        return w.restore(T, state)
+
+
+class R2:
+    # =========================================
+    # Table 10: ideal-gas part coefficients
+    # Table 11: residual part coefficients
+    # =========================================
+    pstar = 1.0          # Reducing pressure [MPa]
+    Tstar = 540.0        # Reducing temperature [K]
+
+    Coeff_I = torch.from_numpy(np.loadtxt(f'{pth}/Region2_Ideal.txt')).to(w.dtype)
+    Coeff_R = torch.from_numpy(np.loadtxt(f'{pth}/Region2_Res.txt')).to(w.dtype)
+
+    J0, n0 = Coeff_I[:, 0:1], Coeff_I[:, 1:2]
+    Ir, Jr, nr = Coeff_R[:, 0:1], Coeff_R[:, 1:2], Coeff_R[:, 2:3]
+
+    # Tables 20-22: backward equations T(p,h) for subregions 2a, 2b, 2c, Eqs. (22)-(24)
+    Cph_a = torch.from_numpy(np.loadtxt(f'{pth}/Region2_ph_2a.txt')).to(w.dtype)
+    Cph_b = torch.from_numpy(np.loadtxt(f'{pth}/Region2_ph_2b.txt')).to(w.dtype)
+    Cph_c = torch.from_numpy(np.loadtxt(f'{pth}/Region2_ph_2c.txt')).to(w.dtype)
+
+    # Tables 25-27: backward equations T(p,s) for subregions 2a, 2b, 2c, Eqs. (25)-(27)
+    Cps_a = torch.from_numpy(np.loadtxt(f'{pth}/Region2_ps_2a.txt')).to(w.dtype)
+    Cps_b = torch.from_numpy(np.loadtxt(f'{pth}/Region2_ps_2b.txt')).to(w.dtype)
+    Cps_c = torch.from_numpy(np.loadtxt(f'{pth}/Region2_ps_2c.txt')).to(w.dtype)
+
+    n_B2bc = torch.tensor([
+        0.90584278514723e3, -0.67955786399241, 0.12809002730136e-3,
+        0.26526571908428e4, 0.45257578905948e1
+    ], dtype=w.dtype)
+
+    # The 2b/2c boundary only exists above this pressure -- it starts at the point
+    # (6.54670 MPa, 2500 kJ/kg) where it meets the h = 2500 kJ/kg line that separates 2a
+    # from the rest. Below it, everything at p > 4 MPa is subregion 2b. Eq. (21) takes the
+    # square root of (pi - 4.5258), so evaluating it below this pressure is not merely
+    # unnecessary but undefined, and a NaN compared against with >= silently answers
+    # "false" and sends the point to 2c.
+    p_2bc_min = 6.54670
+
+    @classmethod
+    def gibbs(cls, p, T):
+        """Dimensionless Gibbs free energy of region 2 and all of its derivatives, Eq. (15).
+
+        Formulation:
+            gamma = gamma_o + gamma_r
+            gamma_o = ln(pi) + sum_i n_i^o * tau^(J_i^o)                       Eq. (16)
+            gamma_r = sum_i n_i * pi^I_i * (tau - 0.5)^J_i                     Eq. (17)
+            with pi = p/1 MPa and tau = 540 K/T. The derivatives are Tables 13 and 14,
+            taken with respect to pi and tau.
+
+        Valid range:
+            273.15 K <= T <= 1073.15 K, from p -> 0 up to p_sat(T) below 623.15 K and up
+            to the B23 line above it, capped at 100 MPa. Nothing is range-checked here;
+            use region() to decide which equation applies.
+
+        Uncertainty:
+            Reproduces IAPWS-95 to within the tolerances of IF97 Sec. 12.
+
+        Reference:
+            IAPWS-IF97 Eqs. (15)-(17), Tables 10-11 (coefficients), 13-14 (derivatives).
+
+        Inputs (float, numpy array, or torch tensor; broadcastable):
+            p : pressure, MPa, strictly greater than zero
+            T : temperature, K
+
+        Returns:
+            d : dict of pi, tau, the ideal-gas derivatives g0, g0_p, g0_pp, g0_t, g0_tt
+                and the residual derivatives gr, gr_p, gr_pp, gr_t, gr_tt, gr_pt -- each
+                the same type and shape the inputs broadcast to. gamma_o has no mixed
+                derivative: it is a sum of a function of pi and a function of tau, so
+                gamma_o_pitau is identically zero and is not carried.
+        """
+        (p_, T_), state = w.prepare(p, T)
+        J0, n0 = (w.on(t, p_) for t in (cls.J0, cls.n0))
+        Ir, Jr, nr = (w.on(t, p_) for t in (cls.Ir, cls.Jr, cls.nr))
+
+        pi = p_ / cls.pstar
+        tau = cls.Tstar / T_
+
+        # ---- Ideal-gas part, Table 13 ----
+        g0 = torch.log(pi) + (n0 * tau**J0).sum(dim=0)
+        g0_p = 1.0 / pi
+        g0_pp = -1.0 / pi**2
+        g0_t = (n0 * J0 * tau**(J0 - 1)).sum(dim=0)
+        g0_tt = (n0 * J0 * (J0 - 1) * tau**(J0 - 2)).sum(dim=0)
+
+        # ---- Residual part, Table 14 ----
+        # tau - 0.5 stays positive throughout region 2: tau >= 540/1073.15 = 0.503.
+        B = tau - 0.5
+        gr = (nr * pi**Ir * B**Jr).sum(dim=0)
+        gr_p = (nr * Ir * pi**(Ir - 1) * B**Jr).sum(dim=0)
+        gr_pp = (nr * Ir * (Ir - 1) * pi**(Ir - 2) * B**Jr).sum(dim=0)
+        gr_t = (nr * Jr * pi**Ir * B**(Jr - 1)).sum(dim=0)
+        gr_tt = (nr * Jr * (Jr - 1) * pi**Ir * B**(Jr - 2)).sum(dim=0)
+        gr_pt = (nr * Ir * Jr * pi**(Ir - 1) * B**(Jr - 1)).sum(dim=0)
+
+        vals = {'pi': pi, 'tau': tau,
+                'g0': g0, 'g0_p': g0_p, 'g0_pp': g0_pp, 'g0_t': g0_t, 'g0_tt': g0_tt,
+                'gr': gr, 'gr_p': gr_p, 'gr_pp': gr_pp, 'gr_t': gr_t, 'gr_tt': gr_tt,
+                'gr_pt': gr_pt}
+        return {key: w.restore(val, state) for key, val in vals.items()}
+
+    @classmethod
+    def v(cls, d):
+        """Specific volume [m^3/kg]. v*p/(RT) = pi*(gamma_o_pi + gamma_r_pi)."""
+        T = cls.Tstar / d['tau']
+        p = cls.pstar * d['pi']
+        return R * T / p * d['pi'] * (d['g0_p'] + d['gr_p']) * 1.0e-3
+
+    @classmethod
+    def rho(cls, d):
+        """Density [kg/m^3]."""
+        return 1.0 / cls.v(d)
+
+    @classmethod
+    def drhodp(cls, d):
+        """Isothermal compressibility (drho/dp)_T [kg/m^3/MPa].
+
+        dv/dp = R*T*(gamma_o_pipi + gamma_r_pipi)/pstar^2 * 1e-3, and drho/dp is
+        -rho^2 dv/dp. Supplied for properties/iapws_transport.py, which needs it for both
+        critical enhancements.
+        """
+        T = cls.Tstar / d['tau']
+        dvdp = R * T * (d['g0_pp'] + d['gr_pp']) / cls.pstar**2 * 1.0e-3
+        return -cls.rho(d)**2 * dvdp
+
+    @classmethod
+    def u(cls, d, units='J'):
+        """Specific internal energy [J/kg by default]."""
+        scale = w.energy_units[units]
+        T = cls.Tstar / d['tau']
+        return scale * R * T * (d['tau'] * (d['g0_t'] + d['gr_t'])
+                                - d['pi'] * (d['g0_p'] + d['gr_p']))
+
+    @classmethod
+    def s(cls, d, units='J'):
+        """Specific entropy [J/kg-K by default]."""
+        scale = w.energy_units[units]
+        return scale * R * (d['tau'] * (d['g0_t'] + d['gr_t']) - (d['g0'] + d['gr']))
+
+    @classmethod
+    def h(cls, d, units='J'):
+        """Specific enthalpy [J/kg by default]. h/(RT) = tau*(gamma_o_tau + gamma_r_tau)."""
+        scale = w.energy_units[units]
+        T = cls.Tstar / d['tau']
+        return scale * R * T * d['tau'] * (d['g0_t'] + d['gr_t'])
+
+    @classmethod
+    def cp(cls, d, units='J'):
+        """Isobaric heat capacity [J/kg-K by default].
+
+        cp/R = -tau^2 * (gamma_o_tautau + gamma_r_tautau).
+        """
+        scale = w.energy_units[units]
+        return scale * (-R * d['tau']**2 * (d['g0_tt'] + d['gr_tt']))
+
+    @classmethod
+    def cv(cls, d, units='J'):
+        """Isochoric heat capacity [J/kg-K by default].
+
+        cv/R = -tau^2*(gamma_o_tautau + gamma_r_tautau)
+               - (1 + pi*gamma_r_pi - tau*pi*gamma_r_pitau)^2 / (1 - pi^2*gamma_r_pipi)
+        """
+        scale = w.energy_units[units]
+        num = (1.0 + d['pi'] * d['gr_p'] - d['tau'] * d['pi'] * d['gr_pt'])**2
+        den = 1.0 - d['pi']**2 * d['gr_pp']
+        return scale * R * (-d['tau']**2 * (d['g0_tt'] + d['gr_tt']) - num / den)
+
+    @classmethod
+    def c(cls, d):
+        """Speed of sound [m/s].
+
+        w^2/(RT) = [1 + 2*pi*gamma_r_pi + pi^2*gamma_r_pi^2]
+                   / [ (1 - pi^2*gamma_r_pipi)
+                       + (1 + pi*gamma_r_pi - tau*pi*gamma_r_pitau)^2
+                         / (tau^2*(gamma_o_tautau + gamma_r_tautau)) ]
+        """
+        T = cls.Tstar / d['tau']
+        num = 1.0 + 2.0 * d['pi'] * d['gr_p'] + d['pi']**2 * d['gr_p']**2
+        inner = (1.0 + d['pi'] * d['gr_p'] - d['tau'] * d['pi'] * d['gr_pt'])**2
+        den = ((1.0 - d['pi']**2 * d['gr_pp'])
+               + inner / (d['tau']**2 * (d['g0_tt'] + d['gr_tt'])))
+        val = R * 1000.0 * T * num / den
+        return w.sqrt(val)
+
+    @classmethod
+    def Prop(cls, p, T, prop):
+        """Legacy one-shot accessor for region 2. See R1.Prop for the units and the reason
+        this is kept; new code should call gibbs() once and use the named accessors.
+        """
+        d = cls.gibbs(p, T)
+        if prop == 'vol':
+            return cls.v(d)
+        if prop == 'rho':
+            return cls.rho(d)
+        if prop == 'u':
+            return cls.u(d)
+        if prop == 's':
+            return cls.s(d)
+        if prop == 'h':
+            return cls.h(d)
+        if prop == 'cp':
+            return cls.cp(d)
+        if prop == 'cv':
+            return cls.cv(d)
+        if prop == 'w':
+            return cls.c(d)
+        raise ValueError(f"R2.Prop: unrecognized property {prop!r} -- expected one of "
+                         "'vol', 'rho', 'u', 's', 'h', 'cp', 'cv', 'w'")
+
+    @classmethod
+    def h_B2bc(cls, p):
+        """Enthalpy on the boundary between subregions 2b and 2c, IF97 Eq. (21).
+
+        Formulation:
+            eta = n4 + sqrt((pi - n5)/n3),   pi = p/1 MPa,  eta = h/1 kJ/kg
+
+        Valid range:
+            p >= 6.54670 MPa, where the boundary begins. Below that the square root has
+            no real value and the caller should use subregion 2b outright; see
+            p_2bc_min. The argument is clamped at zero here so that a batch spanning
+            that pressure stays finite in both the forward and the backward pass.
+
+        Uncertainty:
+            Not applicable -- a defined subregion boundary, not a fitted property.
+
+        Reference:
+            IAPWS-IF97 Eq. (21) and Table 19.
+
+        Inputs:
+            p : pressure, MPa (float, numpy array, or torch tensor)
+
+        Returns:
+            h : boundary enthalpy, kJ/kg, same type as the input
+        """
+        (p_,), state = w.prepare(p)
+        n = w.on(cls.n_B2bc, p_)
+
+        pi = p_ / 1.0
+        root = torch.clamp((pi - n[4]) / n[2], min=0.0)
+        eta = n[3] + torch.sqrt(root)
+
+        return w.restore(eta * 1.0, state)
+
+    @classmethod
+    def _backward(cls, C, pbase, xbase):
+        """Evaluate one of the six region 2 backward polynomials.
+
+        All six have the shape sum_i n_i * pbase^I_i * xbase^J_i and differ only in the
+        coefficient table and in how the two bases are formed from p and h or s -- and
+        those differ in more than a scale factor, which is why the caller forms them and
+        passes them in rather than handing over a shift. Eq. (23) raises (pi - 2) and
+        Eq. (24) raises (pi + 25), not pi itself, and Eqs. (26) and (27) raise
+        (10 - sigma) and (2 - sigma), not sigma plus something.
+
+        Kept private because the useful entry points are Tph and Tps, which also have to
+        choose the subregion.
+
+        Inputs (1-D torch tensors, same shape):
+            C     : coefficient table, columns I, J, n
+            pbase : the pressure base this equation raises to I_i, dimensionless
+            xbase : the enthalpy or entropy base this equation raises to J_i
+
+        Returns:
+            T : temperature, K
+        """
+        C = w.on(C, pbase)
+        I, J, n = C[:, 0:1], C[:, 1:2], C[:, 2:3]
+        return (n * pbase**I * xbase**J).sum(dim=0)
+
+    @classmethod
+    def Tph(cls, p, h):
+        """Backward equations T(p,h) for region 2, IF97 Eqs. (22)-(24).
+
+        Formulation:
+            eta = h/2000 kJ/kg and pi = p/1 MPa throughout, and then
+              2a, p <= 4 MPa                     : T = sum n_i * pi^I_i      * (eta-2.1)^J_i
+              2b, p > 4 MPa, h >= h_B2bc(p)      : T = sum n_i * (pi-2)^I_i  * (eta-2.6)^J_i
+              2c, p > 4 MPa, h <  h_B2bc(p)      : T = sum n_i * (pi+25)^I_i * (eta-1.8)^J_i
+            Note that 2b and 2c shift the pressure base as well as the enthalpy base;
+            they are not the same polynomial with different tables. Because the 2b/2c
+            boundary only starts at 6.54670 MPa, everything between 4 and 6.54670 MPa is
+            2b regardless of enthalpy.
+
+            All three polynomials are evaluated at every point and the answer selected
+            with where(), rather than each being evaluated only on the points that need
+            it. That keeps the batch a fixed shape with no device synchronization, at the
+            cost of two extra polynomial evaluations. The pressure handed to each branch
+            is clamped into that branch's own range first: subregion 2c carries pi to the
+            power -7, so feeding it a low pressure it will never be selected for would
+            overflow to infinity and poison the gradient of the branch that was selected.
+
+        Valid range:
+            The whole of region 2.
+
+        Uncertainty:
+            Maximum deviation from the basic equation 0.6 K in 2a, 0.01 K in 2b and
+            0.02 K in 2c; RMS 0.13, 0.0021 and 0.0079 K (Table 23).
+
+        Reference:
+            IAPWS-IF97 Eqs. (20)-(24), Tables 19-22.
+
+        Inputs (float, numpy array, or torch tensor; broadcastable):
+            p : pressure, MPa
+            h : specific enthalpy, kJ/kg
+
+        Returns:
+            T : temperature, K, same type as the inputs
+        """
+        (p_, h_), state = w.prepare(p, h)
+
+        hstar = 2000.0
+        eta = h_ / hstar
+
+        # Each branch sees only pressures it is defined for.
+        pi_a = torch.clamp(p_, max=4.0)
+        pi_b = torch.clamp(p_, min=4.0)
+        pi_c = torch.clamp(p_, min=cls.p_2bc_min)
+
+        T_a = cls._backward(cls.Cph_a, pi_a, eta - 2.1)
+        T_b = cls._backward(cls.Cph_b, pi_b - 2.0, eta - 2.6)
+        T_c = cls._backward(cls.Cph_c, pi_c + 25.0, eta - 1.8)
+
+        n = w.on(cls.n_B2bc, p_)
+        h_bnd = n[3] + torch.sqrt(torch.clamp((p_ - n[4]) / n[2], min=0.0))
+        is_2c = (p_ > cls.p_2bc_min) & (h_ < h_bnd)
+
+        T = torch.where(p_ <= 4.0, T_a, torch.where(is_2c, T_c, T_b))
+        return w.restore(T, state)
+
+    @classmethod
+    def Tps(cls, p, s):
+        """Backward equations T(p,s) for region 2, IF97 Eqs. (25)-(27).
+
+        Formulation:
+            pi = p/1 MPa throughout, sigma is s over that subregion's own s*, and
+              2a, p <= 4 MPa, s* = 2      : T = sum n_i * pi^I_i * (sigma-2)^J_i
+              2b, p > 4, s >= 5.85, s* = 0.7853 : T = sum n_i * pi^I_i * (10-sigma)^J_i
+              2c, p > 4, s <  5.85, s* = 2.9251 : T = sum n_i * pi^I_i * (2-sigma)^J_i
+            Note that 2b and 2c subtract sigma from a constant rather than adding to it.
+            The 2b/2c split is on entropy alone, so unlike Tph it needs no auxiliary
+            boundary equation and holds at every pressure above 4 MPa. As in Tph, all
+            three are evaluated and selected with where(), on pressures clamped into each
+            branch's own range.
+
+        Valid range:
+            The whole of region 2.
+
+        Uncertainty:
+            Maximum deviation from the basic equation 0.5 K in 2a, 0.01 K in 2b and
+            0.02 K in 2c; RMS 0.12, 0.0022 and 0.0072 K (Table 28).
+
+        Reference:
+            IAPWS-IF97 Eqs. (25)-(27), Tables 25-27.
+
+        Inputs (float, numpy array, or torch tensor; broadcastable):
+            p : pressure, MPa
+            s : specific entropy, kJ/kg-K
+
+        Returns:
+            T : temperature, K, same type as the inputs
+        """
+        (p_, s_), state = w.prepare(p, s)
+
+        pi_a = torch.clamp(p_, max=4.0)
+        pi_b = torch.clamp(p_, min=4.0)
+
+        T_a = cls._backward(cls.Cps_a, pi_a, s_ / 2.0 - 2.0)
+        T_b = cls._backward(cls.Cps_b, pi_b, 10.0 - s_ / 0.7853)
+        T_c = cls._backward(cls.Cps_c, pi_b, 2.0 - s_ / 2.9251)
+
+        T = torch.where(p_ <= 4.0, T_a, torch.where(s_ >= 5.85, T_b, T_c))
+        return w.restore(T, state)
+
+
+class R3:
+    # =========================================
+    # Table 30: Region 3 Helmholtz coefficients
+    # =========================================
+    rhostar = rhoc       # Reducing density [kg m^-3]
+    Tstar = Tc           # Reducing temperature [K]
+
+    # The i = 1 term of Eq. (28) is n1*ln(delta) rather than a power, so it is carried
+    # here and the data file holds terms 2 to 40 only.
+    n1 = 0.10658070028513e1
+
+    Coeff = torch.from_numpy(np.loadtxt(f'{pth}/Region3.txt')).to(w.dtype)
+    I, J, n = Coeff[:, 0:1], Coeff[:, 1:2], Coeff[:, 2:3]
+
+    @classmethod
+    def helmholtz(cls, rho, T):
+        """Dimensionless Helmholtz free energy of region 3 and its derivatives, Eq. (28).
+
+        Formulation:
+            phi(delta, tau) = n1*ln(delta) + sum_{i=2..40} n_i * delta^I_i * tau^J_i
+            with delta = rho/322 kg/m^3 and tau = 647.096 K/T. The derivatives are
+            Table 32, taken with respect to delta and tau; the subscripts _d and _t below
+            mean exactly that.
+
+        Valid range:
+            623.15 K <= T <= T_B23(p) with p_B23(T) <= p <= 100 MPa, which in density
+            terms is roughly 113 to 765 kg/m^3. The equation also gives reasonable values
+            in the metastable regions just outside the saturation line. Nothing is
+            range-checked here; use region() to decide which equation applies.
+
+        Uncertainty:
+            Reproduces IAPWS-95 to within the tolerances of IF97 Sec. 12, and reproduces
+            the critical parameters of Eqs. (2)-(4) exactly.
+
+        Reference:
+            IAPWS-IF97 Eq. (28), Table 30 (coefficients), Table 32 (derivatives).
+
+        Inputs (float, numpy array, or torch tensor; broadcastable):
+            rho : density, kg/m^3, strictly greater than zero
+            T   : temperature, K
+
+        Returns:
+            d : dict of delta, tau, phi, phi_d, phi_dd, phi_t, phi_tt, phi_dt -- each the
+                same type and shape the inputs broadcast to.
+        """
+        (rho_, T_), state = w.prepare(rho, T)
+        I, J, n = (w.on(t, rho_) for t in (cls.I, cls.J, cls.n))
+
+        delta = rho_ / cls.rhostar
+        tau = cls.Tstar / T_
+
+        phi = cls.n1 * torch.log(delta) + (n * delta**I * tau**J).sum(dim=0)
+        phi_d = cls.n1 / delta + (n * I * delta**(I - 1) * tau**J).sum(dim=0)
+        phi_dd = -cls.n1 / delta**2 + (n * I * (I - 1) * delta**(I - 2) * tau**J).sum(dim=0)
+        phi_t = (n * J * delta**I * tau**(J - 1)).sum(dim=0)
+        phi_tt = (n * J * (J - 1) * delta**I * tau**(J - 2)).sum(dim=0)
+        phi_dt = (n * I * J * delta**(I - 1) * tau**(J - 1)).sum(dim=0)
+
+        vals = {'delta': delta, 'tau': tau, 'phi': phi, 'phi_d': phi_d, 'phi_dd': phi_dd,
+                'phi_t': phi_t, 'phi_tt': phi_tt, 'phi_dt': phi_dt}
+        return {key: w.restore(val, state) for key, val in vals.items()}
+
+    @classmethod
+    def p(cls, d, units='MPa'):
+        """Pressure [MPa by default]. p/(rho*R*T) = delta*phi_delta."""
+        scale = w.pressure_units[units]
+        rho = cls.rhostar * d['delta']
+        T = cls.Tstar / d['tau']
+        return scale * rho * R * T * d['delta'] * d['phi_d']
+
+    @classmethod
+    def p_rho(cls, d, units='MPa'):
+        """(dp/drho)_T [MPa/(kg/m^3) by default] from a helmholtz() state.
+
+        dp/drho = R*T*(2*delta*phi_delta + delta^2*phi_deltadelta). This is what the
+        density solve in rho_pT() uses for its Newton step and what iapws_transport.py needs
+        inverted as (drho/dp)_T.
+        """
+        scale = w.pressure_units[units]
+        T = cls.Tstar / d['tau']
+        return scale * R * T * (2.0 * d['delta'] * d['phi_d']
+                                + d['delta']**2 * d['phi_dd'])
+
+    @classmethod
+    def drhodp(cls, d):
+        """Isothermal compressibility (drho/dp)_T [kg/m^3/MPa], for iapws_transport.py."""
+        return 1.0 / cls.p_rho(d, units='MPa')
+
+    @classmethod
+    def v(cls, d):
+        """Specific volume [m^3/kg]."""
+        return 1.0 / (cls.rhostar * d['delta'])
+
+    @classmethod
+    def rho(cls, d):
+        """Density [kg/m^3] -- what was fed in, returned for symmetry with R1 and R2."""
+        return cls.rhostar * d['delta']
+
+    @classmethod
+    def u(cls, d, units='J'):
+        """Specific internal energy [J/kg by default]. u/(RT) = tau*phi_tau."""
+        scale = w.energy_units[units]
+        T = cls.Tstar / d['tau']
+        return scale * R * T * d['tau'] * d['phi_t']
+
+    @classmethod
+    def s(cls, d, units='J'):
+        """Specific entropy [J/kg-K by default]. s/R = tau*phi_tau - phi."""
+        scale = w.energy_units[units]
+        return scale * R * (d['tau'] * d['phi_t'] - d['phi'])
+
+    @classmethod
+    def h(cls, d, units='J'):
+        """Specific enthalpy [J/kg by default]. h/(RT) = tau*phi_tau + delta*phi_delta."""
+        scale = w.energy_units[units]
+        T = cls.Tstar / d['tau']
+        return scale * R * T * (d['tau'] * d['phi_t'] + d['delta'] * d['phi_d'])
+
+    @classmethod
+    def cv(cls, d, units='J'):
+        """Isochoric heat capacity [J/kg-K by default]. cv/R = -tau^2*phi_tautau."""
+        scale = w.energy_units[units]
+        return scale * (-R * d['tau']**2 * d['phi_tt'])
+
+    @classmethod
+    def cp(cls, d, units='J'):
+        """Isobaric heat capacity [J/kg-K by default].
+
+        cp/R = -tau^2*phi_tautau
+               + (delta*phi_delta - delta*tau*phi_deltatau)^2
+                 / (2*delta*phi_delta + delta^2*phi_deltadelta)
+
+        The denominator is dp/drho in reduced form, so cp diverges where the isotherm
+        goes flat -- which at the critical point is exactly what it should do.
+        """
+        scale = w.energy_units[units]
+        num = (d['delta'] * d['phi_d'] - d['delta'] * d['tau'] * d['phi_dt'])**2
+        den = 2.0 * d['delta'] * d['phi_d'] + d['delta']**2 * d['phi_dd']
+        return scale * R * (-d['tau']**2 * d['phi_tt'] + num / den)
+
+    @classmethod
+    def c(cls, d):
+        """Speed of sound [m/s].
+
+        w^2/(RT) = 2*delta*phi_delta + delta^2*phi_deltadelta
+                   - (delta*phi_delta - delta*tau*phi_deltatau)^2 / (tau^2*phi_tautau)
+        """
+        T = cls.Tstar / d['tau']
+        num = (d['delta'] * d['phi_d'] - d['delta'] * d['tau'] * d['phi_dt'])**2
+        val = R * 1000.0 * T * (2.0 * d['delta'] * d['phi_d'] + d['delta']**2 * d['phi_dd']
+                                - num / (d['tau']**2 * d['phi_tt']))
+        return w.sqrt(val)
+
+    @classmethod
+    def rho_pT(cls, p, T, iters=60):
+        """Density [kg/m^3] at a given (p, T) in region 3, by solving Eq. (28) for density.
+
+        Formulation:
+            Bisection on p(rho, T) - p over a bracket chosen by which side of the
+            saturation line the state is on, followed by one Newton correction that
+            carries the autograd graph.
+
+            Bisection rather than a bare Newton because p(rho, T) is very flat in rho
+            near the critical point -- that flatness is what region 3 exists to describe
+            -- so a Newton step there can be enormous and leave the region entirely.
+            Bisection cannot diverge, and the bracket is chosen per point:
+
+                T >= Tc                   : one branch, 1 to 900 kg/m^3
+                T <  Tc and p >= p_sat(T) : liquid branch, rho_c to 900 kg/m^3
+                T <  Tc and p <  p_sat(T) : vapor branch,  1 to rho_c
+
+            The final Newton step is what makes this differentiable. The bisection loop
+            is not: it is a chain of comparisons, and its result is detached. Adding one
+            step of rho <- rho - (p(rho,T) - p)/(dp/drho)_T on top leaves the value alone
+            (the residual is already at machine precision) but gives torch the exact
+            implicit derivatives of the converged root,
+                (drho/dp)_T = 1/(dp/drho)_T  and  (drho/dT)_p = -(dp/dT)_rho/(dp/drho)_T,
+            which is what a surrogate trained through this needs.
+
+        Valid range:
+            Region 3 as defined by region(): 623.15 K <= T <= T_B23(p), p up to 100 MPa.
+            Outside it the bracket will not contain the root and the answer is an
+            endpoint, not a solution. Nothing is range-checked here.
+
+        Uncertainty:
+            Exact to the basic equation to within the bisection tolerance, which after
+            60 halvings of a 900 kg/m^3 bracket is far below floating-point resolution.
+
+        Reference:
+            IAPWS-IF97 Eq. (28); the bracketing strategy is this library's, not the
+            release's.
+
+        Inputs (float, numpy array, or torch tensor; broadcastable):
+            p     : pressure, MPa
+            T     : temperature, K
+            iters : bisection halvings
+
+        Returns:
+            rho : density, kg/m^3, same type as the inputs
+        """
+        (p_, T_), state = w.prepare(p, T)
+
+        # The saturation line only exists below Tc; above it there is one branch.
+        p_sat = R4._p(torch.clamp(T_, max=Tc - 1.0e-6))
+        liquid_like = (T_ >= Tc) | (p_ >= p_sat)
+        vapor_like = (T_ < Tc) & (p_ < p_sat)
+
+        lo = torch.where(liquid_like & (T_ < Tc),
+                         torch.full_like(T_, rhoc), torch.full_like(T_, 1.0))
+        hi = torch.where(vapor_like, torch.full_like(T_, rhoc), torch.full_like(T_, 900.0))
+
+        # Detached throughout: a comparison carries no useful derivative, and the final
+        # Newton step below restores the one that matters.
+        with torch.no_grad():
+            T_fix = T_.detach()
+            p_fix = p_.detach()
+            for _ in range(iters):
+                mid = 0.5 * (lo + hi)
+                p_mid = cls._p(mid, T_fix)
+                too_low = p_mid < p_fix
+                lo = torch.where(too_low, mid, lo)
+                hi = torch.where(too_low, hi, mid)
+            rho_star = 0.5 * (lo + hi)
+
+        # One differentiable Newton step. The denominator is detached so that the
+        # derivative it produces is the implicit one and nothing else; the numerator
+        # carries the graph and is numerically zero, so the value does not move.
+        res = cls._p(rho_star, T_) - p_
+        with torch.no_grad():
+            dp_drho = cls._p_rho(rho_star, T_.detach())
+        rho = rho_star - res / dp_drho
+
+        return w.restore(rho, state)
+
+    @classmethod
+    def _p(cls, rho, T):
+        """Pressure [MPa] straight from (rho, T), staying in torch tensors.
+
+        The public path is helmholtz() then p(), but that round-trips the whole state
+        dict through restore() on every call, which is wasted work inside a solver loop
+        that only wants the pressure. This is the same equation with the type handling
+        left out, so it is private and takes 1-D float64 tensors only.
+        """
+        I, J, n = (w.on(t, rho) for t in (cls.I, cls.J, cls.n))
+        delta = rho / cls.rhostar
+        tau = cls.Tstar / T
+        phi_d = cls.n1 / delta + (n * I * delta**(I - 1) * tau**J).sum(dim=0)
+        return rho * R * T * delta * phi_d * 1.0e-3     # kPa -> MPa
+
+    @classmethod
+    def _p_rho(cls, rho, T):
+        """(dp/drho)_T [MPa/(kg/m^3)] straight from (rho, T). Private, see _p."""
+        I, J, n = (w.on(t, rho) for t in (cls.I, cls.J, cls.n))
+        delta = rho / cls.rhostar
+        tau = cls.Tstar / T
+        phi_d = cls.n1 / delta + (n * I * delta**(I - 1) * tau**J).sum(dim=0)
+        phi_dd = -cls.n1 / delta**2 + (n * I * (I - 1) * delta**(I - 2) * tau**J).sum(dim=0)
+        return R * T * (2.0 * delta * phi_d + delta**2 * phi_dd) * 1.0e-3
+
+
+class R4:
+    # =========================================
+    # Table 34: Region 4 saturation coefficients
+    # =========================================
+    Coeff = torch.from_numpy(np.loadtxt(f'{pth}/Region4.txt')).to(w.dtype)
+
+    T_max = T_13         # Above this, the saturation line runs through region 3 [K]
+
+    @classmethod
+    def _p(cls, T):
+        """Saturation pressure [MPa] straight from T, staying in torch tensors.
+
+        Private counterpart of p(), used inside R3.rho_pT() where the type round-trip
+        would be wasted work. Takes a 1-D float64 tensor and returns one.
+        """
+        n = w.on(cls.Coeff, T)
+
+        theta = T / 1.0 + n[8] / (T / 1.0 - n[9])            # Eq. (29b)
+        A = theta**2 + n[0] * theta + n[1]
+        B = n[2] * theta**2 + n[3] * theta + n[4]
+        C = n[5] * theta**2 + n[6] * theta + n[7]
+
+        # The discriminant is positive over the whole saturation line; clamping only
+        # guards a caller who reaches outside it, and keeps the backward pass finite.
+        disc = torch.clamp(B**2 - 4.0 * A * C, min=0.0)
+        return (2.0 * C / (-B + torch.sqrt(disc)))**4        # Eq. (30)
+
+    @classmethod
+    def p(cls, T):
+        """Saturation pressure, IF97 Eq. (30) -- the region 4 basic equation.
+
+        Formulation:
+            theta   = T/1 K + n9/(T/1 K - n10)
+            A, B, C = quadratics in theta with the Table 34 coefficients
+            p_sat   = [2C / (-B + sqrt(B^2 - 4AC))]^4   MPa
+
+        Valid range:
+            273.15 K <= T <= 647.096 K, from the triple point to the critical point.
+
+        Uncertainty:
+            Agrees with the IAPWS-95 saturation line to better than 0.02 percent in
+            pressure over the whole range.
+
+        Reference:
+            IAPWS-IF97 Eqs. (29)-(30) and Table 34.
+
+        Inputs:
+            T : temperature, K (float, numpy array, or torch tensor)
+
+        Returns:
+            p_sat : saturation pressure, MPa, same type as the input
+        """
+        (T_,), state = w.prepare(T)
+        return w.restore(cls._p(T_), state)
+
+    @classmethod
+    def T(cls, p):
+        """Saturation temperature, IF97 Eq. (31) -- the explicit inverse of Eq. (30).
+
+        Formulation:
+            beta    = (p/1 MPa)^(1/4)
+            E, F, G = quadratics in beta with the Table 34 coefficients
+            D       = 2G / (-F - sqrt(F^2 - 4EG))
+            T_sat   = [n10 + D - sqrt((n10 + D)^2 - 4(n9 + n10*D))] / 2
+
+        Valid range:
+            611.213 Pa <= p <= 22.064 MPa, from the triple point to the critical point.
+
+        Uncertainty:
+            The exact inverse of Eq. (30) to within rounding.
+
+        Reference:
+            IAPWS-IF97 Eq. (31) and Table 34.
+
+        Inputs:
+            p : pressure, MPa (float, numpy array, or torch tensor)
+
+        Returns:
+            T_sat : saturation temperature, K, same type as the input
+        """
+        (p_,), state = w.prepare(p)
+        n = w.on(cls.Coeff, p_)
+
+        beta = (p_ / 1.0)**0.25
+        E = beta**2 + n[2] * beta + n[5]
+        F = n[0] * beta**2 + n[3] * beta + n[6]
+        G = n[1] * beta**2 + n[4] * beta + n[7]
+
+        disc_D = torch.clamp(F**2 - 4.0 * E * G, min=0.0)
+        D = 2.0 * G / (-F - torch.sqrt(disc_D))
+
+        disc_T = torch.clamp((n[9] + D)**2 - 4.0 * (n[8] + n[9] * D), min=0.0)
+        T = (n[9] + D - torch.sqrt(disc_T)) / 2.0
+
+        return w.restore(T, state)
+
+    @classmethod
+    def h_f(cls, T, units='J'):
+        """Saturated-liquid enthalpy [J/kg by default] at temperature T.
+
+        Formulation:
+            h_f(T) = R1.h(R1.gibbs(p_sat(T), T))
+
+        Valid range:
+            273.15 K <= T <= 623.15 K. Above 623.15 K the saturation line leaves region 1
+            and runs through region 3, where the saturated densities themselves have to be
+            solved for; that case is not covered here. Use iapws95.IAPWS95.saturation(),
+            which solves the phase-equilibrium conditions directly and is valid all the
+            way to the critical point.
+
+        Uncertainty:
+            That of region 1 and of Eq. (30) combined; see IF97 Sec. 12.
+
+        Reference:
+            IAPWS-IF97 Sec. 8 and Sec. 5.
+
+        Inputs:
+            T     : temperature, K (float, numpy array, or torch tensor)
+            units : 'J', 'kJ' or 'MJ' per kg
+
+        Returns:
+            h_f : saturated-liquid enthalpy, same type as the input
+        """
+        return R1.h(R1.gibbs(cls.p(T), T), units=units)
+
+    @classmethod
+    def h_g(cls, T, units='J'):
+        """Saturated-vapor enthalpy [J/kg by default] at temperature T.
+
+        The region 2 counterpart of h_f: the saturated vapor at T is region 2 evaluated on
+        the saturation line. Same 623.15 K ceiling and the same reason for it.
+
+        Inputs:
+            T     : temperature, K (float, numpy array, or torch tensor)
+            units : 'J', 'kJ' or 'MJ' per kg
+
+        Returns:
+            h_g : saturated-vapor enthalpy, same type as the input
+        """
+        return R2.h(R2.gibbs(cls.p(T), T), units=units)
+
+
+# Backwards-compatible spelling: region 4 used to be called RSAT in this module.
+RSAT = R4
+
+
+class R5:
+    # =========================================
+    # Table 37: ideal-gas part coefficients
+    # Table 38: residual part coefficients
+    # =========================================
+    pstar = 1.0          # Reducing pressure [MPa]
+    Tstar = 1000.0       # Reducing temperature [K]
+
+    Coeff_I = torch.from_numpy(np.loadtxt(f'{pth}/Region5_Ideal.txt')).to(w.dtype)
+    Coeff_R = torch.from_numpy(np.loadtxt(f'{pth}/Region5_Res.txt')).to(w.dtype)
+
+    J0, n0 = Coeff_I[:, 0:1], Coeff_I[:, 1:2]
+    Ir, Jr, nr = Coeff_R[:, 0:1], Coeff_R[:, 1:2], Coeff_R[:, 2:3]
+
+    @classmethod
+    def gibbs(cls, p, T):
+        """Dimensionless Gibbs free energy of region 5 and its derivatives, Eq. (32).
+
+        Formulation:
+            gamma = gamma_o + gamma_r
+            gamma_o = ln(pi) + sum_{i=1..6} n_i^o * tau^(J_i^o)                Eq. (33)
+            gamma_r = sum_{i=1..6} n_i * pi^I_i * tau^J_i                      Eq. (34)
+            with pi = p/1 MPa and tau = 1000 K/T. Note that region 5's residual part
+            raises tau itself, not (tau - 0.5) as region 2 does. The derivatives are
+            Tables 40 and 41.
+
+        Valid range:
+            1073.15 K <= T <= 2273.15 K, 0 < p <= 50 MPa. The equation is for pure
+            undissociated water; at these temperatures real steam dissociates, and that
+            has to be accounted for separately.
+
+        Uncertainty:
+            See IF97 Sec. 12; the underlying data at these temperatures are sparse.
+
+        Reference:
+            IAPWS-IF97 Eqs. (32)-(34), Tables 37-38 (coefficients), 40-41 (derivatives).
+
+        Inputs (float, numpy array, or torch tensor; broadcastable):
+            p : pressure, MPa, strictly greater than zero
+            T : temperature, K
+
+        Returns:
+            d : dict of pi, tau, g0, g0_p, g0_pp, g0_t, g0_tt, gr, gr_p, gr_pp, gr_t,
+                gr_tt, gr_pt -- the same keys region 2 uses, so the accessors read the
+                same way.
+        """
+        (p_, T_), state = w.prepare(p, T)
+        J0, n0 = (w.on(t, p_) for t in (cls.J0, cls.n0))
+        Ir, Jr, nr = (w.on(t, p_) for t in (cls.Ir, cls.Jr, cls.nr))
+
+        pi = p_ / cls.pstar
+        tau = cls.Tstar / T_
+
+        # ---- Ideal-gas part, Table 40 ----
+        g0 = torch.log(pi) + (n0 * tau**J0).sum(dim=0)
+        g0_p = 1.0 / pi
+        g0_pp = -1.0 / pi**2
+        g0_t = (n0 * J0 * tau**(J0 - 1)).sum(dim=0)
+        g0_tt = (n0 * J0 * (J0 - 1) * tau**(J0 - 2)).sum(dim=0)
+
+        # ---- Residual part, Table 41 ----
+        gr = (nr * pi**Ir * tau**Jr).sum(dim=0)
+        gr_p = (nr * Ir * pi**(Ir - 1) * tau**Jr).sum(dim=0)
+        gr_pp = (nr * Ir * (Ir - 1) * pi**(Ir - 2) * tau**Jr).sum(dim=0)
+        gr_t = (nr * Jr * pi**Ir * tau**(Jr - 1)).sum(dim=0)
+        gr_tt = (nr * Jr * (Jr - 1) * pi**Ir * tau**(Jr - 2)).sum(dim=0)
+        gr_pt = (nr * Ir * Jr * pi**(Ir - 1) * tau**(Jr - 1)).sum(dim=0)
+
+        vals = {'pi': pi, 'tau': tau,
+                'g0': g0, 'g0_p': g0_p, 'g0_pp': g0_pp, 'g0_t': g0_t, 'g0_tt': g0_tt,
+                'gr': gr, 'gr_p': gr_p, 'gr_pp': gr_pp, 'gr_t': gr_t, 'gr_tt': gr_tt,
+                'gr_pt': gr_pt}
+        return {key: w.restore(val, state) for key, val in vals.items()}
+
+
+    @classmethod
+    def v(cls, d):
+        """Specific volume [m^3/kg]."""
+        T = cls.Tstar / d['tau']
+        p = cls.pstar * d['pi']
+        return R * T / p * d['pi'] * (d['g0_p'] + d['gr_p']) * 1.0e-3
+
+    @classmethod
+    def rho(cls, d):
+        """Density [kg/m^3]."""
+        return 1.0 / cls.v(d)
+
+    @classmethod
+    def drhodp(cls, d):
+        """Isothermal compressibility (drho/dp)_T [kg/m^3/MPa], for iapws_transport.py."""
+        T = cls.Tstar / d['tau']
+        dvdp = R * T * (d['g0_pp'] + d['gr_pp']) / cls.pstar**2 * 1.0e-3
+        return -cls.rho(d)**2 * dvdp
+
+    @classmethod
+    def u(cls, d, units='J'):
+        """Specific internal energy [J/kg by default]."""
+        scale = w.energy_units[units]
+        T = cls.Tstar / d['tau']
+        return scale * R * T * (d['tau'] * (d['g0_t'] + d['gr_t'])
+                                - d['pi'] * (d['g0_p'] + d['gr_p']))
+
+    @classmethod
+    def s(cls, d, units='J'):
+        """Specific entropy [J/kg-K by default]."""
+        scale = w.energy_units[units]
+        return scale * R * (d['tau'] * (d['g0_t'] + d['gr_t']) - (d['g0'] + d['gr']))
+
+    @classmethod
+    def h(cls, d, units='J'):
+        """Specific enthalpy [J/kg by default]."""
+        scale = w.energy_units[units]
+        T = cls.Tstar / d['tau']
+        return scale * R * T * d['tau'] * (d['g0_t'] + d['gr_t'])
+
+    @classmethod
+    def cp(cls, d, units='J'):
+        """Isobaric heat capacity [J/kg-K by default]. cp/R = -tau^2*(g0_tt + gr_tt)."""
+        scale = w.energy_units[units]
+        return scale * (-R * d['tau']**2 * (d['g0_tt'] + d['gr_tt']))
+
+    @classmethod
+    def cv(cls, d, units='J'):
+        """Isochoric heat capacity [J/kg-K by default]. Same relation as region 2."""
+        scale = w.energy_units[units]
+        num = (1.0 + d['pi'] * d['gr_p'] - d['tau'] * d['pi'] * d['gr_pt'])**2
+        den = 1.0 - d['pi']**2 * d['gr_pp']
+        return scale * R * (-d['tau']**2 * (d['g0_tt'] + d['gr_tt']) - num / den)
+
+    @classmethod
+    def c(cls, d):
+        """Speed of sound [m/s]. Same relation as region 2."""
+        T = cls.Tstar / d['tau']
+        num = 1.0 + 2.0 * d['pi'] * d['gr_p'] + d['pi']**2 * d['gr_p']**2
+        inner = (1.0 + d['pi'] * d['gr_p'] - d['tau'] * d['pi'] * d['gr_pt'])**2
+        den = ((1.0 - d['pi']**2 * d['gr_pp'])
+               + inner / (d['tau']**2 * (d['g0_tt'] + d['gr_tt'])))
+        val = R * 1000.0 * T * num / den
+        return w.sqrt(val)
+
+
+def region(p, T):
+    """Which IF97 region a state belongs to.
+
+    Formulation:
+        273.15 K <= T <= 623.15 K  : region 1 if p >= p_sat(T), else region 2
+        623.15 K <  T <= 863.15 K  : region 3 if p >  p_B23(T), else region 2
+        863.15 K <  T <= 1073.15 K : region 2
+        1073.15 K < T <= 2273.15 K : region 5
+        Region 4 -- the saturation line itself -- is never returned. It is a line of zero
+        area in the (p, T) plane, so no floating-point state lands exactly on it; call
+        R4.p or R4.T directly when the saturation line is what is wanted.
+
+    Valid range:
+        273.15 K <= T <= 2273.15 K, 0 < p <= 100 MPa (50 MPa in region 5). A state
+        outside the formulation entirely is reported as region 0 rather than silently
+        assigned to the nearest equation.
+
+    Uncertainty:
+        Not applicable -- a case split, not a correlation.
+
+    Reference:
+        IAPWS-IF97 Fig. 1, Eq. (5) and Sec. 8.
+
+    Inputs (float, numpy array, or torch tensor; broadcastable):
+        p : pressure, MPa
+        T : temperature, K
+
+    Returns:
+        region : 1, 2, 3 or 5, or 0 for a state outside the formulation. Integer-valued,
+                 and of the same kind as the inputs -- a torch long tensor for torch
+                 input, a NumPy integer array for NumPy or list input, a Python int for a
+                 scalar.
+    """
+    (p_, T_), state = w.prepare(p, T)
+
+    p_sat = R4._p(torch.clamp(T_, min=T_min, max=Tc - 1.0e-6))
+    p_b23 = B23.p(T_)
+
+    cold = T_ <= T_13
+    warm = (T_ > T_13) & (T_ <= T_25)
+    hot = (T_ > T_25) & (T_ <= T_max)
+
+    reg = torch.zeros_like(T_)
+    reg = torch.where(cold & (p_ >= p_sat), torch.full_like(T_, 1.0), reg)
+    reg = torch.where(cold & (p_ < p_sat), torch.full_like(T_, 2.0), reg)
+    reg = torch.where(warm & (p_ > p_b23), torch.full_like(T_, 3.0), reg)
+    reg = torch.where(warm & (p_ <= p_b23), torch.full_like(T_, 2.0), reg)
+    reg = torch.where(hot, torch.full_like(T_, 5.0), reg)
+
+    # Outside the formulation's own limits, in either variable, nothing applies.
+    inside = ((T_ >= T_min) & (T_ <= T_max) & (p_ > 0.0)
+              & torch.where(hot, p_ <= p_5max, p_ <= p_max))
+    reg = torch.where(inside, reg, torch.zeros_like(reg))
+
+    # restore() would hand back floats; a region label is an integer, so the cast is done
+    # here rather than pretending 3.0 and 3 are the same thing.
+    reg = reg.reshape(state['shape'])
+    if state['kind'] == 'torch':
+        return reg.to(torch.long)
+    if state['kind'] == 'numpy':
+        return reg.detach().cpu().numpy().astype(np.int64)
+    return int(reg.item())

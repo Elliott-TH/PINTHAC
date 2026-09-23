@@ -1,5 +1,4 @@
-"""
-Parametric direct PINN for the annular fuel pin: same two-stream axial
+"""Parametric direct PINN for the annular fuel pin: same two-stream axial
 energy balance Direct_PINN2.py solves, but with the geometry and flow
 promoted from script constants to *network inputs*, and with the full
 coolant -> cladding -> gas gap -> fuel-surface resistance chain
@@ -41,26 +40,10 @@ from pinthac.properties import iapws95 as iapws
 from pinthac.ml import losses
 
 dtype = torch.float64
-# CLAUDE.md section 5 forbids a module-level torch.set_default_dtype (it silently
-# promotes every downstream tensor/network in the process to float64) -- flagged, not
-# fixed: PINN.__init__ below builds its nn.Linear layers with no explicit dtype=, so its
-# weights are created in whatever the *global* default is; removing this line without
-# also adding an explicit .to(dtype) at every construction site would build a float32
-# model, and loading the float64 checkpoint (Direct_PINN3_out/model.pt) into it would
-# silently downcast the trained weights on load_state_dict's copy_ -- a numeric change to
-# the trained model this pass is explicitly not allowed to make. Left as-is; see the
-# Phase 6/7 report.
 torch.set_default_dtype(dtype)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# The tables below get built once on cpu and moved to device after. IAPWS_97's
-# transport coefficients (VISC.H/Hij, COND.Lk/Lij/Aij) are cpu tensors with no
-# .to(device), so mu/lam raise a device mismatch if IAPWS_95 runs on cuda.
-iapws.device = torch.device("cpu")
-for key,val in list(vars(iapws.IAPWS95).items()):
-    if isinstance(val,torch.Tensor):
-        setattr(iapws.IAPWS95,key,val.cpu())
 
 # ---------------------------------------------------------------- config
 
@@ -125,8 +108,7 @@ Theta_tab = torch.cat([torch.zeros(1,device=device,dtype=dtype),
                         torch.cumsum(0.5*(kf_tab[1:]+kf_tab[:-1])*torch.diff(Tf_tab),0)])
 
 def interp(x,xp,fp):
-    """
-    Piecewise-linear lookup into a strictly-increasing torch table, held
+    """Piecewise-linear lookup into a strictly-increasing torch table, held
     flat past either end (values outside [xp[0],xp[-1]] clamp to that
     endpoint rather than extrapolating).
 
@@ -149,8 +131,7 @@ def interp(x,xp,fp):
     return (f0 + (f1-f0)*(xc-x0)/(x1-x0)).reshape(x.shape)
 
 def Props(h):
-    """
-    SCW property dict at enthalpy h, by table lookup into P_tab (built at
+    """SCW property dict at enthalpy h, by table lookup into P_tab (built at
     the fixed pressure `p` above from getprop._getprop('SCW', ...)).
 
     Inputs:
@@ -162,8 +143,7 @@ def Props(h):
     return {key: interp(h,h_tab,val) for key,val in P_tab.items()}
 
 def T_h(h):
-    """
-    SCW bulk temperature at enthalpy h, by table lookup into h_tab/T_tab.
+    """SCW bulk temperature at enthalpy h, by table lookup into h_tab/T_tab.
 
     Inputs:
         h : coolant enthalpy, J/kg, torch tensor, any shape
@@ -175,12 +155,12 @@ def T_h(h):
 def Theta(T):
     """Kirchhoff transform of UO2 conductivity, integral of k_Klimenko dT.
     Same role as PinHT.Ann_Theta, but as a torch interpolant so it stays in
-    the autograd graph."""
+    the autograd graph.
+    """
     return interp(T,Tf_tab,Theta_tab)
 
 def qp(z):
-    """
-    Fixed cosine axial LHGR shape, the same single operating-point power
+    """Fixed cosine axial LHGR shape, the same single operating-point power
     profile every training case in this module is checked against (unlike
     pinthac/ml/deeponet.py's rod surrogate, which is trained across a
     family of shapes -- see datagen.py's Fourier/Legendre parameterizations
@@ -199,8 +179,7 @@ kgas = lambda T: mat.Gas.k(GAS,T)
 # ------------------------------------------------------------- geometry
 
 def geometry(P):
-    """
-    Per-case radii and channel hydraulics from the raw parameter dict, all
+    """Per-case radii and channel hydraulics from the raw parameter dict, all
     columns broadcastable (N,1) tensors. Mirrors Ann_SCA.geometry: the
     coolant-wetted surfaces are the *cladding* ID/OD, not r_i/r_o, now
     that there is cladding and a gas gap in between.
@@ -221,8 +200,7 @@ def geometry(P):
                 G_i=P['mdot_i']/A_i, G_o=P['mdot_o']/A_o)
 
 def sample_params(n,generator=None):
-    """
-    Uniform draw over the parameter box, returned as an (n,9) tensor in
+    """Uniform draw over the parameter box, returned as an (n,9) tensor in
     PARAMS order.
 
     r_o and pitch are drawn through derived quantities rather than
@@ -245,8 +223,7 @@ def sample_params(n,generator=None):
     return torch.cat([mdot_i,mdot_o,r_i,r_o,tc_i,tc_o,pitch,delta_i,delta_o],1)
 
 def as_dict(P):
-    """
-    PARAMS columns of a (batch, len(PARAMS)) tensor, split back out into a
+    """PARAMS columns of a (batch, len(PARAMS)) tensor, split back out into a
     name -> (batch,1) dict -- the inverse of the column layout make_batch
     builds.
 
@@ -258,8 +235,7 @@ def as_dict(P):
     return {k: P[:,j:j+1] for j,k in enumerate(PARAMS)}
 
 def nominal(n=1):
-    """
-    The NOM reference pin's parameter row, repeated n times.
+    """The NOM reference pin's parameter row, repeated n times.
 
     Inputs:
         n : number of repeated rows to return
@@ -274,8 +250,7 @@ Nin = 1 + len(PARAMS)
 Nout = 2
 
 class PINN(nn.Module):
-    """
-    Same MLP as Direct_PINN2, widened for the parametric input, with the
+    """Same MLP as Direct_PINN2, widened for the parametric input, with the
     input normalization carried as buffers so a reloaded state_dict is
     self-contained (no need to re-derive RANGE at load time).
     """
@@ -312,8 +287,7 @@ hi = torch.tensor([[RANGE[k][1] for k in PARAMS]],device=device)
 model = PINN(lo,hi).to(device)
 
 def H(x):
-    """
-    Enthalpy field with the inlet condition hard-enforced: h(-L/2) = h_in
+    """Enthalpy field with the inlet condition hard-enforced: h(-L/2) = h_in
     and h > h_in everywhere, so neither needs a loss term. h_s is the
     scale of the attainable rise for *this* case's flow rates, which now
     vary across the batch.
@@ -325,8 +299,7 @@ def H(x):
 # ------------------------------------------------------- resistance chain
 
 def clad_drop(T_wet,qp_lin,Rin,Rout):
-    """
-    Temperature rise across a cladding layer carrying linear heat rate
+    """Temperature rise across a cladding layer carrying linear heat rate
     qp_lin, from its coolant-wetted surface to its fuel-facing surface.
     Rin/Rout are the smaller/larger radius of the layer, so the log term
     is positive either way and the drop always points away from the
@@ -342,8 +315,7 @@ def clad_drop(T_wet,qp_lin,Rin,Rout):
     return qp_lin*lg/(2*np.pi*mat.Zircalloy.k(T_wet + 0.5*dT))
 
 def gap_drop(T_clad,qp_lin,r_fuel,delta):
-    """
-    Fuel surface temperature across an open gas gap, via PinHT.htc_gap
+    """Fuel surface temperature across an open gas gap, via PinHT.htc_gap
     (conduction through the fill gas + surface-to-surface radiation).
 
     htc_gap depends on the fuel surface temperature it is being used to
@@ -361,8 +333,7 @@ def gap_drop(T_clad,qp_lin,r_fuel,delta):
     return Tfo, hg
 
 def chain(h_i,h_o,qp_i,qp_o,P,g):
-    """
-    Full series resistance chain on both sides: bulk coolant -> convective
+    """Full series resistance chain on both sides: bulk coolant -> convective
     film -> cladding conduction -> gas gap -> fuel surface, given the
     enthalpies and the linear-heat-rate split.
 
@@ -391,8 +362,7 @@ def chain(h_i,h_o,qp_i,qp_o,P,g):
 # ------------------------------------------------------------- residuals
 
 def state(x):
-    """
-    Everything the residuals and the post-processing both need: geometry,
+    """Everything the residuals and the post-processing both need: geometry,
     the two coolant-stream enthalpy/heat-rate fields and their axial
     derivatives, the full resistance-chain temperatures, and both physics
     residuals (l1, l2), all evaluated at the collocation points x.
@@ -427,10 +397,6 @@ def state(x):
 
     c = chain(h_i,h_o,qp_i,qp_o,P,g)
 
-    # PinHT closes the annular conduction problem the other way round:
-    # given the two surface temperatures it returns C1, and Ann_qpp turns
-    # that into the surface fluxes. The inner surface carries a minus sign
-    # because the coolant is on the -r side there (see Ann_HT's docstring).
     C1, C2 = ht.Ann_HT(P['r_i'],P['r_o'],q3,Theta(c['Tfo_i']),Theta(c['Tfo_o']))
     qp_i_ht = -ht.Ann_qpp(P['r_i'],q3,C1)*2*np.pi*P['r_i']
 
@@ -440,13 +406,6 @@ def state(x):
     # already, by construction above -- so this is qp_i + qp_o - qp(z)
     # written the same way, not a different computation).
     res1 = qp_i + qp_o - qp(z)
-    # res2: the network's own inner/outer flux split must reproduce the
-    # split PinHT.Ann_HT/Ann_qpp give from the fuel surface temperatures
-    # that same split implies through the resistance chain -- its own
-    # residual, specific to this two-stream annular closure rather than
-    # the shared coolant-energy-balance form in losses.py, though its
-    # final reduction (mean-squared, q0-normalized) is the same shared
-    # losses.normalized_residual_loss() used for res1 in loss() below.
     res2 = qp_i - qp_i_ht
     l1 = res1/q0
     l2 = res2/q0
@@ -456,8 +415,7 @@ def state(x):
     return c
 
 def loss(x):
-    """
-    The two physics-loss terms used in the training objective below (Ls =
+    """The two physics-loss terms used in the training objective below (Ls =
     L1 + L2): mean-squared, q0-normalized coolant energy balance and
     fuel-conduction-consistency residuals, via
     losses.normalized_residual_loss -- algebraically the same
@@ -594,8 +552,7 @@ def load_model(path=f'{outdir}/model.pt'):
     return m, ck
 
 def predict(nz=201,**kw):
-    """
-    Evaluate the trained model for one pin. Any of PARAMS may be given as
+    """Evaluate the trained model for one pin. Any of PARAMS may be given as
     a keyword; anything omitted falls back to NOM. Returns the same dict
     state() builds, as numpy arrays.
 

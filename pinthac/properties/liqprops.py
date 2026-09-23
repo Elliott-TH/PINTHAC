@@ -1,35 +1,11 @@
-"""
-Liquid-metal (sodium, lead, lead-bismuth eutectic) thermophysical properties.
+"""Liquid-metal (sodium, lead, lead-bismuth eutectic) thermophysical properties.
 
-Moved from Liquid_Metals.py in Phase 1. Phase 2 brought it up to the docstring and
-backend-dispatch standard without changing any formula, constant or exponent, but left
-every citation as "Not established" (Q31) -- Sobolev 2020 was not yet in the repository.
-Per docs/DECISIONS.md ("Scope: lead is a toy" / "Scope: liquid metals"), no second
-correlation per property is added here -- this module is supporting infrastructure for
-the property library and the Phase 7 uncertainty figure, not an active SCA path.
-
-Phase 3 checked every formula and every rho/sigma/cp/h/mu/k coefficient below against
-Useful_pdfs/sobolev2020.pdf (V. Sobolev, "Properties of Liquid Metal Coolants: Na, Pb,
-Pb-Bi", 2020) -- the brief's preferred source for these three coolants -- and every one
-matches exactly (Sobolev's Tables 7, 9, 10, 11 and 13; see each function's own docstring
-for the equation and table number). Two things did not reconcile and are not fixed here,
-per CLAUDE.md ("change no physics"; a genuine defect is reported, not silently patched):
-
-  - Every h() function's last term has the opposite sign from Sobolev's own Equation 14
-    integral of its own cp -- see Sodium.h's docstring and docs/OPEN_QUESTIONS.md.
-  - Sodium.uncert_k's stated [0, 8%] band does not match Sobolev's text, which instead
-    states an up-to-15% spread for Na; and Lead.uncert_sig / LBE.uncert_sig do not match
-    the single collective "(3-6)%" figure Sobolev states for surface tension across all
-    three coolants -- see those functions' docstrings and docs/OPEN_QUESTIONS.md.
-
-Each class carries its own melting/boiling points, per-property validated temperature
-range (range_rho, range_cp, ...) and per-property relative uncertainty band
-(uncert_rho, uncert_cp, ..., each a [low, high] pair, already divided by 100) as class
-attributes, next to the correlations that use them -- these are the values D11
-(docs/DUPLICATES.md) checked and, where wrong, already corrected (Sodium.uncert_k's
-missing /100, Lead.range_rho's bare scalar). RANGES, below, is built from those same
-attributes rather than inventing new bounds, so every public function here has a real
-ranges.check() call.
+- Every h() function's last term has the opposite sign from Sobolev's own Equation 14
+  integral of its own cp -- see Sodium.h's docstring and docs/OPEN_QUESTIONS.md.
+- Sodium.uncert_k's stated [0, 8%] band does not match Sobolev's text, which instead
+  states an up-to-15% spread for Na; and Lead.uncert_sig / LBE.uncert_sig do not match
+  the single collective "(3-6)%" figure Sobolev states for surface tension across all
+  three coolants -- see those functions' docstrings and docs/OPEN_QUESTIONS.md.
 """
 from pinthac import backend, ranges
 
@@ -57,12 +33,7 @@ class Sodium:
     uncert_k = [0/100, 8/100]
 
     def rho(T):
-        """
-        Sodium density.
-
-        Why this model is here:
-            Feeds channel mass-flux and pressure-drop calculations for a sodium-cooled
-            channel.
+        """Sodium density.
 
         Formulation:
             rho = rho0 - A0*(T - Tm)
@@ -90,11 +61,7 @@ class Sodium:
         return rho0 - A0*(T-Tm)
 
     def sigma(T):
-        """
-        Sodium surface tension.
-
-        Why this model is here:
-            Feeds two-phase / boiling-margin calculations for a sodium-cooled channel.
+        """Sodium surface tension.
 
         Formulation:
             sigma = (sig0 - A0*(T - Tm)) * 1e-3
@@ -126,12 +93,7 @@ class Sodium:
         return (sig0 - A0*(T-Tm))*1E-3
 
     def cp(T):
-        """
-        Sodium specific heat capacity.
-
-        Why this model is here:
-            Feeds enthalpy-rise (LMprop_plots.py-style Monte Carlo) and energy-balance
-            calculations for a sodium-cooled channel.
+        """Sodium specific heat capacity.
 
         Formulation:
             Cp = a + b*T + c*T^2 + d*T^(-2), molar; divided by molar mass M for the
@@ -161,12 +123,7 @@ class Sodium:
         return Cp/Sodium.M
 
     def h(T):
-        """
-        Sodium specific enthalpy, referenced to the melting point.
-
-        Why this model is here:
-            The analytic integral of Sodium.cp from Tm to T, used for channel
-            enthalpy-rise calculations (see figures/liquid_metal_uncertainty.py).
+        """Sodium specific enthalpy, referenced to the melting point.
 
         Formulation:
             h = [a*(T-Tm) + (b/2)*(T^2-Tm^2) + (c/3)*(T^3-Tm^3) + d*(1/Tm - 1/T)] / M
@@ -204,11 +161,7 @@ class Sodium:
         return hout/Sodium.M
 
     def mu(T):
-        """
-        Sodium dynamic viscosity.
-
-        Why this model is here:
-            Feeds Reynolds-number and pressure-drop calculations (see liqprops.RePr).
+        """Sodium dynamic viscosity.
 
         Formulation:
             mu = mu0 * exp(E0/(R*T))
@@ -236,12 +189,7 @@ class Sodium:
         return mu0 * xp.exp(E0/(R*T))
 
     def k(T):
-        """
-        Sodium thermal conductivity.
-
-        Why this model is here:
-            Feeds Prandtl-number and heat-transfer-coefficient calculations (see
-            liqprops.RePr and correlations/htc.py::Lead.Shen's liquid-metal form).
+        """Sodium thermal conductivity.
 
         Formulation:
             k = 104 - 0.0466*T
@@ -296,14 +244,7 @@ class Lead:
     uncert_k = [0/100, 15/100]
 
     def rho(T):
-        """
-        Lead density.
-
-        Why this model is here:
-            Feeds channel mass-flux and pressure-drop calculations for a lead-cooled
-            channel; per docs/DECISIONS.md the lead/LBE channel in the annular SCA files
-            is a toy, so this is property-library infrastructure rather than an active
-            SCA path today.
+        """Lead density.
 
         Formulation:
             rho = rho0 - A0*(T - Tm)
@@ -331,11 +272,7 @@ class Lead:
         return rho0 - A0*(T-Tm)
 
     def sigma(T):
-        """
-        Lead surface tension.
-
-        Why this model is here:
-            Feeds two-phase / boiling-margin calculations for a lead-cooled channel.
+        """Lead surface tension.
 
         Formulation:
             sigma = (sig0 - A0*(T - Tm)) * 1e-3
@@ -366,12 +303,7 @@ class Lead:
         return (sig0 - A0*(T-Tm))*1E-3
 
     def cp(T):
-        """
-        Lead specific heat capacity.
-
-        Why this model is here:
-            Feeds enthalpy-rise (LMprop_plots.py-style Monte Carlo) and energy-balance
-            calculations for a lead-cooled channel.
+        """Lead specific heat capacity.
 
         Formulation:
             Cp = a + b*T + c*T^2 + d*T^(-2), molar; divided by molar mass M for the
@@ -401,12 +333,7 @@ class Lead:
         return Cp/Lead.M
 
     def h(T):
-        """
-        Lead specific enthalpy, referenced to the melting point.
-
-        Why this model is here:
-            The analytic integral of Lead.cp from Tm to T, used for channel
-            enthalpy-rise calculations (see figures/liquid_metal_uncertainty.py).
+        """Lead specific enthalpy, referenced to the melting point.
 
         Formulation:
             h = [a*(T-Tm) + (b/2)*(T^2-Tm^2) + (c/3)*(T^3-Tm^3) + d*(1/Tm - 1/T)] / M
@@ -442,12 +369,7 @@ class Lead:
         return hout/Lead.M
 
     def mu(T):
-        """
-        Lead dynamic viscosity.
-
-        Why this model is here:
-            Feeds Reynolds-number and pressure-drop calculations (see liqprops.RePr),
-            and correlations/htc.py::Lead.Shen's Peclet number.
+        """Lead dynamic viscosity.
 
         Formulation:
             mu = mu0 * exp(E0/(R*T))
@@ -475,12 +397,7 @@ class Lead:
         return mu0 * xp.exp(E0/(R*T))
 
     def k(T):
-        """
-        Lead thermal conductivity.
-
-        Why this model is here:
-            Feeds Prandtl-number and heat-transfer-coefficient calculations (see
-            liqprops.RePr and correlations/htc.py::Lead.Shen).
+        """Lead thermal conductivity.
 
         Formulation:
             k = 15.8 + 0.011*(T - Tm)
@@ -530,12 +447,7 @@ class LBE:
     uncert_k = [10/100, 15/100]
 
     def rho(T):
-        """
-        Lead-bismuth eutectic (LBE) density.
-
-        Why this model is here:
-            Feeds channel mass-flux and pressure-drop calculations for an LBE-cooled
-            channel.
+        """Lead-bismuth eutectic (LBE) density.
 
         Formulation:
             rho = rho0 - A0*(T - Tm)
@@ -563,11 +475,7 @@ class LBE:
         return rho0 - A0*(T-Tm)
 
     def sigma(T):
-        """
-        LBE surface tension.
-
-        Why this model is here:
-            Feeds two-phase / boiling-margin calculations for an LBE-cooled channel.
+        """LBE surface tension.
 
         Formulation:
             sigma = (sig0 - A0*(T - Tm)) * 1e-3
@@ -598,12 +506,7 @@ class LBE:
         return (sig0 - A0*(T-Tm))*1E-3
 
     def cp(T):
-        """
-        LBE specific heat capacity.
-
-        Why this model is here:
-            Feeds enthalpy-rise and energy-balance calculations for an LBE-cooled
-            channel.
+        """LBE specific heat capacity.
 
         Formulation:
             Cp = a + b*T + c*T^2 + d*T^(-2), molar; divided by molar mass M for the
@@ -633,12 +536,7 @@ class LBE:
         return Cp/LBE.M
 
     def h(T):
-        """
-        LBE specific enthalpy, referenced to the melting point.
-
-        Why this model is here:
-            The analytic integral of LBE.cp from Tm to T, used for channel
-            enthalpy-rise calculations.
+        """LBE specific enthalpy, referenced to the melting point.
 
         Formulation:
             h = [a*(T-Tm) + (b/2)*(T^2-Tm^2) + (c/3)*(T^3-Tm^3) + d*(1/Tm - 1/T)] / M
@@ -674,11 +572,7 @@ class LBE:
         return hout/LBE.M
 
     def mu(T):
-        """
-        LBE dynamic viscosity.
-
-        Why this model is here:
-            Feeds Reynolds-number and pressure-drop calculations (see liqprops.RePr).
+        """LBE dynamic viscosity.
 
         Formulation:
             mu = mu0 * exp(E0/(R*T))
@@ -706,12 +600,7 @@ class LBE:
         return mu0 * xp.exp(E0/(R*T))
 
     def k(T):
-        """
-        LBE thermal conductivity.
-
-        Why this model is here:
-            Feeds Prandtl-number and heat-transfer-coefficient calculations (see
-            liqprops.RePr).
+        """LBE thermal conductivity.
 
         Formulation:
             k = lam + A*(T - Tm) + B*(T - Tm)^2
@@ -742,10 +631,6 @@ class LBE:
         return kval
 
 
-# Built directly from the range_* attributes each class already carries (the values
-# D11/docs/DUPLICATES.md audited and, where wrong, already corrected) rather than
-# inventing anything new -- one plain dictionary per CLAUDE.md section 7, keyed by the
-# name each property's ranges.check() call above already uses.
 RANGES = {
     "sodium_rho":   {"T": tuple(Sodium.range_rho)},
     "sodium_sigma": {"T": tuple(Sodium.range_sig)},
@@ -769,13 +654,7 @@ RANGES = {
 
 
 def Props(mat, T):
-    """
-    Bundle a liquid metal's full property set at one temperature into a dict.
-
-    Why this model is here:
-        The single entry point correlations/friction.py and correlations/htc.py expect
-        (a 'Props' dict of rho/mu/k/cp, plus here sigma and h) -- called from
-        properties/getprop.py for the "Lead"/"Pb"/"Sodium"/"Na" substance names.
+    """Bundle a liquid metal's full property set at one temperature into a dict.
 
     Formulation:
         Calls mat.rho(T), mat.sigma(T), mat.cp(T), mat.h(T), mat.mu(T), mat.k(T) and
@@ -810,12 +689,7 @@ def Props(mat, T):
 
 
 def RePr(G, D, prop):
-    """
-    Reynolds and Prandtl numbers from a mass flux, hydraulic diameter and Props dict.
-
-    Why this model is here:
-        The shared Re/Pr calculation used ahead of a liquid-metal heat-transfer
-        correlation (e.g. correlations/htc.py::Lead.Shen).
+    """Reynolds and Prandtl numbers from a mass flux, hydraulic diameter and Props dict.
 
     Formulation:
         Re = G*D/mu

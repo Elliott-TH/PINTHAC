@@ -1,0 +1,10 @@
+# Table 37: coefficients and exponents of the ideal-gas part gamma^o of the
+# dimensionless Gibbs free energy for region 5, IAPWS-IF97 Eq. (33).
+# Useful_pdfs/IAPWS_97.pdf
+# columns: J   n
+ 0  -0.13179983674201E+02
+ 1   0.68540841634434E+01
+-3  -0.24805148933466E-01
+-2   0.36901534980333E+00
+-1  -0.31161318213925E+01
+ 2  -0.32961626538917E+00

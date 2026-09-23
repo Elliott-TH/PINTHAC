@@ -1,5 +1,4 @@
-"""
-sca/run.py -- the top-level single-channel-analysis driver, and the only file most
+"""sca/run.py -- the top-level single-channel-analysis driver, and the only file most
 callers need.
 
 run_channel(geometry, conditions, htc=..., friction=..., bundle=...,
@@ -118,8 +117,7 @@ _ROD_COND_KEYS = ("G", "pval", "Tin", "q0", "L", "N")
 
 
 def _select(name, table, category):
-    """
-    Look up a correlation by name, raising immediately with the valid options on a miss.
+    """Look up a correlation by name, raising immediately with the valid options on a miss.
 
     The single point every correlation-selection keyword passes through. No fallback
     guessing, no partial matching -- an unknown name raises here, listing the options,
@@ -143,8 +141,7 @@ def _select(name, table, category):
 
 
 def _scan_for_nonfinite(result, z_key, fields):
-    """
-    Find the first axial node where any tracked field is non-finite (NaN or +/-inf).
+    """Find the first axial node where any tracked field is non-finite (NaN or +/-inf).
 
     Neither solver raises on a physically nonsensical case: bisect_newton runs a fixed
     iteration count and returns whatever it has, and a diverging Picard iterate comes out
@@ -161,15 +158,19 @@ def _scan_for_nonfinite(result, z_key, fields):
         message (str)
     """
     z = np.asarray(result[z_key], dtype=float)
+    first_bad = None
     for field in fields:
         values = np.asarray(result[field], dtype=float)
         bad = np.flatnonzero(~np.isfinite(values))
         if bad.size:
             i = int(bad[0])
-            return dict(ok=False, node=i, z=float(z[i]), field=field,
-                        message=(f"{field} is non-finite (NaN or inf) at node {i} "
-                                 f"(z = {z[i]:.4f} m) -- first occurrence; there may be "
-                                 f"more."))
+            if first_bad is None or i < first_bad[0]:
+                first_bad = (i, field)
+    if first_bad is not None:
+        i, field = first_bad
+        return dict(ok=False, node=i, z=float(z[i]), field=field,
+                    message=f"{field} is non-finite (NaN or inf) at node {i} "
+                            f"(z = {z[i]:.4f} m) -- first occurrence; there may be more.")
     return dict(ok=True, node=None, z=None, field=None,
                 message="every tracked field is finite at every axial node")
 
@@ -178,7 +179,8 @@ def _rod_inputs(geometry, conditions):
     """Assemble sca/rod.py's inputs dict and run_SCA() keyword arguments from a
     geometry dict (pitch, rco, tc, delta, kc) and a conditions dict (G, pval, Tin, q0,
     and optionally L, N). Raises ValueError listing what is missing rather than letting
-    rod.run_SCA fail on a KeyError with no context."""
+    rod.run_SCA fail on a KeyError with no context.
+    """
     missing_geom = [k for k in _ROD_GEOM_KEYS if k not in geometry]
     missing_cond = [k for k in ("G", "pval", "Tin", "q0") if k not in conditions]
     if missing_geom or missing_cond:
@@ -204,7 +206,8 @@ def _annular_inputs(geometry, conditions):
     geometry and operating conditions in one mapping. Every physical key is required --
     see _ANNULAR_GEOM_KEYS above for why there is no default case to fall back on. Only
     the two discretization/material choices with an obvious default (N, Gas) are filled
-    in."""
+    in.
+    """
     merged = dict(geometry)
     merged.update(conditions)
     missing = [k for k in _ANNULAR_GEOM_KEYS + _ANNULAR_COND_KEYS if k not in merged]
@@ -219,10 +222,9 @@ def _annular_inputs(geometry, conditions):
 
 
 def run_channel(geometry, conditions, htc=None, friction=None,
-                 bundle="presser", fuel_conductivity="klimenko", coolant="scw",
+                 bundle="presser", fuel_conductivity="klimenko", coolant="scw", annular_method="march",
                  **solver_kwargs):
-    """
-    Run one single-channel-analysis case. The module's main entry point.
+    """Run one single-channel-analysis case. The module's main entry point.
 
     Not a physical model -- a dispatcher. geometry['type'] selects rod.run_SCA or
     annular.solve_field, geometry/conditions are reshaped into that solver's own input
@@ -252,14 +254,18 @@ def run_channel(geometry, conditions, htc=None, friction=None,
                      scw_table, device; annular: q_p, outer_iter, tol, progress, and
                      use_lut/lut for the property lookup table. This is why run_channel
                      does not need to name every solver knob itself.
+        annular_method : 'march' (default) solves the radial balance cell by cell;
+                     'picard' retains the whole-field solver for comparisons.
     Returns:
         dict: result (the underlying run_SCA()/solve_field() output), geom_type,
         requested (the four correlation names as given), notes (list of strings, always
         empty today -- kept in the return shape in case a future selection category
         again can't be fully honored by the dispatched solver), convergence (dict, see
-        _scan_for_nonfinite -- for 'annular' this also carries
-        outer_converged/outer_residual/outer_iters_used, see
-        annular.solve_field's docstring)
+        _scan_for_nonfinite). Annular march adds radial_converged/radial_residual;
+        Picard adds outer_converged/outer_residual/outer_iters_used.
+        result includes axial convection HTC [W/m²/K]: htc_conv for rods,
+        htc_conv_i/htc_conv_o for annular channels. Annular gap HTC profiles
+        are htc_gap_i/htc_gap_o; each profile aligns with result['z'].
     """
     geom_type = geometry.get("type")
     if geom_type not in ("rod", "annular"):
@@ -274,6 +280,8 @@ def run_channel(geometry, conditions, htc=None, friction=None,
 
     requested = dict(htc=htc, friction=friction, bundle=bundle,
                       fuel_conductivity=fuel_conductivity, coolant=coolant)
+    if geom_type == "annular":
+        requested["annular_method"] = annular_method
 
     # Validate every requested name is at least recognized (a typo or an unsupported
     # name fails immediately, listing the valid options) and resolve it to the actual
@@ -320,39 +328,48 @@ def run_channel(geometry, conditions, htc=None, friction=None,
                                       friction_func=friction_func,
                                       bundle_func=bundle_func, k_func=k_func,
                                       Theta_func=Theta_func, **run_kwargs)
-        convergence = _scan_for_nonfinite(result, "Z", ("T_i", "T_fuel_max", "dP"))
+        convergence = _scan_for_nonfinite(result, "Z", ("Tm", "htc_conv", "Tco", "Tci", "Tfo", "Tf_max", "dP"))
     else:
         inp = _annular_inputs(geom_only, conditions)
-        result = annular.solve_field(inp, coolant=coolant, htc_name=htc,
+        if annular_method not in ('march', 'picard'):
+            raise ValueError("annular_method must be 'march' or 'picard'")
+        if annular_method == 'march':
+            from pinthac.sca.annular_march import solve_channel
+            solver = solve_channel
+        else:
+            solver = annular.solve_field
+        result = solver(inp, coolant=coolant, htc_name=htc,
                                               friction_func=friction_func,
                                               bundle_func=bundle_func, k_func=k_func,
                                               **solver_kwargs)
         convergence = _scan_for_nonfinite(
-            result, "z", ("Tm_i", "Tm_o", "Tfo_i", "Tfo_o", "q_i", "q_o")
+            result, "z", ("Tm_i", "Tm_o", "Tci_i", "Tco_i", "Tci_o", "Tco_o", "Tfo_i", "Tfo_o",
+                         "htc_conv_i", "htc_conv_o", "Tf_max", "C1", "C2", "q_i", "q_o", "dP_i", "dP_o")
         )
-        convergence["outer_converged"] = bool(result["outer_converged"])
-        convergence["outer_residual"] = result["outer_residual"]
-        convergence["outer_iters_used"] = result["outer_iters_used"]
-        if not result["outer_converged"]:
-            convergence["ok"] = False
-            convergence["message"] += (
-                f" -- also, the outer enthalpy Picard loop did not converge: residual "
-                f"{result['outer_residual']:.4g} J/kg after {result['outer_iters_used']} "
-                f"iterations."
-            )
+        if annular_method == 'march':
+            convergence['radial_converged'] = bool(np.all(result['radial_converged']))
+            convergence['radial_residual'] = float(np.max(np.abs(result['radial_residual'])))
+            convergence['ok'] &= convergence['radial_converged']
+        else:
+            convergence['outer_converged'] = bool(result['outer_converged'])
+            convergence['outer_residual'] = result['outer_residual']
+            convergence['outer_iters_used'] = result['outer_iters_used']
+            convergence['radial_converged'] = bool(result['radial_converged'])
+            convergence['ok'] &= convergence['outer_converged'] and convergence['radial_converged']
+            if not convergence['outer_converged']:
+                convergence['message'] += ' -- outer enthalpy Picard loop did not converge'
 
     return dict(result=result, geom_type=geom_type, requested=requested,
                 convergence=convergence, notes=notes)
 
 
 def run_batch(cases):
-    """
-    Run many cases, or one case repeated across several correlation selections, in one
+    """Run many cases, or one case repeated across several correlation selections, in one
     call.
 
     One bad case -- a typo'd correlation name, a geometry missing a key -- is recorded
     and skipped rather than killing every other case in a sweep. This is the module's
-    only try/except, and the documented exception to CLAUDE.md section 2's ban on
+    only try/except, and the documented exception to CONTRIBUTING.md section 2's ban on
     exceptions as control flow: it catches an actual exception at a batch boundary to
     isolate one case, which is exactly what run_channel raises to signal.
 
@@ -374,22 +391,20 @@ def run_batch(cases):
         try:
             out = run_channel(case["geometry"], case["conditions"], **kwargs)
             out["case_index"] = i
-        except (ValueError, NotImplementedError, KeyError) as exc:
+        except (ValueError, NotImplementedError, KeyError, RuntimeError) as exc:
             out = dict(case_index=i, error=str(exc))
         results.append(out)
     return results
 
 
 def read_cases_csv(path, geom_type):
-    """
-    Read many cases from a CSV file, in the spirit of
-    docs/reference_code/SCA_Example.py's spreadsheet-driven input.
+    """Read many cases from a CSV file, in the spirit of
+    spreadsheet-driven input.
 
-    .csv only: openpyxl is not installed and adding it was not approved, so an .xlsx
-    file has to be exported to .csv first.
+    Excel files must be exported to CSV before reading.
 
     Each row becomes one case dict for run_batch(): columns
-        named 'htc'/'friction'/'bundle'/'fuel_conductivity' (if present) become that
+        named 'htc'/'friction'/'bundle'/'fuel_conductivity'/'coolant' (if present) become that
         row's correlation-selection override, and every other column becomes a
         geometry/condition value, keyed by _rod_inputs'/_annular_inputs' own key names
         (a column with a name neither function recognizes is silently unused by
@@ -403,19 +418,19 @@ def read_cases_csv(path, geom_type):
                     would need a per-row 'type' column and is not built)
     Returns:
         list of case dicts, each with keys 'geometry', 'conditions', and any of
-        'htc'/'friction'/'bundle'/'fuel_conductivity' present as columns -- suitable
+        'htc'/'friction'/'bundle'/'fuel_conductivity'/'coolant' present as columns -- suitable
         for run_batch() directly.
     """
     if geom_type not in ("rod", "annular"):
         raise ValueError(f"read_cases_csv: geom_type must be 'rod' or 'annular', got {geom_type!r}")
 
     df = pd.read_csv(path)
-    corr_cols = [c for c in ("htc", "friction", "bundle", "fuel_conductivity") if c in df.columns]
+    corr_cols = [c for c in ("htc", "friction", "bundle", "fuel_conductivity", "coolant") if c in df.columns]
     value_cols = [c for c in df.columns if c not in corr_cols]
 
     cases = []
     for _, row in df.iterrows():
-        values = {col: row[col] for col in value_cols}
+        values = {col: row[col] for col in value_cols if pd.notna(row[col])}
         if geom_type == "rod":
             geometry = {"type": "rod", **{k: values[k] for k in _ROD_GEOM_KEYS if k in values}}
             conditions = {k: values[k] for k in _ROD_COND_KEYS if k in values}
@@ -424,7 +439,8 @@ def read_cases_csv(path, geom_type):
             conditions = {}
         case = dict(geometry=geometry, conditions=conditions)
         for col in corr_cols:
-            case[col] = row[col]
+            if pd.notna(row[col]):
+                case[col] = row[col]
         cases.append(case)
     return cases
 

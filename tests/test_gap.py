@@ -1,5 +1,4 @@
-"""
-Smoke tests for pinthac.pin.gap: does it import, does htc_gap accept a float / numpy
+"""Smoke tests for pinthac.pin.gap: does it import, does htc_gap accept a float / numpy
 array / torch tensor and return the matching type with a finite gradient, does it stay
 finite as Tfo -> Tci (the D5 radiation-term factoring this module keeps).
 
@@ -38,9 +37,6 @@ def test_backend_contract():
 
 
 def test_stays_finite_as_surfaces_equalize():
-    # The reason PinHT.htc_gap's (Tfo^2+Tci^2)*(Tfo+Tci) factoring was preferred over
-    # the (Tfo^4-Tci^4)/(Tfo-Tci) alternative in docs/DUPLICATES.md D5: the latter is
-    # 0/0 at Tfo == Tci; this one is not.
     val = gap.htc_gap(1500.0, 1500.0, 1.0e-4, kgas)
     assert np.isfinite(val)
 

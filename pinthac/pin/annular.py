@@ -1,27 +1,11 @@
-"""
-Annular fuel conduction: the Kirchhoff-transformed radial solve.
-
-Moved verbatim from PinHT.py in Phase 1. Phase 2 brings it up to the docstring and
-backend standard without changing any formula or sign convention. Implements the scheme
-derived in docs/reference/Annular_Heat_Transfer_Final.pdf section 1.1. Phase 4 adds the
-iteration around it (Cramer's rule, warm start, convergence flag).
-"""
+"""Annular fuel conduction: the Kirchhoff-transformed radial solve."""
 import numpy as np
 
 from pinthac import backend
 
 
 def Ann_Theta(kf_func, T_ref=300.0, T_max=3600.0, n=4000):
-    """
-    Build the Kirchhoff-transform conductivity integral Theta[kf](T).
-
-    Why this model is here:
-        Ann_HT needs Theta = integral of a temperature-dependent fuel conductivity kf(T)
-        to linearize the otherwise-nonlinear annular fuel conduction equation -- exactly
-        as it would already be linear in T alone for a constant kf. Built once via
-        cumulative trapezoidal integration over a fixed grid and returned as a fast
-        interpolant, since the closure that calls this (sca/annular.py::closure)
-        evaluates it at every axial location on every training step.
+    """Build the Kirchhoff-transform conductivity integral Theta[kf](T).
 
     Formulation:
         Theta(T) = integral_{T_ref}^{T} kf(T') dT'
@@ -46,21 +30,8 @@ def Ann_Theta(kf_func, T_ref=300.0, T_max=3600.0, n=4000):
         uncertainty); inherits whatever uncertainty kf_func itself carries.
 
     Reference:
-        docs/reference/Annular_Heat_Transfer_Final.pdf section 1.1 for the
+        Annular_Heat_Transfer_Final.pdf section 1.1 for the
         Kirchhoff-transform derivation this integral feeds into (see Ann_HT).
-
-    Backend contract note:
-        Unlike every other function in this module, Ann_Theta does not itself accept or
-        return a float/numpy array/torch tensor -- it returns a SciPy interp1d
-        *callable*, built with plain NumPy internally regardless of what kf_func
-        returns. That callable is not differentiable, and (per docs/AUDIT.md) silently
-        strips the gradient from a torch input passed through it later rather than
-        raising. This is a known architectural limitation carried over from PinHT.py,
-        not something Phase 2's docstring/backend-contract/range/dead-code/test scope
-        fixes -- replacing it with a differentiable table (e.g. backend.interp-based)
-        is a bigger redesign than a physics-preserving cleanup, and this module's own
-        original docstring already flags the follow-up ("Phase 4 adds the iteration
-        around it") as later work.
 
     Inputs:
         kf_func : callable, temperature [K] (numpy array) -> thermal conductivity
@@ -76,21 +47,17 @@ def Ann_Theta(kf_func, T_ref=300.0, T_max=3600.0, n=4000):
     from scipy.interpolate import interp1d
     Tgrid = np.linspace(T_ref, T_max, n)
     kvals = kf_func(Tgrid)
-    Theta_vals = np.concatenate(([0.0], np.cumsum(0.5*(kvals[1:] + kvals[:-1])*np.diff(Tgrid))))
+    # Integrate each temperature interval, then accumulate from Theta(T_ref) = 0.
+    dT = np.diff(Tgrid)
+    kmean = 0.5 * (kvals[1:] + kvals[:-1])
+    dTheta = kmean * dT
+    Theta_vals = np.concatenate(([0.0], np.cumsum(dTheta)))
     return interp1d(Tgrid, Theta_vals, kind='cubic', fill_value='extrapolate')
 
 
 def Ann_HT(ri, ro, q3, Theta_i, Theta_o):
-    """
-    Closed-form solve for the two integration constants in the Kirchhoff-transformed
+    """Closed-form solve for the two integration constants in the Kirchhoff-transformed
     annular fuel conduction problem.
-
-    Why this model is here:
-        The linear (in Theta) two-point boundary value problem that results from
-        substituting Theta[kf](T(r)) for T(r) in the annular conduction equation, given
-        already-known fuel surface temperatures at both radii. Used by
-        sca/annular.py::closure and ml/pinn.py every time the fuel surface flux split
-        needs updating.
 
     Formulation:
         For ri <= r <= ro with uniform volumetric generation q3:
@@ -105,28 +72,9 @@ def Ann_HT(ri, ro, q3, Theta_i, Theta_o):
         inner/outer fuel surface temperatures -- forward evaluations only, never
         inverted (the scheme's whole point: no Newton solve is needed to invert Theta
         back to a temperature). The -q3/4*r^2 sign matches
-        docs/reference/Annular_Heat_Transfer_Final.pdf section 1.1 Eq. (2), which
+        Annular_Heat_Transfer_Final.pdf section 1.1 Eq. (2), which
         already carries the correct sign, unlike an earlier PinHT derivation this one
         superseded.
-
-        Sign-convention note the surface temperatures feeding Theta_i, Theta_o are NOT
-        interchangeable in how they are obtained from a guessed flux: the reference
-        PDF's "Tfo(rj) = Tm,j + q''_j/htcj" is only correct at the *outer* surface. The
-        inner coolant sits on the -r side of the fuel, so the physically-outward flux
-        there is the *negative* of the q''(r) Fourier-convention function this module
-        also uses (see Ann_qpp) -- checked by two independent methods (an energy-balance
-        invariant q_i + q_o = q'''*pi*(ro^2-ri^2), and both walls coming out hotter than
-        their coolants) plus an independent sympy solve: a fixed-point iteration of the
-        PDF's literal scheme converges to a state with the inner wall *colder* than the
-        inner coolant and a badly violated energy balance, while
-        "Tfo(ri) = Ti - q''_i/htci" (a minus, mirroring the +r-vs-coolant-side geometry)
-        converges to the energy-conserving solution. Callers (see
-        sca/annular.py::closure) must apply that minus sign when they turn a flux/htc
-        guess into the inner surface temperature that gets passed through Ann_Theta to
-        make Theta_i. This is a deliberate, documented departure from the reference
-        PDF's literal Section 1.1/1.2 wording, approved in docs/DECISIONS.md (closing
-        Q18): the signed +r Fourier convention with the minus at the inner surface, with
-        the energy-balance invariant above as its own test (see tests/test_annular.py).
 
     Valid range:
         Not established -- see docs/OPEN_QUESTIONS.md (Q31). A closed-form algebraic
@@ -137,7 +85,7 @@ def Ann_HT(ri, ro, q3, Theta_i, Theta_o):
         in kf_func, inherited through Ann_Theta).
 
     Reference:
-        docs/reference/Annular_Heat_Transfer_Final.pdf section 1.1, Eq. (2).
+        Annular_Heat_Transfer_Final.pdf section 1.1, Eq. (2).
 
     Inputs (float, numpy array, or torch tensor; broadcastable against each other):
         ri, ro           : fuel inner/outer radius, m
@@ -148,18 +96,14 @@ def Ann_HT(ri, ro, q3, Theta_i, Theta_o):
     Returns:
         (C1, C2) : integration constants, same type as ri
     """
-    # ri/ro are the common case for a Python-float fixed pin geometry paired with
-    # tensor Theta_i/Theta_o (an axial or batched solve) -- promoting them against
-    # Theta_i is what lets xp.log(ri) below run under torch: torch.log rejects a bare
-    # Python float outright, the same failure mode as pin/clad.py::T_ci's Rco/Rci (see
-    # that docstring) and MatMod.UO2.k_NFI's Bu.
     ri = backend.promote(ri, Theta_i)
     ro = backend.promote(ro, Theta_i)
     xp = backend.lib(ri, ro, q3, Theta_i, Theta_o)
 
     alpha_i = Theta_i + q3/4*ri**2
     alpha_o = Theta_o + q3/4*ro**2
-    log_ri, log_ro = xp.log(ri), xp.log(ro)
+    log_ri = xp.log(ri)
+    log_ro = xp.log(ro)
 
     C1 = (alpha_i - alpha_o)/(log_ri - log_ro)
     C2 = (log_ri*alpha_o - log_ro*alpha_i)/(log_ri - log_ro)
@@ -167,14 +111,7 @@ def Ann_HT(ri, ro, q3, Theta_i, Theta_o):
 
 
 def Ann_qpp(r, q3, C1):
-    """
-    Radial heat flux in the annular fuel region, in the signed +r Fourier convention.
-
-    Why this model is here:
-        Converts Ann_HT's C1 into the actual heat flux at a given radius; per Ann_HT's
-        sign-convention note, callers negate this at the inner surface to get the
-        physically-outward flux into the inner coolant (see sca/annular.py::closure's
-        `q_i = -Ann_qpp(ri, q3, C1)*Per_fuel_i`).
+    """Radial heat flux in the annular fuel region, in the signed +r Fourier convention.
 
     Formulation:
         q''(r) = q3/2*r - C1/r
@@ -187,7 +124,7 @@ def Ann_qpp(r, q3, C1):
         Not applicable -- exact given C1.
 
     Reference:
-        docs/reference/Annular_Heat_Transfer_Final.pdf section 1.1 (same derivation as
+        Annular_Heat_Transfer_Final.pdf section 1.1 (same derivation as
         Ann_HT).
 
     Inputs (float, numpy array, or torch tensor; broadcastable against each other):
@@ -202,16 +139,7 @@ def Ann_qpp(r, q3, C1):
 
 def Ann_flux_split(ri, ro, q_lin, Tm_i, Tm_o, htc_i, htc_o, Theta_func,
                    f_prev=None, n_iter=60, tol=1.0e-6, return_convergence=False):
-    """
-    Solve the annular fuel for how the generated heat splits between its two coolants.
-
-    Why this model is here:
-        Ann_HT solves the conduction problem given the two fuel surface temperatures, but
-        those temperatures depend on the surface heat fluxes, which are what the
-        conduction solve produces. That circle is the actual problem an annular pin
-        poses, and this is the iteration that closes it. It is the scheme derived in
-        docs/reference/Annular_Heat_Transfer_Final.pdf section 1.1 and drawn as its
-        Figure 2.
+    """Solve the annular fuel for how the generated heat splits between its two coolants.
 
     Formulation:
         Repeat until the surface fluxes stop moving:
@@ -270,7 +198,7 @@ def Ann_flux_split(ri, ro, q_lin, Tm_i, Tm_o, htc_i, htc_o, Theta_func,
         heat transfer coefficients carry.
 
     Reference:
-        docs/reference/Annular_Heat_Transfer_Final.pdf, section 1.1 and Figure 2.
+        Annular_Heat_Transfer_Final.pdf, section 1.1 and Figure 2.
 
     Inputs (float, numpy array, or torch tensor; broadcastable against each other):
         ri, ro     : fuel inner/outer radius, m
@@ -334,9 +262,12 @@ def Ann_flux_split(ri, ro, q_lin, Tm_i, Tm_o, htc_i, htc_o, Theta_func,
         q_i_new = -2.0 * xp.pi * ri * Ann_qpp(ri, q3, C1)
         q_o_new = 2.0 * xp.pi * ro * Ann_qpp(ro, q3, C1)
 
-        converged = converged | ((abs(q_i_new - q_i) / scale < tol)
-                                 & (abs(q_o_new - q_o) / scale < tol))
-        q_i, q_o = q_i_new, q_o_new
+        # Step 6: check both changes, then carry the new split to the next step.
+        error_i = abs(q_i_new - q_i) / scale
+        error_o = abs(q_o_new - q_o) / scale
+        converged = converged | ((error_i < tol) & (error_o < tol))
+        q_i = q_i_new
+        q_o = q_o_new
 
     # Recompute the surface temperatures from the converged split so the returned
     # temperatures and fluxes describe the same state rather than being one step apart.

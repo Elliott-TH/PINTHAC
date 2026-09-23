@@ -1,5 +1,4 @@
-"""
-Benchmark: GPU-batched IAPWS-95 (this repo) vs. the reference `iapws`
+"""Benchmark: GPU-batched IAPWS-95 (this repo) vs. the reference `iapws`
 PyPI package (pure-Python, one state point at a time).
 
 Both libraries implement the same standard (IAPWS-95 for the Helmholtz
@@ -27,7 +26,10 @@ from pinthac.properties import iapws95 as gpu
 
 import style
 
-DEVICE = gpu.device
+# The accelerator, not gpu.device: gpu.device is where the property modules evaluate a
+# float or NumPy input, and that is the cpu by design. This benchmark is about the
+# batched GPU path, so it places its own tensors there explicitly.
+DEVICE = gpu.accelerator
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 
 
@@ -36,7 +38,8 @@ OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 # ---------------------------------------------------------------------
 def sample_points(n, seed=0):
     """Random (T [K], P [MPa]) pairs spanning subcooled liquid,
-    superheated steam, and supercritical water."""
+    superheated steam, and supercritical water.
+    """
     rng = np.random.default_rng(seed)
     T = rng.uniform(280.0, 800.0, size=n)
     P = rng.uniform(0.5, 100.0, size=n)
@@ -103,8 +106,7 @@ def time_ref(T, P):
 
 
 def time_gpu(T, P, repeats=5):
-    """
-    Best of `repeats` timed runs of the batched GPU path.
+    """Best of `repeats` timed runs of the batched GPU path.
 
     Why the minimum and not the mean: a single GPU timing is not reproducible on this
     machine. An earlier version of this benchmark timed each batch size once and recorded
@@ -149,16 +151,14 @@ def run_benchmark():
     # Sizes run on both libraries -- capped so the pure-Python reference
     # loop finishes in a reasonable time (it costs ~ms per point).
     shared_sizes = [1, 10, 100, 1_000, 5_000, 20_000]
-    # Sizes run on the GPU library only, to show throughput at scale -- the
-    # pure-Python reference would take upwards of an hour at these sizes
-    # (its own measured per-point cost, extrapolated, is ~2.6ms/point).
-    # 1e6 is the practical ceiling on this card: a 1e7-point batch was tried
-    # while building this figure and raised torch.OutOfMemoryError (~16GB
-    # HIP allocation) on the RX 7800 XT's 16GB -- the float64 Helmholtz
-    # residual with a 60-iteration Newton solve keeps several same-sized
-    # intermediate tensors alive at once, so memory, not compute, is what
-    # caps the batch size here. Reported as a measured hardware limit, not
-    # papered over -- see docs/FIGURE_CAPTIONS.md.
+    # Sizes run on the GPU library only, to show throughput at scale -- the pure-Python
+    # reference would take upwards of an hour at these sizes (its own measured per-point
+    # cost, extrapolated, is ~2.6ms/point). 1e6 is the practical ceiling on this card: a
+    # 1e7-point batch was tried while building this figure and raised
+    # torch.OutOfMemoryError (~16GB HIP allocation) on the RX 7800 XT's 16GB -- the
+    # float64 Helmholtz residual with a 60-iteration Newton solve keeps several same-
+    # sized intermediate tensors alive at once, so memory, not compute, is what caps the
+    # batch size here.
     gpu_only_sizes = [50_000, 200_000, 1_000_000]
 
     results = []
@@ -191,8 +191,7 @@ def run_benchmark():
 
 
 def plot_results(results, gpu_only_results, out_path):
-    """
-    Two-panel log-log figure: wall-clock time and speedup vs. batch size.
+    """Two-panel log-log figure: wall-clock time and speedup vs. batch size.
 
     Every (N, reference_time, gpu_time) triple in `results` was actually measured on
     this machine -- both libraries run at every one of those sizes. `gpu_only_results`

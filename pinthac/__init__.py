@@ -1,17 +1,15 @@
-"""
-PINTHAC -- Physics Informed Nuclear Thermal-Hydraulics Analysis Code.
+"""PINTHAC -- Physics Informed Nuclear Thermal-Hydraulics Analysis Code.
 
 A thermal-hydraulics library covering water and liquid-metal properties, heat transfer
 and friction correlations, fuel-pin radial conduction, single-channel analysis, and
-neural surrogates for the same. Every public function runs on Python floats, NumPy
-arrays, or PyTorch tensors, and stays differentiable under torch.
+neural surrogates for the same. Property and correlation functions support Python floats, NumPy arrays,
+and PyTorch tensors; gradient support varies by solver.
 
 Import direction is strictly one-way and never reversed:
 
     backend / ranges / uncertainty  <-  properties  <-  correlations  <-  pin  <-  sca  <-  ml
 
-See CLAUDE.md for the code style contract and docs/SPLIT_PLAN.md for how these layers
-would separate into standalone packages.
+See CONTRIBUTING.md for development conventions.
 """
 from pinthac import backend, ranges, uncertainty
 

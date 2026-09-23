@@ -1,25 +1,4 @@
-"""
-Fuel and cladding material property models: UO2, Zircaloy, HT-9 and (stub) D9 stainless.
-
-Moved from MatMod.py in Phase 1, the best-styled file in the pre-cleanup repository.
-Phase 2 brought it up to the docstring and backend-dispatch standard without touching any
-formula, constant or exponent, but left every citation, valid range and uncertainty as
-"Not established" (Q31) because the source document was not yet in the repository. Every
-function here is a flat namespace member -- `UO2.k_Klimenko(1200.0)`, no `self`, no
-instantiation -- per CLAUDE.md section 2.
-
-Phase 3 fills in what `docs/reference/MatLib_Info.pdf` -- PNNL-35702, "MatLib-1.2.1:
-Nuclear Material Properties Library" (Geelhood et al., 2024) -- turned out to supply for
-essentially every UO2, Zircaloy, HT-9 and Gas model here (section/table/equation numbers
-are given in each docstring so the numbers can be checked against the PDF directly). Two
-gaps remain, both checked against MatLib_Info.pdf and docs/reference/Hughes_SCWR_1.pdf and
-found in neither: `UO2.k_Klimenko` (the "Klimenko-Zorin" model MatLib does not contain
-under any name) and `Gas.k`'s "Air" entry (in MatLib's fitting-constant table but absent
-from its applicability/uncertainty bullets). Both are still marked "Not established --
-see docs/OPEN_QUESTIONS.md (Q31)", per CLAUDE.md section 6: a plausible-looking invented
-range is worse than a blank. No formula, constant or exponent changed in Phase 3 either --
-see docs/brief/PHASE3_BRIEF.md's report for the before/after check this relied on.
-"""
+"""Fuel and cladding material property models: UO2, Zircaloy, HT-9 and (stub) D9 stainless."""
 import math
 
 import numpy as np
@@ -28,12 +7,11 @@ from pinthac import backend, ranges
 
 
 def _erf(x):
-    """
-    Error function, dispatched by backend: torch has erf natively, numpy needs
+    """Error function, dispatched by backend: torch has erf natively, numpy needs
     scipy.special.erf. Module-private -- only UO2.Theta_Klimenko needs it.
 
     Why this exists: backend.py deliberately stays small ("add helpers only where NumPy
-    and Torch genuinely differ", CLAUDE.md section 5) and erf is needed by exactly one
+    and Torch genuinely differ", CONTRIBUTING.md section 5) and erf is needed by exactly one
     function in the whole library, so the two-line dispatch lives here instead.
 
     Inputs:
@@ -48,11 +26,11 @@ def _erf(x):
     return xp.erf(x)
 
 
-# Built from docs/reference/MatLib_Info.pdf's "Applicability and Uncertainty" subsections
-# (one per model, cited by section number in the owning function's docstring) rather than
-# from anything invented -- one plain dictionary per CLAUDE.md section 7, keyed by the
-# name each function's ranges.check() call below uses. A model with no entry here has no
-# published range in MatLib_Info.pdf either (docstring says so, with the section checked).
+# Built from PNNL-35702's "Applicability and Uncertainty"
+# subsections (one per model, cited by section number in the owning function's
+# docstring) rather than from anything invented -- one plain dictionary per
+# CONTRIBUTING.md section 7, keyed by the name each function's ranges.check() call below
+# uses.
 RANGES = {
     "uo2_k_nfi": {"T": (300.0, 2800.0), "Bu": (0.0, 90.0), "f_gad": (0.0, 0.10)},
     "uo2_eps": {"T": (300.0, 2500.0)},
@@ -87,13 +65,7 @@ RANGES = {
 
 class Gas:
     def k(gas, T):
-        """
-        Fill-gas thermal conductivity, k = A * T^B per gas species.
-
-        Why this model is here:
-            Feeds the gas-gap conductance (pin/gap.py::htc_gap) with the conductivity of
-            whatever gas fills the fuel-clad gap -- helium in a fresh rod, increasingly a
-            fission-gas mixture as burnup accumulates.
+        """Fill-gas thermal conductivity, k = A * T^B per gas species.
 
         Formulation:
             k = A * T^B, with (A, B) tabulated per gas species below.
@@ -139,14 +111,8 @@ class Gas:
 
 class UO2:
     def k_NFI(T, Bu=0.0, f_gad=0.0):
-        """
-        Modified Frapcon-4 (NFI) model for UO2 thermal conductivity, accounting for
+        """Modified Frapcon-4 (NFI) model for UO2 thermal conductivity, accounting for
         burnup and gadolinia fraction.
-
-        Why this model is here:
-            The burnup- and gadolinia-aware UO2 conductivity model used where fuel
-            history matters; MatMod.UO2.k_Klimenko is the simpler fresh-fuel alternative
-            used elsewhere in this repository (e.g. pin/annular.py's Theta integral).
 
         Formulation:
             f_Bu   = 0.00187 * Bu
@@ -204,21 +170,8 @@ class UO2:
         return K
 
     def Theta_NFI(T, Bu=0.0, f_gad=0.0, T_ref=300.0, n=1000):
-        """
-        Fixed-step cumulative-trapezoid integral of UO2.k_NFI: Theta(T) = integral of
+        """Fixed-step cumulative-trapezoid integral of UO2.k_NFI: Theta(T) = integral of
         k_NFI dT from T_ref to T, at fixed burnup and gadolinia content.
-
-        Why this model is here:
-            The annular and rod SCA solvers need Theta(T) = integral of k dT for whichever
-            conductivity model is in use (see UO2.Theta_Klimenko's docstring for the same
-            need against k_Klimenko). k_NFI has no closed-form antiderivative -- its
-            burnup and gadolinia terms multiply four different functions of T inside one
-            denominator -- so `pin/annular.py::Ann_Theta` currently builds it numerically
-            with a fixed grid and a SciPy `interp1d` table, which is not differentiable
-            under torch. This is the same integral built instead as a fixed-step
-            cumulative trapezoid, so it can be used inside a torch-differentiable solve.
-            Per docs/brief/PHASE3_BRIEF.md item 3, pin/annular.py is not repointed at this copy
-            -- rewiring the solvers is Phase 4.
 
         Formulation:
             Theta(T) = integral_{T_ref}^{T} k_NFI(T', Bu, f_gad) dT', walked in n equal
@@ -243,7 +196,7 @@ class UO2:
         Uncertainty:
             Not established -- see docs/OPEN_QUESTIONS.md (Q31). tests/test_matmod.py
             checks this integral against scipy.integrate.quad of k_NFI itself instead,
-            the same verification approach as Theta_Klimenko, per docs/brief/PHASE3_BRIEF.md
+            the same verification approach as Theta_Klimenko,
             item 3.
 
         Reference:
@@ -275,14 +228,7 @@ class UO2:
         return Theta
 
     def k_Klimenko(T):
-        """
-        Klimenko-Zorin model for the thermal conductivity of 95%-dense UO2 fuel.
-
-        Why this model is here:
-            The fresh-fuel UO2 conductivity model used through the annular and rod SCA
-            paths (pin/annular.py's Theta integral is built from this via k_NFI's sibling
-            call site in sca/annular.py); Hughes (2014) Eq. (14) uses the same functional
-            family for the conductivity integral (see docs/PHYSICS_REVIEW.md).
+        """Klimenko-Zorin model for the thermal conductivity of 95%-dense UO2 fuel.
 
         Formulation:
             tau = T/1000
@@ -296,11 +242,11 @@ class UO2:
 
         Reference:
             Not established -- see docs/OPEN_QUESTIONS.md (Q31). Checked
-            docs/reference/MatLib_Info.pdf (PNNL-35702) in full and
-            docs/reference/Hughes_SCWR_1.pdf: neither names "Klimenko-Zorin" or contains
+            MatLib_Info.pdf (PNNL-35702) in full and
+            Hughes_SCWR_1.pdf: neither names "Klimenko-Zorin" or contains
             this formula's coefficients (7.5408, 17.692, 3.6142, 6400, 16.35). Hughes
             (2014) Eq. (14) uses the same functional family without naming its source
-            either (see docs/PHYSICS_REVIEW.md).
+            either (see the model references).
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -315,17 +261,7 @@ class UO2:
         return kval
 
     def Theta_Klimenko(T):
-        """
-        Analytic antiderivative of UO2.k_Klimenko: Theta(T) = integral of k dT.
-
-        Why this model is here:
-            The annular and rod SCA solvers convert a heat-flux boundary condition into a
-            temperature via a Kirchhoff-transform difference, Theta(T2) - Theta(T1) =
-            integral_T1^T2 k dT. `pinthac/sca/rod.py::Kint` already implements exactly
-            this for the rod solver (fixed for an erf-coefficient defect in commit
-            14172e4, which derives the algebra this docstring restates); this is the same
-            closed form added to the property library per docs/brief/PHASE3_BRIEF.md item 3.
-            sca/rod.py is not repointed at this copy -- rewiring the solvers is Phase 4.
+        """Analytic antiderivative of UO2.k_Klimenko: Theta(T) = integral of k dT.
 
         Formulation:
             An antiderivative, not a definite integral referenced to any particular T --
@@ -350,7 +286,7 @@ class UO2:
         Uncertainty:
             Not established -- see docs/OPEN_QUESTIONS.md (Q31). tests/test_matmod.py
             checks this integral against scipy.integrate.quad of k_Klimenko itself
-            instead, per docs/brief/PHASE3_BRIEF.md item 3 -- that is the intended
+            instead,
             verification, not a substitute for a published uncertainty.
 
         Reference:
@@ -374,12 +310,7 @@ class UO2:
         return val
 
     def eps(T):
-        """
-        Emissivity of UO2 fuel.
-
-        Why this model is here:
-            The fuel-surface emissivity used in the gap radiation term
-            (pin/gap.py::htc_gap's eps_f argument).
+        """Emissivity of UO2 fuel.
 
         Formulation:
             eps = 0.7856 + 1.5263e-5 * T
@@ -391,7 +322,7 @@ class UO2:
 
         Uncertainty:
             sigma = 0.072, absolute standard error (PNNL-35702 section 2.1.5.3). This
-            replaces the "+/- 6.8 percent" this docstring stated before Phase 3, whose
+            replaces the "+/- 6.8 percent" this docstring stated before development, whose
             source was never established (Q31) and which is not obviously the same
             number: eps itself only spans about 0.79 to 0.82 over 300-2500 K, so a 0.072
             absolute band and a 6.8 percent relative band are not equivalent here. Using
@@ -401,7 +332,7 @@ class UO2:
             PNNL-35702 (Geelhood et al., 2024), section 2.1.5.1, Equation 2-12. That
             equation's constant is 0.78557; this function uses 0.7856 (matches to the
             4th decimal, source of the small difference not established -- preserved as
-            found per CLAUDE.md, "change no physics").
+            found per CONTRIBUTING.md, "change no physics").
 
         Inputs:
             T : temperature (float, numpy array, or torch tensor), K
@@ -415,12 +346,7 @@ class UO2:
         return val
 
     def thrm_expan(T):
-        """
-        Thermal expansion strain of solid UO2 fuel.
-
-        Why this model is here:
-            Feeds pellet dimensional-change calculations (gap closure, densification)
-            elsewhere in the fuel-performance chain.
+        """Thermal expansion strain of solid UO2 fuel.
 
         Formulation:
             strain = K1*T - K2 + K3*exp(-Ed/(k*T))
@@ -457,12 +383,7 @@ class UO2:
         return strain
 
     def dens_max(T, rho_TD=95.0, T_sint=1873.15):
-        """
-        Maximum in-reactor pellet dimension change from densification.
-
-        Why this model is here:
-            Sets the asymptote UO2.densification relaxes towards, from the fabrication
-            sintering temperature and as-fabricated density alone.
+        """Maximum in-reactor pellet dimension change from densification.
 
         Formulation:
             Below 1000 K: -22.2*(100 - rho_TD)/(T_sint - 1453.15)
@@ -499,14 +420,8 @@ class UO2:
         return val
 
     def dens_B(dL_max, n_iter=100):
-        """
-        Offset constant B in the densification model, solved by bisection so that
+        """Offset constant B in the densification model, solved by bisection so that
         dL/L = 0 at zero burnup.
-
-        Why this model is here:
-            UO2.densification needs B as a free offset that anchors its exponential decay
-            to start from zero dimension change; there is no closed form for it, so it is
-            bisected once per call from dL_max.
 
         Formulation:
             Root of exp(-3*B) + 2*exp(-35*B) - (-dL_max) = 0 in B, found by n_iter steps
@@ -547,13 +462,7 @@ class UO2:
         return Bval
 
     def densification(T, Bu, rho_TD=95.0, T_sint=1873.15):
-        """
-        Rolstad model for the densification of UO2, MOX and UO2-Gd2O3 fuel.
-
-        Why this model is here:
-            The pellet dimension-change history used by gap-closure and fuel-stack
-            length calculations, combining UO2.dens_max's asymptote with a two-term
-            exponential burnup decay anchored by UO2.dens_B.
+        """Rolstad model for the densification of UO2, MOX and UO2-Gd2O3 fuel.
 
         Formulation:
             dL_max = UO2.dens_max(T, rho_TD, T_sint)
@@ -593,12 +502,7 @@ class UO2:
         return val
 
     def swelling_solid(Bu, gad=False):
-        """
-        Solid fission-product swelling of UO2, MOX and UO2-Gd2O3 fuel.
-
-        Why this model is here:
-            The volumetric-swelling contribution used alongside UO2.swelling_gas for
-            pellet dimension change under irradiation.
+        """Solid fission-product swelling of UO2, MOX and UO2-Gd2O3 fuel.
 
         Formulation:
             Gadolinia-bearing fuel: val = 0.0005*Bu
@@ -643,12 +547,7 @@ class UO2:
         return val
 
     def swelling_gas(T, Bu):
-        """
-        Gaseous fission-product swelling of UO2, UO2-Gd2O3 and MOX fuel.
-
-        Why this model is here:
-            The second swelling contribution, active only above 40 GWd/MTU and in a
-            fixed temperature window where fission gas release accelerates.
+        """Gaseous fission-product swelling of UO2, UO2-Gd2O3 and MOX fuel.
 
         Formulation:
             Nonzero only for Bu >= 40 (ramped linearly in from 40 to 50 GWd/MTU) and
@@ -697,12 +596,7 @@ class UO2:
 
 class Zircalloy:
     def k(T):
-        """
-        Thermal conductivity of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
-
-        Why this model is here:
-            The clad conductivity model used through the gap and cladding conduction
-            chain (pin/clad.py::T_ci, sca/annular.py's cladding_gap_step).
+        """Thermal conductivity of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
 
         Formulation:
             Below 2098 K: k = 7.511 + 2.088e-2*T - 1.45e-5*T^2 + 7.668e-9*T^3
@@ -730,13 +624,7 @@ class Zircalloy:
         return val
 
     def cp(T):
-        """
-        Specific heat capacity of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
-
-        Why this model is here:
-            Published as a lookup table rather than a formula (the alpha-to-beta
-            transition around 1093-1250 K is not smooth), so this is a piecewise-linear
-            interpolation rather than a closed-form correlation.
+        """Specific heat capacity of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
 
         Formulation:
             Piecewise-linear interpolation of a 14-point T (290-1248 K) vs. Cp table,
@@ -771,11 +659,7 @@ class Zircalloy:
         return val
 
     def T_melt():
-        """
-        Melting temperature of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
-
-        Why this model is here:
-            A fixed reference constant used by cladding-failure checks elsewhere.
+        """Melting temperature of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
 
         Formulation:
             Constant, 2123.15 K.
@@ -800,12 +684,7 @@ class Zircalloy:
         return val
 
     def rho():
-        """
-        Density of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
-
-        Why this model is here:
-            A fixed reference constant used by mass and thermal-inertia calculations
-            elsewhere.
+        """Density of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
 
         Formulation:
             Constant, 6520.0 kg/m^3.
@@ -829,12 +708,7 @@ class Zircalloy:
         return val
 
     def thrm_expan_axial(T):
-        """
-        Axial thermal expansion of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
-
-        Why this model is here:
-            The axial dimension-change model used alongside thrm_expan_diametral for
-            clad dimensional-change calculations.
+        """Axial thermal expansion of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
 
         Formulation:
             Below 1073.15 K:  strain = -2.5060e-5 + 4.4410e-6*(T-273.15)
@@ -879,13 +753,8 @@ class Zircalloy:
         return val
 
     def thrm_expan_diametral(T):
-        """
-        Circumferential (diametral) thermal expansion of Zircaloy-4, Zircaloy-2, M5,
+        """Circumferential (diametral) thermal expansion of Zircaloy-4, Zircaloy-2, M5,
         ZIRLO and Optimized ZIRLO.
-
-        Why this model is here:
-            The circumferential dimension-change model used alongside
-            thrm_expan_axial for gap-closure and clad dimensional-change calculations.
 
         Formulation:
             Below 1073.15 K:  strain = -2.3730e-4 + 6.7210e-6*(T-273.15)
@@ -928,13 +797,7 @@ class Zircalloy:
         return val
 
     def eps(T, t_ox=0.0):
-        """
-        Emissivity of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
-
-        Why this model is here:
-            The clad-side emissivity used in the gap radiation term
-            (pin/gap.py::htc_gap's eps_c argument), accounting for oxide-layer buildup
-            and the sharp rise above 1500 K.
+        """Emissivity of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
 
         Formulation:
             eps_1 = 0.325 + 1.246e5*t_ox            if t_ox < 3.88e-6
@@ -961,10 +824,6 @@ class Zircalloy:
         """
         ranges.check("zircalloy_eps", {"T": T, "t_ox": t_ox}, RANGES["zircalloy_eps"])
         xp = backend.lib(T)
-        # t_ox defaults to the plain float 0.0 and does not otherwise depend on T; left
-        # unpromoted, a torch T would make this where() dispatch to numpy instead (none
-        # of its three arguments are tensors), producing a bare numpy value that later
-        # silently strips the gradient when multiplied against a torch quantity below.
         T, t_ox = backend.promote_all(T, t_ox)
         eps_1 = backend.where(t_ox < 3.88E-6, 0.325+0.1246E6*t_ox,
                                        0.808642-50.0*t_ox)
@@ -973,13 +832,7 @@ class Zircalloy:
         return val
 
     def E(T, CW=0.0, phi=0.0, d_ox=0.0012):
-        """
-        Young's modulus of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
-
-        Why this model is here:
-            The elastic modulus feeding Zircalloy.sigma_eff-based stress calculations
-            elsewhere, temperature-, cold-work-, fluence- and oxide-dependent, linearly
-            interpolated across the alpha-to-beta transition.
+        """Young's modulus of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
 
         Formulation:
             c2 = 0.88 + 0.12*exp(-phi/1e25)
@@ -1029,13 +882,7 @@ class Zircalloy:
         return val
 
     def G(T, CW=0.0, phi=0.0, d_ox=0.0012):
-        """
-        Shear modulus of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
-
-        Why this model is here:
-            The shear modulus companion to Zircalloy.E, same temperature/cold-
-            work/fluence/oxide dependence and interpolation scheme. PNNL-35702 adds the
-            bare constant c3 here rather than c3*CW, unlike E -- preserved as found.
+        """Shear modulus of Zircaloy-4, Zircaloy-2, M5, ZIRLO and Optimized ZIRLO.
 
         Formulation:
             c2 = 0.88 + 0.12*exp(-phi/1e25)
@@ -1083,12 +930,7 @@ class Zircalloy:
         return val
 
     def meyer_hardness(T):
-        """
-        Meyer's hardness of Zircaloy-2, Zircaloy-4, M5, ZIRLO and Optimized ZIRLO.
-
-        Why this model is here:
-            Used by HT9.meyer_hardness as a fallback (HT-9 is modeled with the
-            zirconium-based correlation below 1235 K where no HT-9-specific data exists).
+        """Meyer's hardness of Zircaloy-2, Zircaloy-4, M5, ZIRLO and Optimized ZIRLO.
 
         Formulation:
             Below or at 1235 K: val = exp(26.034 - 2.6394e-2*T + 4.3502e-5*T^2
@@ -1119,12 +961,7 @@ class Zircalloy:
         return val
 
     def axial_growth(alloy, phi):
-        """
-        Axial irradiation growth of zirconium-based fuel-rod cladding.
-
-        Why this model is here:
-            Dimensional-change contribution from fast-neutron irradiation, separate from
-            the thermal-expansion models above; alloy-specific coefficients.
+        """Axial irradiation growth of zirconium-based fuel-rod cladding.
 
         Formulation:
             val = A * phi^n, with (A, n) tabulated per alloy below.
@@ -1176,12 +1013,7 @@ class Zircalloy:
         return val
 
     def sigma_eff(Pi, Po, ri, ro, r=None):
-        """
-        Effective cladding stress from thick-wall (Lame) principal stresses.
-
-        Why this model is here:
-            The von Mises effective stress used by the creep-strain-rate correlations
-            below, evaluated at the mid-wall radius by default.
+        """Effective cladding stress from thick-wall (Lame) principal stresses.
 
         Formulation:
             sig_r = (Pi*ri^2 - Po*ro^2 + ri^2*ro^2*(Po-Pi)/r^2) / (ro^2 - ri^2)
@@ -1223,13 +1055,7 @@ class Zircalloy:
         return val
 
     def cw_type(alloy):
-        """
-        Cold-work class (RXA/SRA) used by the strain-rate correlations below.
-
-        Why this model is here:
-            The thermal- and irradiation-creep correlations are fitted separately for
-            recrystallization-annealed (RXA) and stress-relief-annealed (SRA) material;
-            this maps each alloy to its class.
+        """Cold-work class (RXA/SRA) used by the strain-rate correlations below.
 
         Formulation:
             Table lookup, no equation.
@@ -1271,12 +1097,7 @@ class Zircalloy:
         return val
 
     def strain_rate_thermal(T, sig, Phi, cw="SRA"):
-        """
-        Thermal creep strain rate of zirconium-based cladding.
-
-        Why this model is here:
-            One of the two contributions (with strain_rate_irrad) summed by
-            Zircalloy.creep_strain / creep_rate into the total hoop creep rate.
+        """Thermal creep strain rate of zirconium-based cladding.
 
         Formulation:
             E   = 1.148e5 - 59.9*T
@@ -1332,12 +1153,7 @@ class Zircalloy:
         return val
 
     def strain_rate_irrad(T, sig, flux, cw="SRA"):
-        """
-        Irradiation creep strain rate of zirconium-based cladding.
-
-        Why this model is here:
-            The second contribution (with strain_rate_thermal) summed by
-            Zircalloy.creep_strain / creep_rate into the total hoop creep rate.
+        """Irradiation creep strain rate of zirconium-based cladding.
 
         Formulation:
             f_T = f_lo                  if T <= 570
@@ -1391,12 +1207,7 @@ class Zircalloy:
         return val
 
     def strain_sat_primary(eps_dot):
-        """
-        Saturated primary hoop creep strain of zirconium-based cladding.
-
-        Why this model is here:
-            The asymptotic primary-creep strain used by Zircalloy.creep_strain /
-            creep_rate to scale their primary-creep transient term.
+        """Saturated primary hoop creep strain of zirconium-based cladding.
 
         Formulation:
             val = 0.0216*eps_dot^0.109 * (2 - tanh(3.55e4*eps_dot))^(-2.05)
@@ -1427,12 +1238,7 @@ class Zircalloy:
         return val
 
     def creep_strain(alloy, T, sig, flux, Phi, t):
-        """
-        Total hoop creep strain of zirconium-based cladding.
-
-        Why this model is here:
-            Combines the primary-creep transient (strain_sat_primary) with the steady
-            thermal-plus-irradiation strain rate into a single accumulated strain.
+        """Total hoop creep strain of zirconium-based cladding.
 
         Formulation:
             eps_dot = strain_rate_thermal(T,sig,Phi,cw) + strain_rate_irrad(T,sig,flux,cw)
@@ -1481,12 +1287,7 @@ class Zircalloy:
         return val
 
     def creep_rate(alloy, T, sig, flux, Phi, t):
-        """
-        Total hoop creep rate of zirconium-based cladding.
-
-        Why this model is here:
-            The time-derivative companion to Zircalloy.creep_strain, giving the
-            instantaneous rather than accumulated hoop creep.
+        """Total hoop creep rate of zirconium-based cladding.
 
         Formulation:
             eps_dot = strain_rate_thermal(T,sig,Phi,cw) + strain_rate_irrad(T,sig,flux,cw)
@@ -1537,12 +1338,7 @@ class Zircalloy:
 
 class HT9:
     def k(T):
-        """
-        Thermal conductivity of HT-9 cladding.
-
-        Why this model is here:
-            The clad conductivity model for HT-9-clad (fast-reactor) pins, analogous to
-            Zircalloy.k for LWR cladding.
+        """Thermal conductivity of HT-9 cladding.
 
         Formulation:
             k = A0 + A1*T
@@ -1570,11 +1366,7 @@ class HT9:
         return val
 
     def cp(T):
-        """
-        Specific heat capacity of HT-9 cladding.
-
-        Why this model is here:
-            The clad heat-capacity model for HT-9-clad pins.
+        """Specific heat capacity of HT-9 cladding.
 
         Formulation:
             Below 800.15 K: cp = 416.642 + 0.167*T
@@ -1604,11 +1396,7 @@ class HT9:
         return val
 
     def T_melt():
-        """
-        Melting temperature of HT-9 cladding, taken as the HT-9/metallic-fuel eutectic.
-
-        Why this model is here:
-            A fixed reference constant used by cladding-failure checks elsewhere.
+        """Melting temperature of HT-9 cladding, taken as the HT-9/metallic-fuel eutectic.
 
         Formulation:
             Constant, 973.0 K.
@@ -1633,12 +1421,7 @@ class HT9:
         return val
 
     def rho():
-        """
-        Density of HT-9 cladding.
-
-        Why this model is here:
-            A fixed reference constant used by mass and thermal-inertia calculations
-            elsewhere.
+        """Density of HT-9 cladding.
 
         Formulation:
             Constant, 7750.0 kg/m^3.
@@ -1663,11 +1446,7 @@ class HT9:
         return val
 
     def eps():
-        """
-        Emissivity of HT-9 cladding, no temperature or burnup dependence.
-
-        Why this model is here:
-            The clad-side emissivity for HT-9-clad pins' gas-gap radiation term.
+        """Emissivity of HT-9 cladding, no temperature or burnup dependence.
 
         Formulation:
             Constant, 0.9.
@@ -1693,12 +1472,7 @@ class HT9:
         return val
 
     def thrm_expan(T):
-        """
-        Thermal expansion of HT-9 cladding, assumed isotropic.
-
-        Why this model is here:
-            The dimensional-change model for HT-9-clad pins, analogous to Zircalloy's
-            axial/diametral pair but with no reported anisotropy.
+        """Thermal expansion of HT-9 cladding, assumed isotropic.
 
         Formulation:
             strain = A1 + A2*T + A3*T^2
@@ -1714,7 +1488,7 @@ class HT9:
             Yamanouchi et al. (1992), via PNNL-35702 (Geelhood et al., 2024) section
             3.3.4.1, Equation 3-42, Table 3-12. PNNL-35702 labels this equation's output
             "alpha = Thermal expansion coefficient, K^-1" (units 1/K), not a dimensionless
-            strain; this function's docstring (both before and after Phase 3) calls its
+            strain; this function's docstring (both before and after development) calls its
             return value a dimensionless "strain" instead, matching how Zircalloy.thrm_expan_*
             and UO2.thrm_expan are used elsewhere. Whether the coefficients were fit to a
             true CTE or to a strain under the "alpha" name is not resolved here -- flagged
@@ -1735,11 +1509,7 @@ class HT9:
         return strain
 
     def E(T):
-        """
-        Young's modulus of HT-9 cladding.
-
-        Why this model is here:
-            The elastic modulus for HT-9-clad pins, analogous to Zircalloy.E.
+        """Young's modulus of HT-9 cladding.
 
         Formulation:
             E = A0 + A1*T
@@ -1772,11 +1542,7 @@ class HT9:
         return val
 
     def G(T):
-        """
-        Shear modulus of HT-9 cladding.
-
-        Why this model is here:
-            The shear modulus for HT-9-clad pins, analogous to Zircalloy.G.
+        """Shear modulus of HT-9 cladding.
 
         Formulation:
             G = A0 + A1*T
@@ -1807,12 +1573,7 @@ class HT9:
         return val
 
     def meyer_hardness(T):
-        """
-        Meyer's hardness of HT-9 cladding, taken as the zirconium-based cladding model.
-
-        Why this model is here:
-            No HT-9-specific hardness correlation exists in the source; the zirconium
-            model is reused as the best available substitute.
+        """Meyer's hardness of HT-9 cladding, taken as the zirconium-based cladding model.
 
         Formulation:
             val = Zircalloy.meyer_hardness(T)
@@ -1841,12 +1602,7 @@ class HT9:
         return val
 
     def strain_rate_primary(T, sig, t):
-        """
-        Primary thermal creep strain rate of HT-9 cladding.
-
-        Why this model is here:
-            One of three contributions (with strain_rate_secondary and
-            strain_rate_tertiary) summed by HT9.strain_rate_thermal.
+        """Primary thermal creep strain rate of HT-9 cladding.
 
         Formulation:
             val = (C1*sig*exp(-Q1/(R*T)) + C2*sig^4*exp(-Q2/(R*T))
@@ -1892,12 +1648,7 @@ class HT9:
         return val
 
     def strain_rate_secondary(T, sig):
-        """
-        Secondary (steady-state) thermal creep strain rate of HT-9 cladding.
-
-        Why this model is here:
-            One of three contributions (with strain_rate_primary and
-            strain_rate_tertiary) summed by HT9.strain_rate_thermal.
+        """Secondary (steady-state) thermal creep strain rate of HT-9 cladding.
 
         Formulation:
             val = C5*sig^2*exp(-Q4/(R*T)) + C6*sig^5*exp(-Q5/(R*T))
@@ -1933,12 +1684,7 @@ class HT9:
         return val
 
     def strain_rate_tertiary(T, sig, t):
-        """
-        Tertiary thermal creep strain rate of HT-9 cladding.
-
-        Why this model is here:
-            One of three contributions (with strain_rate_primary and
-            strain_rate_secondary) summed by HT9.strain_rate_thermal.
+        """Tertiary thermal creep strain rate of HT-9 cladding.
 
         Formulation:
             val = 4*sig^10 * (C7*exp(-Q6/(R*T))*t)^3
@@ -1971,12 +1717,7 @@ class HT9:
         return val
 
     def strain_rate_thermal(T, sig, t):
-        """
-        Total thermal creep strain rate of HT-9 cladding.
-
-        Why this model is here:
-            Sums the primary, secondary and tertiary creep-rate contributions into the
-            thermal (non-irradiation) creep rate used by HT9.strain_rate.
+        """Total thermal creep strain rate of HT-9 cladding.
 
         Formulation:
             val = strain_rate_primary(T,sig,t) + strain_rate_secondary(T,sig)
@@ -2008,12 +1749,7 @@ class HT9:
         return val
 
     def strain_rate_irrad(T, sig, flux):
-        """
-        Irradiation creep strain rate of HT-9 cladding.
-
-        Why this model is here:
-            The irradiation contribution summed with strain_rate_thermal by
-            HT9.strain_rate into the total creep rate.
+        """Irradiation creep strain rate of HT-9 cladding.
 
         Formulation:
             val = (B0 + A1*exp(-Q_irr/(R*T))) * flux * sig^1.3 * 1e-22
@@ -2046,12 +1782,7 @@ class HT9:
         return val
 
     def strain_rate(T, sig, flux, t):
-        """
-        Total creep strain rate of HT-9 cladding.
-
-        Why this model is here:
-            Sums the thermal (HT9.strain_rate_thermal) and irradiation
-            (HT9.strain_rate_irrad) creep rates into a single total.
+        """Total creep strain rate of HT-9 cladding.
 
         Formulation:
             val = strain_rate_thermal(T,sig,t) + strain_rate_irrad(T,sig,flux)
@@ -2081,12 +1812,8 @@ class HT9:
         return val
 
     def yield_stress(T):
-        """
-        Yield stress of HT-9 cladding; the ultimate tensile stress is assumed equal to
+        """Yield stress of HT-9 cladding; the ultimate tensile stress is assumed equal to
         the yield stress.
-
-        Why this model is here:
-            The strength limit used by cladding stress-margin checks elsewhere.
 
         Formulation:
             val = A1 + A2*T + A3*T^2 + A4*T^3
@@ -2117,27 +1844,11 @@ class HT9:
 
 
 class D9_SS:
-    """
-    D9 austenitic stainless steel, the cladding of the SCWR lattice in Hughes et al.
-
-    Constant properties only. PNNL-35702 does not cover D9, and no temperature-dependent
-    conductivity model for it is available in this repository -- per docs/DECISIONS.md
-    that gap stays a gap rather than being filled with something plausible. What is
-    available is a single evaluated conductivity and a density, both from the lattice
-    Hughes et al. (2014) actually modelled, and those are enough for a constant-property
-    clad.
-    """
+    """D9 austenitic stainless steel, the cladding of the SCWR lattice in Hughes et al."""
 
     @staticmethod
     def k(T=None):
-        """
-        Thermal conductivity of D9 stainless steel cladding, constant.
-
-        Why this model is here:
-            The SCWR lattice this project's supercritical work is built around is clad in
-            D9, not Zircaloy, and until now `k` for it was an unimplemented stub -- so
-            any D9 case had to borrow a Zircaloy number. A single evaluated value is a
-            poor model but an honest one, and it is traceable.
+        """Thermal conductivity of D9 stainless steel cladding, constant.
 
         Formulation:
             k = 18.9 W/m-K, independent of temperature.
@@ -2171,12 +1882,7 @@ class D9_SS:
 
     @staticmethod
     def rho():
-        """
-        Density of D9 stainless steel cladding.
-
-        Why this model is here:
-            Needed for any transient or mass-inventory calculation on a D9-clad pin, and
-            it comes from the same lattice definition as the conductivity above.
+        """Density of D9 stainless steel cladding.
 
         Formulation:
             rho = 8100 kg/m^3, independent of temperature.

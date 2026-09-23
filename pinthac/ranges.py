@@ -1,5 +1,4 @@
-"""
-Validity-range checking for every correlation and property model in PINTHAC.
+"""Validity-range checking for every correlation and property model in PINTHAC.
 
 Why this exists: every correlation in this library was fitted to a finite database, and
 almost every one of them will happily return a smooth, plausible-looking number a long
@@ -26,8 +25,7 @@ CHECKING_ENABLED = True
 
 
 class RangeWarning(UserWarning):
-    """
-    Raised when a correlation input falls outside its published validity range.
+    """Raised when a correlation input falls outside its published validity range.
 
     Its own class rather than a bare UserWarning so a caller can silence, escalate, or
     count range violations specifically -- e.g. a data generator that wants
@@ -37,13 +35,7 @@ class RangeWarning(UserWarning):
 
 
 def check(model_name, values, table):
-    """
-    Warn if any input to a correlation falls outside its validated range.
-
-    Why this model is here:
-        The single range-checking entry point for the whole library, so that every
-        correlation reports violations in the same words and a reader auditing the
-        library against the source papers has exactly one mechanism to understand.
+    """Warn if any input to a correlation falls outside its validated range.
 
     Formulation:
         For each named input present in both `values` and `table`, compare against the
@@ -86,15 +78,7 @@ def check(model_name, values, table):
 
 
 def _extremes(value):
-    """
-    Smallest and largest element of an input, as plain Python floats.
-
-    Why this model is here:
-        The warning text needs two numbers, not an array, and the comparison against the
-        bounds must not depend on the array library. Detaching is safe and necessary
-        here: this value is only ever formatted into a warning string, never returned
-        into a calculation, so removing it from the autograd graph costs nothing and
-        avoids holding a reference to the whole graph inside a warning.
+    """Smallest and largest element of an input, as plain Python floats.
 
     Inputs:
         value : float, numpy array, or torch tensor

@@ -1,40 +1,13 @@
-"""
-Example 3: a supercritical-water annular single-channel analysis (SCA).
+"""March a dual-cooled SCW annular channel and reconstruct its fuel profile.
 
-This is the library's principal target (docs/DECISIONS.md, "Scope: annular water SCA"):
-an inner coolant channel bored through an annular UO2 pellet, the annular fuel region
-itself, and an outer coolant channel in a square-pitch rod-bundle cell -- both channels
-supercritical water at 25 MPa. pinthac.sca.annular.solve_field is the reference
-finite-volume axial solver this library's DeepONet surrogate (example 4) is trained
-against.
-
-Two things worth knowing before reading the output:
-  - This solver has NO external validation reference (unlike the IAPWS-95 property
-    library, which is checked against 27 published check values -- see
-    tests/test_iapws_verification.py and README.md). What IS checked, every run: the
-    flux split between the two coolants closes to machine precision (Q34/Round 5 in
-    docs/OPEN_QUESTIONS.md measured 4.8e-16), and the energy balance across the whole
-    axial march is reported below via each channel's converged enthalpy rise.
-  - This case genuinely takes several minutes on
-    this machine -- see the timing note in the pasted output below. Each outer Picard
-    iteration evaluates the IAPWS-95 property library and a bracket-guarded
-    (torchsolve) wall-temperature solve many times across the whole axial field, and
-    each such call carries fixed per-call overhead (see sca/annular.py::_T_hp_fast's
-    docstring) that dominates at this problem size. This is not a quick smoke test --
-    it is the actual reference solve the surrogate in example 4 is trained to replace.
-
-Run: python -m examples.sca_annular_channel   (run from the repository root)
+Run from the repository root: python -m examples.sca_annular_channel
+See docs/SCA_SOLVERS.md for output conventions and convergence checks.
 """
 import time
 
 from pinthac.sca import run
 
 
-# The case this example runs. It used to live inside pinthac/sca/annular.py as a
-# module-level Inputs_ann constant, which is the wrong home for it: a solver is not an
-# example, and a default geometry quietly standing in for one the caller forgot is how a
-# run ends up reporting someone else's pin. The solver now requires every key, and the
-# case that exercises it lives here, where a reader can see and change it.
 CASE_GEOMETRY = {
     "type":    "annular",
     "ri":      0.0035,    # fuel inner radius, m
@@ -72,51 +45,33 @@ def main():
                              htc="swenson", friction="filonenko",
                              bundle="presser", fuel_conductivity="nfi")
     out = report["result"]
+    # Axial HTC profiles, W/m²/K; each entry corresponds to out['z'].
+    htc_inner = out['htc_conv_i']
+    htc_outer = out['htc_conv_o']
+    print(f"Inner convection HTC range: {htc_inner.min():.2f}–{htc_inner.max():.2f} W/m²/K")
+    print(f"Outer convection HTC range: {htc_outer.min():.2f}–{htc_outer.max():.2f} W/m²/K")
     elapsed = time.perf_counter() - t0
 
-    print(f"\nSolved in {elapsed:.1f} s ({out['outer_iters_used']} outer Picard "
-          f"iterations, converged={out['outer_converged']}, "
-          f"residual={out['outer_residual']:.3g} J/kg)")
-    print(f"\nFlux-split energy balance (should equal q0 to within the {CASE_CONDITIONS['N']}-node "
-          f"axial discretization -- see pinthac/pin/annular.py::Ann_flux_split's docstring):")
-    print(f"  inner channel enthalpy rise: {(out['h_i'][-1] - out['h_i'][0])/1e3:.3f} kJ/kg")
-    print(f"  outer channel enthalpy rise: {(out['h_o'][-1] - out['h_o'][0])/1e3:.3f} kJ/kg")
+    print(f"\nSolved in {elapsed:.2f} s; converged={report['convergence']['ok']}; "
+          f"radial residual={max(abs(out['radial_residual'])):.3g} W/m")
+    dz = CASE_CONDITIONS['L']/CASE_CONDITIONS['N']
+    deposited = sum(out['qp'])*dz
+    absorbed = sum(CASE_CONDITIONS[f'mdot_{side}'] *
+                   (out[f'h_out_{side}'][-1]-out[f'h_{side}'][0]) for side in ('i', 'o'))
+    print(f"Deposited/absorbed heat: {deposited:.6f} / {absorbed:.6f} W")
 
     print(f"\nPeak fuel surface temperature, inner side (Tfo_i): {out['Tfo_i'].max():.2f} K")
     print(f"Peak fuel surface temperature, outer side (Tfo_o): {out['Tfo_o'].max():.2f} K")
-    print(f"Outlet inner-channel coolant temperature (Tm_i):   {out['Tm_i'][-1]:.2f} K")
-    print(f"Outlet outer-channel coolant temperature (Tm_o):   {out['Tm_o'][-1]:.2f} K")
+    print(f"Outlet inner-channel coolant temperature (T_out_i): {out['T_out_i'][-1]:.2f} K")
+    print(f"Outlet outer-channel coolant temperature (T_out_o): {out['T_out_o'][-1]:.2f} K")
+    print(f"Maximum fuel temperature: {out['Tf_max'].max():.2f} K")
+    from pinthac.sca.annular_march import fuel_profile
+    import numpy as np
+    profile = fuel_profile(out, np.linspace(out['ri'], out['ro'], 101))
+    print(f"Reconstructed fuel profile shape (axial, radial): {profile.shape}")
     print(f"Total pressure drop, inner channel: {out['dP_i'][-1]/1e3:.2f} kPa")
     print(f"Total pressure drop, outer channel: {out['dP_o'][-1]/1e3:.2f} kPa")
 
 
 if __name__ == "__main__":
     main()
-
-
-"""
-Real output (python -m examples.sca_annular_channel, from the repository root, on
-this machine, GenEnv3.12, torch 2.9.1+rocm7.2.1):
-
-Geometry/conditions: L=4.27 m, N=100 axial nodes, q0=10.0 kW/m peak (cosine shape), Pnom=25.0 MPa, mdot_i=0.01 kg/s, mdot_o=0.06 kg/s
-
-Solved in 426.7 s (6 outer Picard iterations, converged=True, residual=0 J/kg)
-
-Flux-split energy balance (should equal q0 to within the 100-node axial discretization -- see pinthac/pin/annular.py::Ann_flux_split's docstring):
-  inner channel enthalpy rise: 893.982 kJ/kg
-  outer channel enthalpy rise: 303.971 kJ/kg
-
-Peak fuel surface temperature, inner side (Tfo_i): 739.91 K
-Peak fuel surface temperature, outer side (Tfo_o): 725.29 K
-Outlet inner-channel coolant temperature (Tm_i):   668.88 K
-Outlet outer-channel coolant temperature (Tm_o):   652.84 K
-Total pressure drop, inner channel: 20.59 kPa
-Total pressure drop, outer channel: 45.60 kPa
-
-The ~7 minute solve time is real, not a hang. Each of the 6 outer Picard iterations
-evaluates the IAPWS-95 property library and a bracket-guarded wall-temperature solve
-across the whole 100-node axial field several times, and each such call carries a
-fixed per-call overhead (see sca/annular.py::_T_hp_fast's docstring) that dominates at
-this problem size on this GPU. The wall-clock number moves by tens of percent between
-runs depending on what else is on the card; the temperatures do not.
-"""

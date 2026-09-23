@@ -1,5 +1,4 @@
-"""
-Smoke tests for pinthac.correlations.bundle: does it import, does each of the two
+"""Smoke tests for pinthac.correlations.bundle: does it import, does each of the two
 psi factors accept a float / numpy array / torch tensor and return the matching type
 with a finite gradient.
 

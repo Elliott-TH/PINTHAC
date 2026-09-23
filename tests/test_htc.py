@@ -1,5 +1,4 @@
-"""
-Smoke tests for pinthac.correlations.htc: does it import as flat namespaces (no
+"""Smoke tests for pinthac.correlations.htc: does it import as flat namespaces (no
 instantiation), does each correlation accept a float / numpy array / torch tensor and
 return the matching type with a finite gradient, does an out-of-range input warn, do the
 implicit wall-temperature solves (Water.Chen_H2O/Bjorge, SCW.Swenson/Chen_SCW) converge
@@ -28,8 +27,6 @@ def props_water_torch():
 
 # ------------------------------------------------------------------------------- import
 def test_flat_namespace_no_instantiation_needed():
-    # The point of the Phase 2 conversion: these are plain class attributes, callable
-    # without ever constructing a Water()/SCW() instance.
     assert callable(htc.Water.Dittus)
     assert callable(htc.SCW.Swenson_dT)
     assert callable(htc.Lead.Shen)
@@ -51,10 +48,6 @@ def _assert_backend_contract(fn, G=1200.0, D=0.01, label=""):
     (grad,) = torch.autograd.grad(out_t.sum(), Props_t['mu'], allow_unused=True)
     assert grad is not None and torch.isfinite(grad).all(), label
 
-    # Reverse mixed case: the geometry/flow argument is the batch and the properties are
-    # scalars. This is how a design sweep calls these -- one property state, many mass
-    # fluxes -- and it is the direction backend.lib() gets wrong if a correlation resolves
-    # its library from the Props dict alone.
     G_t = torch.tensor([1200.0, 1800.0], dtype=torch.float64, requires_grad=True)
     out_g = fn(props_water(), G_t, D)
     assert torch.is_tensor(out_g), label
@@ -68,8 +61,6 @@ def test_dittus_backend_contract():
 
 
 def test_petchukov_backend_contract():
-    # The pre-cleanup failure this targets: compat(G, D) missing the tensor hiding
-    # inside Props['mu'] while G and D are plain floats.
     _assert_backend_contract(htc.Water.Petchukov, label="Petchukov")
 
 
@@ -118,11 +109,6 @@ def test_schrock_grossman_runs_and_backend_contract():
 
 
 def test_schrock_grossman_matches_its_own_corrected_docstring_formula():
-    # docs/DUPLICATES.md D12: the pre-cleanup docstring described a different
-    # correlation than the body computed; the body is right and was left untouched.
-    # This checks the *documented* formula (1.11*Xtt^-0.66 + 7400*q''/(G*hfg)) against
-    # the body's actual return value -- an algebraic identity of the code, not a number
-    # read off a run.
     Props_l, Props_v = _boiling_state()
     G, D, x, q_pp = 1200.0, 0.01, 0.3, 3.0e5
     htc_lo = 9000.0
@@ -135,9 +121,6 @@ def test_schrock_grossman_matches_its_own_corrected_docstring_formula():
 
 
 def test_chen_h2o_dt_and_bjorge_dt_backend_contract_across_the_F_branch():
-    # The pre-cleanup failure this targets: F = 1.0 if inv_Xtt <= 0.1 else ... is a
-    # Python `if` on a value that must be able to vary across a batch -- exercised here
-    # with x spanning both sides of the F branch point.
     Props_l, Props_v = _boiling_state()
     G, D = 1200.0, 0.01
     Tsat, dPsat, sigma, hfg = 600.0, 1.5e5, 0.02, 1.4e6
@@ -243,9 +226,6 @@ def test_lead_shen_backend_contract():
     assert grad is not None and torch.isfinite(grad).all()
 
 
-# =======================================================================================
-# Liquid-metal correlations (manual section 2.4), added in Phase 4.
-# =======================================================================================
 def _sodium_props(T=700.0):
     from pinthac.properties import liqprops as lm
     raw = lm.Props(lm.Sodium, np.array([T]))
@@ -255,7 +235,8 @@ def _sodium_props(T=700.0):
 def test_lyon_and_seban_shimazaki_are_the_published_forms():
     """Both are Nu = A + 0.025*Pe^0.8, differing only in the conduction floor: 7.0 for
     Lyon's constant heat flux, 5.0 for Seban-Shimazaki's uniform wall temperature.
-    T&K Eqs. (10.126a) and (10.126b)."""
+    T&K Eqs. (10.126a) and (10.126b).
+    """
     P = _sodium_props()
     G, D = 2000.0, 0.008
     Pe = G * D * P['cp'] / P['k']
@@ -269,7 +250,8 @@ def test_lyon_and_seban_shimazaki_are_the_published_forms():
 def test_liquid_metal_nusselt_keeps_its_conduction_floor():
     """The physical point of the A + B*Pe^C form: a liquid metal still conducts heat
     when the flow stops, so Nu must not collapse to zero as Pe does. This is what
-    separates these from Dittus-Boelter and it is worth pinning."""
+    separates these from Dittus-Boelter and it is worth pinning.
+    """
     P = _sodium_props()
     D = 0.008
     for G in (1.0, 0.01, 0.0001):
@@ -283,7 +265,8 @@ def test_liquid_metal_nusselt_keeps_its_conduction_floor():
 
 def test_sodium_prandtl_number_is_liquid_metal_small():
     """A guard on the property library as much as the correlation: if Pr came out near
-    unity these correlations would be the wrong family entirely."""
+    unity these correlations would be the wrong family entirely.
+    """
     P = _sodium_props()
     assert 0.001 < P['mu'] * P['cp'] / P['k'] < 0.02
 
@@ -309,7 +292,8 @@ def test_mikityuk_matches_the_published_equation(p_over_d, G):
     the paper publishes error statistics against 658 experimental points but no worked
     example, so there is no published number to compare a single evaluation to. What this
     guards is the transcription -- and specifically the Peclet exponent, which Todreas &
-    Kazimi's Eq. (10.133) mis-typesets as '<' where it should be a superscript 0.77."""
+    Kazimi's Eq. (10.133) mis-typesets as '<' where it should be a superscript 0.77.
+    """
     P = _sodium_props()
     D = 0.008
     Pe = G * D * P['cp'] / P['k']
@@ -323,7 +307,8 @@ def test_mikityuk_geometry_factor_saturates():
     """The property Mikityuk says distinguishes his correlation from the eight he
     reviewed: Nu approaches a finite asymptote as P/D grows rather than diverging, which
     is what makes it safe in a transient code that might push the geometry term outside
-    its fitted range."""
+    its fitted range.
+    """
     P = _sodium_props()
     D = 0.008
     # Start at P/D = 5, not 3: at 3 the factor is 1 - exp(-7.6) = 0.99950, which is
@@ -367,3 +352,18 @@ def test_mikityuk_backend_contract():
     _assert_backend_contract(
         lambda Props, G, D: htc.Sodium.Mikityuk(Props, G, D, 1.3 * D, check_range=False),
         label="Sodium.Mikityuk")
+
+
+def test_swenson_preserves_benchmarked_bulk_cp_correction():
+    bulk = dict(rho=500., mu=6e-5, k=.4, cp=12000., h=1.8e6)
+    wall = dict(rho=250., mu=3.5e-5, k=.3, cp=42000., h=2.2e6)
+    baseline = htc.SCW.Swenson_dT(bulk, wall, 670., 650., 800., .007)
+    assert baseline == pytest.approx(37045.608380535465, rel=1e-12)
+    for bulk_cp, wall_cp in ((1200., 42000.), (12000., 4200.), (80000., 2000.)):
+        changed = htc.SCW.Swenson_dT(
+            dict(bulk, cp=bulk_cp), dict(wall, cp=wall_cp),
+            670., 650., 800., .007,
+        )
+        # At fixed enthalpies, the benchmark form scales with (cp_wall/cp_bulk)^0.61.
+        factor = ((wall_cp/wall['cp']) / (bulk_cp/bulk['cp']))**.61
+        assert changed == pytest.approx(baseline*factor, rel=1e-12)

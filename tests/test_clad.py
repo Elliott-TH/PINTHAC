@@ -1,9 +1,4 @@
-"""
-Smoke tests for pinthac.pin.clad: does it import, does T_ci accept a float / numpy
-array / torch tensor and return the matching type with a finite gradient (including
-the pre-cleanup failure case of float radii paired with a tensor Tco/qp), does the
-annulus (Rco < Rci) sign flip behave correctly including in a mixed-sign batch, does it
-no longer print.
+"""Smoke tests for pinthac.pin.clad: does it import, does T_ci accept a float / numpy
 
 No RANGES table exists for T_ci, so there is no out-of-range-warns test here. No
 asserted number was obtained by running the code under test.
@@ -19,8 +14,6 @@ def test_module_imports():
 
 
 def test_backend_contract_with_float_radii_and_tensor_state():
-    # The pre-cleanup failure this targets: lib.log(Rco/Rci) with float radii, resolved
-    # via a tensor Tco/qp -- torch.log rejects a bare float outright.
     Tco = torch.tensor([600.0, 650.0], dtype=torch.float64, requires_grad=True)
     qp = torch.tensor([20000.0, 25000.0], dtype=torch.float64, requires_grad=True)
     out = clad.T_ci(0.0051, 0.00439, 15.0, Tco, qp)

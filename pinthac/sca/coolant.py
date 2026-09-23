@@ -1,30 +1,9 @@
-"""
-Coolant selection for the single-channel solvers.
+"""Coolant property and enthalpy-inversion lookups for channel solvers.
 
-Both solvers reach the property libraries through exactly two operations: temperature
-to properties, and enthalpy back to temperature. This module supplies that pair for any
-supported coolant, so sca/rod.py and sca/annular.py contain no coolant-specific code at
-all beyond passing a name through.
-
-Two strategies, chosen by the coolant rather than by the caller:
-
-  tabulated (supercritical water, water) -- IAPWS-95 costs about 11 ms per state point
-      and its fixed per-call overhead amortises over almost nothing at the batch sizes a
-      channel solve uses, so a table is built once over a temperature grid in one batched
-      call and interpolated thereafter. Measured at 149x on the annular solver
-      (docs/scripts/compare_annular_lut.py).
-
-  direct (sodium, lead, LBE) -- the liquid-metal correlations in properties/liqprops.py
-      are explicit polynomial fits, already vectorised and already differentiable under
-      torch. Tabulating them would cost more than evaluating them, so they are called
-      straight through and no table is ever built.
-
-The enthalpy inversion follows the same split: a reverse interpolation against the
-table's h column where a table exists, and a Newton solve where it does not. The Newton
-solve needs no autograd and no bracket search because dh/dT is exactly cp, which the
-property call already returns, and h is monotone in T for every coolant here (checked:
-strictly increasing over each metal's whole liquid range, and above the critical
-pressure for water there is no two-phase plateau to flatten it).
+Water uses a temperature table to avoid repeated equation-of-state solves.
+Liquid-metal correlations are evaluated directly. Enthalpy inversion uses
+reverse table interpolation for water and bisection followed by Newton
+iterations for metals, using dh/dT = cp.
 """
 import warnings
 
@@ -40,8 +19,7 @@ from pinthac.ranges import RangeWarning
 PROP_KEYS = ('rho', 'mu', 'k', 'cp', 'h')
 
 def _liquid_metal_range(mat):
-    """
-    The temperature window over which every property of a liquid metal is validated:
+    """The temperature window over which every property of a liquid metal is validated:
     the intersection of the five per-property ranges liqprops publishes.
 
     Derived from the material class rather than written down here, deliberately. The
@@ -83,8 +61,7 @@ COOLANTS = {
 
 
 def resolve(coolant):
-    """
-    Look up a coolant by name, raising immediately with the valid options on a miss.
+    """Look up a coolant by name, raising immediately with the valid options on a miss.
 
     Inputs:
         coolant : one of COOLANTS' keys, case-insensitive
@@ -100,12 +77,7 @@ def resolve(coolant):
 
 
 def build_table(coolant, p, Tmin=None, Tmax=None, n=3000, device=None):
-    """
-    Tabulate a coolant's properties against temperature at one fixed pressure.
-
-    Why this model is here:
-        The tabulated strategy described in this module's docstring. One batched property
-        call over n grid points replaces every later equation-of-state solve.
+    """Tabulate a coolant's properties against temperature at one fixed pressure.
 
     Valid range:
         [Tmin, Tmax]. Defaults come from the coolant's own T_range. For supercritical
@@ -147,16 +119,8 @@ def build_table(coolant, p, Tmin=None, Tmax=None, n=3000, device=None):
 
 
 def _warn_if_pinned(T, T_lo, T_hi, what):
-    """
-    Warn once per call if an enthalpy inversion came back pinned to an end of its
+    """Warn once per call if an enthalpy inversion came back pinned to an end of its
     temperature window.
-
-    Why this model is here:
-        Both inversion strategies clamp rather than extrapolate, and a clamped
-        temperature is perfectly finite -- so sca/run.py's _scan_for_nonfinite cannot
-        see it, and a channel whose enthalpy rise ran off the end of the window would
-        otherwise report a plausible-looking wall of identical temperatures. This is the
-        one place that can notice, so it says so.
     """
     T_np = np.asarray(backend.to_numpy(T) if hasattr(backend, "to_numpy") else T,
                       dtype=float)
@@ -177,7 +141,8 @@ def _table_lookups(table):
     """The (props_at, T_from_h) pair for a tabulated coolant: linear interpolation in
     both directions. The reverse direction is valid because h is monotone in T, so the
     table's h column is sorted ascending and can be interpolated against directly --
-    which is what replaces a root-find for the inversion."""
+    which is what replaces a root-find for the inversion.
+    """
     T_grid, h_grid = table['T'], table['h']
     is_torch = backend.is_torch(T_grid)
 
@@ -222,7 +187,8 @@ def _direct_lookups(entry, p):
     the clamp there. Newton needs no autograd because dh/dT is exactly cp, which the same
     property call already returns. Both phases run a fixed iteration count using
     backend.where rather than an if, so the whole thing is branch-free and inverts an
-    entire axial field at once."""
+    entire axial field at once.
+    """
     substance = entry["substance"]
     T_lo, T_hi = entry["T_range"]
 
@@ -250,8 +216,7 @@ def _direct_lookups(entry, p):
 
 
 def make_lookups(coolant, p, table=None, Tmin=None, Tmax=None, n=3000, device=None):
-    """
-    Build the (props_at, T_from_h) pair the single-channel solvers run on.
+    """Build the (props_at, T_from_h) pair the single-channel solvers run on.
 
     This is the whole coolant interface. sca/rod.py and sca/annular.py call it once per
     solve and then never mention a coolant again: props_at(T) returns the Props dict
@@ -282,22 +247,11 @@ def make_lookups(coolant, p, table=None, Tmin=None, Tmax=None, n=3000, device=No
 
 
 def make_property(coolant, p, table=None, Tmin=None, Tmax=None, n=3000, device=None):
-    """
-    Build sca/rod.py's Property(Prop, prop) lookup for any coolant.
+    """Build sca/rod.py's Property(Prop, prop) lookup for any coolant.
 
-    Why this model is here:
-        make_lookups' (props_at, T_from_h) pair is the natural interface, but rod.py,
-        ml/deeponet.py, ml/datagen.py and the tests all already speak the older
-        Property(['T', 600.0], 'rho') spelling -- read as "interpolate rho against the T
-        column at T = 600 K". This serves that spelling for every coolant, so adding
-        coolants needed no change at any of those call sites.
-
-    Formulation:
-        Tabulated coolants get exactly the interpolation make_lookups builds. Direct
-        coolants get a property call per lookup, behind a one-entry cache keyed on
-        argument identity: rod.py's _props_at asks for five properties at the same
-        temperature object in a row, so the cache turns five property calls into one,
-        and a miss only costs a recomputation rather than a wrong answer.
+    The returned callable also exposes props_at(T) for consumers needing all five
+    properties at once. Results are not cached: input arrays may change in place,
+    and tensors may be reused across independent autograd evaluations.
 
     Inputs:
         coolant, p, table, Tmin, Tmax, n, device : as make_lookups
@@ -308,7 +262,6 @@ def make_property(coolant, p, table=None, Tmin=None, Tmax=None, n=3000, device=N
     """
     props_at, T_from_h = make_lookups(coolant, p, table=table, Tmin=Tmin, Tmax=Tmax,
                                       n=n, device=device)
-    cache = {}
 
     def Property(Prop, prop):
         column, value = Prop[0], Prop[1]
@@ -323,11 +276,8 @@ def make_property(coolant, p, table=None, Tmin=None, Tmax=None, n=3000, device=N
             raise ValueError(
                 f"Property: unknown lookup column {column!r} -- expected 'T' or 'h'."
             )
-        # Identity, not equality: tensors and arrays have no cheap hashable identity, and
-        # the only case worth catching is the same object asked for five times in a row.
-        if cache.get('key') is not value:
-            cache['key'] = value
-            cache['props'] = props_at(value)
-        return cache['props'][prop]
+        return props_at(value)[prop]
+
+    Property.props_at = props_at
 
     return Property

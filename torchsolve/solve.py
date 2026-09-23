@@ -285,10 +285,6 @@ def _guarded(
         if it == max_iter or (early_exit and not bool(active.any())):
             break
 
-        # ---- slope estimate -----------------------------------------
-        # dfx came free with the last evaluation; fall back to the secant
-        # slope, and then to the bracket slope (false position), when there is
-        # no usable derivative.
         d = dfx
         if d is None and method != "bisect":
             num = fx - f_prev

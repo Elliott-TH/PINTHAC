@@ -1,9 +1,8 @@
-"""
-Shared matplotlib style for the Phase 7 portfolio figures (docs/brief/PHASE67_BRIEF.md part B).
+"""Shared matplotlib style for the development portfolio figures
 
 Every figures/*.py script imports this module and calls apply() once, then figure() to
-get a dark-background Axes matching docs/reference/index.html's own palette -- the exact
-colors are pinned by that page's own <!-- PROMPT FOR CLAUDE CODE --> comments (grep it
+get a dark-background Axes matching index.html's own palette -- the exact
+colors are pinned by that page's own <!-- FIGURE SPECIFICATION --> comments (grep it
 for the hex codes): background #0a0d12, accent #6fd3f7, muted grey #8b93a1, light
 gridlines, no title baked into the image (the caption lives in the HTML page, not the
 SVG -- see docs/FIGURE_CAPTIONS.md).
@@ -30,8 +29,7 @@ SERIES = [ACCENT, "#f7b96f", "#8bd39a", MUTED]
 
 
 def apply():
-    """
-    Set the shared rcParams. Call once, near the top of a figure script, before creating
+    """Set the shared rcParams. Call once, near the top of a figure script, before creating
     any figure.
 
     Inputs: none
@@ -64,8 +62,7 @@ def apply():
 
 
 def figure(figsize=(7.0, 4.5), ncols=1, nrows=1, **kwargs):
-    """
-    A dark-styled Figure/Axes pair (or array of Axes), with no title set -- captions live
+    """A dark-styled Figure/Axes pair (or array of Axes), with no title set -- captions live
     in docs/FIGURE_CAPTIONS.md / the HTML page, never baked into the image per the site's
     own instructions.
 
@@ -87,8 +84,7 @@ def figure(figsize=(7.0, 4.5), ncols=1, nrows=1, **kwargs):
 
 
 def finish(fig, out_path):
-    """
-    Tight-layout and save as SVG with the dark background preserved.
+    """Tight-layout and save as SVG with the dark background preserved.
 
     Inputs:
         fig      : matplotlib Figure

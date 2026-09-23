@@ -1,13 +1,4 @@
-"""
-Single-phase friction-factor correlations for water and supercritical water.
-
-Moved from FRICT.py in Phase 1. Phase 2 brings it up to the docstring, backend and
-flat-namespace standard without changing any formula, constant or exponent. `f_water`
-and `f_SCW` are converted from the pre-cleanup instance-state classes (`__init__`-free
-here already, but instance methods taking `self`) to flat namespaces, matching the
-pattern `MatMod.UO2` and `correlations/bundle.py::Bundle` already use -- call sites
-change from `f_SCW().Filonenko(...)` to `f_SCW.Filonenko(...)`.
-"""
+"""Single-phase friction-factor correlations for water and supercritical water."""
 from pinthac import backend, ranges
 
 
@@ -15,27 +6,16 @@ RANGES = {
     # Stated directly in the original Blasius/McAdams docstrings.
     "blasius": {"Re": (None, 1.0E5)},
     "mcadams": {"Re": (3.0E4, 1.0E6)},
-    # Owner-specified (docs/DECISIONS.md, "Wu friction"): Wu was being applied on
-    # sca/annular.py's outer channel at up to 2500 kg/m^2-s, 1.5x to 2.5x this bound,
-    # for an entire training dataset with nothing to say so (docs/PHYSICS_REVIEW.md).
     "wu": {"G": (None, 1000.0)},
     # Colebrook describes the turbulent branch of the Moody chart; below the critical
     # zone the laminar f = 64/Re applies instead and this correlation does not.
     "colebrook": {"Re": (4.0E3, None)},
 }
-# Filonenko has no published validated Re range in the source, docs/reference/, or
-# docs/PHYSICS_REVIEW.md -- only the Petrov-Popov citation for the isothermal form it
-# implements (see Filonenko's own docstring). See docs/OPEN_QUESTIONS.md Q16.
 
 
 class f_water:
     def Blasius(Props, G, D):
-        """
-        Blasius correlation for the single-phase friction factor.
-
-        Why this model is here:
-            The low-Reynolds-number friction-factor option for a water channel (see
-            f_water.McAdams for the higher-Reynolds-number companion).
+        """Blasius correlation for the single-phase friction factor.
 
         Formulation:
             Re = G*D/mu
@@ -64,12 +44,7 @@ class f_water:
         return fval
 
     def McAdams(Props, G, D):
-        """
-        McAdams correlation for the single-phase friction factor.
-
-        Why this model is here:
-            The higher-Reynolds-number friction-factor option for a water channel (see
-            f_water.Blasius for the lower-Reynolds-number companion).
+        """McAdams correlation for the single-phase friction factor.
 
         Formulation:
             Re = G*D/mu
@@ -100,23 +75,14 @@ class f_water:
 
     def Colebrook(Props, G, D, roughness=0.0, n_iter=20, tol=1.0e-12,
                   return_convergence=False, check_range=True):
-        """
-        Colebrook equation for the turbulent friction factor, smooth or rough wall.
-
-        Why this model is here:
-            The Moody chart is a graphical solution of this equation, and it is the
-            reference every explicit turbulent friction factor in this module is an
-            approximation to. Blasius and McAdams are smooth-wall power-law fits with no
-            roughness term at all, so Colebrook is the only model here that can represent
-            a corroded or as-manufactured surface.
+        """Colebrook equation for the turbulent friction factor, smooth or rough wall.
 
         Formulation:
             1/sqrt(f) = -2*log10( (roughness/D)/3.70 + 2.51/(Re*sqrt(f)) )
 
             Implicit in f. Substituting x = 1/sqrt(f) turns it into a fixed-point
             iteration that is strongly contracting, which is why this uses simple
-            iteration rather than the Newton step the brief's other implicit
-            correlations need:
+            iteration:
 
                 x <- -2*log10( (roughness/D)/3.70 + 2.51*x/Re )
 
@@ -193,14 +159,7 @@ class f_water:
 
 class f_SCW:
     def Filonenko(Props, G, D, Props_w=None):
-        """
-        Filonenko correlation for the friction factor of supercritical water.
-
-        Why this model is here:
-            The isothermal friction-factor model used on both channels of the annular
-            SCA (sca/annular.py::pressure_drop) per docs/DECISIONS.md ("Wu friction");
-            it is algebraically the isothermal part of Hughes et al. (2014) Eq. (9)
-            (Petrov & Popov 1988): `1.82*log10(Re) - 1.6437` there versus `-1.64` here.
+        """Filonenko correlation for the friction factor of supercritical water.
 
         Formulation:
             Re = G*D/mu
@@ -214,14 +173,7 @@ class f_SCW:
 
         Reference:
             Petrov & Popov (1988), as cited by Hughes et al. (2014) Eq. (9) -- see
-            docs/PHYSICS_REVIEW.md -- for the isothermal form implemented here.
-
-        The supercritical density correction:
-            Hughes' Eq. (9) carries a (rho_w/rho_b)^0.4 factor on top of the isothermal
-            form. Supply Props_w -- properties evaluated at the wall temperature -- to
-            include it. It defaults off, per docs/DECISIONS.md, so existing call sites
-            keep the isothermal behaviour they were validated with; turning it on is an
-            explicit choice at the call site rather than a silent change.
+            the model references -- for the isothermal form implemented here.
 
             It matters where the wall and bulk densities diverge, which for
             supercritical water is exactly the pseudocritical region: at 25 MPa a wall
@@ -248,22 +200,15 @@ class f_SCW:
         return fval
 
     def Wu(Props, G, D):
-        """
-        Wu correlation for the friction factor of supercritical water around rod
+        """Wu correlation for the friction factor of supercritical water around rod
         bundles.
-
-        Why this model is here:
-            A rod-bundle-fitted alternative to Filonenko; per docs/DECISIONS.md it is
-            not used in the annular SCA path today (Filonenko runs on both channels
-            there), and its validated mass-flux range is well below what the annular
-            training dataset originally exercised it at (docs/PHYSICS_REVIEW.md).
 
         Formulation:
             Pr = mu*cp/k
             f = 0.014 * f_Filonenko^(-0.12) * Pr^(-0.23)
 
         Valid range:
-            G <= 1000 kg/m^2-s (owner-specified, docs/DECISIONS.md "Wu friction").
+            G <= 1000 kg/m^2-s (implementation limit).
 
         Uncertainty:
             Not established -- see docs/OPEN_QUESTIONS.md (Q14).
@@ -294,13 +239,7 @@ class f_SCW:
 
 class Spacer:
     def blah2():
-        """
-        Spacer-grid friction/mixing correction -- not implemented.
-
-        Why this model is here:
-            A placeholder only, left over from before this cleanup. No formula, source
-            or even a description of what this stub was meant to compute survives in
-            the original source.
+        """Spacer-grid friction/mixing correction -- not implemented.
 
         Formulation:
             Not implemented.

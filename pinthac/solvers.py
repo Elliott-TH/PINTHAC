@@ -1,16 +1,10 @@
-"""
-Batched scalar root finding, shared by every layer that has an implicit correlation.
+"""Batched scalar root finding, shared by every layer that has an implicit correlation.
 
 Why this module exists: several models in this library are implicit and each of them
 needs the same thing -- solve one scalar equation per batch element, on GPU, without
 branching, and keep the answer differentiable. Swenson's wall temperature, Chen and
 Bjorge's, Colebrook's friction factor, and the inversion of a conductivity integral back
 to a temperature are all that same shape.
-
-This started life as `gpu_solve` inside the rod single-channel solver. It moved down here
-because the pin layer needs it too, and the pin layer sits below `sca` in the one-way
-import order -- so the alternative was a second copy, which is exactly what this cleanup
-exists to remove. `sca/rod.py` still calls it under its old name.
 
 The `torchsolve` package alongside this repository does the same job with more care
 (guaranteed bracketing, typed failure results, extremum search for non-monotone
@@ -25,15 +19,7 @@ from pinthac import backend
 
 def bisect_newton(residual, lo, hi, deriv=None, bisect_iters=40, newton_iters=6,
                   differentiable=True):
-    """
-    Solve residual(x) = 0 elementwise, by bisection then Newton polish.
-
-    Why this model is here:
-        Bisection alone is robust but slow to reach full precision; Newton alone is fast
-        but can leave the bracket entirely on a bad start. Bisecting first to isolate the
-        root and polishing with Newton gets both, and because the bisection runs a fixed
-        number of steps with `where` rather than an `if`, the whole thing is branch-free
-        and processes an entire batch of independent scalar equations at once.
+    """Solve residual(x) = 0 elementwise, by bisection then Newton polish.
 
     Formulation:
         Bisection maintains a sign-change bracket [lo, hi]:

@@ -10,8 +10,7 @@ from pinthac.paths import data_file
 
 
 def build_table():
-    """
-    Generate the supercritical-water property lookup table and write it to the data
+    """Generate the supercritical-water property lookup table and write it to the data
     directory.
 
     501 temperatures x 9 pressures. The pressure points exist so sca/lut.py can look

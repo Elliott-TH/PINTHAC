@@ -1,5 +1,4 @@
-"""
-Permanent tests for pinthac.sca.rod, added per docs/brief/PHASE5_BRIEF.md section 4.
+"""Permanent tests for pinthac.sca.rod,
 
 Small axial node counts throughout (n=20-30, not the 400-node reference case) so the
 suite stays fast -- rod.run_SCA's per-node solves are the same physics regardless of
@@ -23,7 +22,8 @@ from pinthac.sca import rod
 
 def _np(v):
     """Solver outputs come back as torch tensors or numpy arrays depending on the path;
-    this normalizes them for comparison."""
+    this normalizes them for comparison.
+    """
     return np.asarray(v.detach().cpu() if torch.is_tensor(v) else v)
 
 
@@ -43,7 +43,7 @@ def test_run_sca_produces_finite_output():
 
 # ------------------------------------------------------------------- energy balance
 def test_energy_balance_closes():
-    """sum(q'*dz) against the coolant enthalpy rise, docs/brief/PHASE5_BRIEF.md section 4.
+    """sum(q'*dz) against the coolant enthalpy rise
 
     Independent check, not a tautology: run_SCA's own march computes h internally and
     converts it back to T via the SCW property table's h->T inversion (a bisection, not
@@ -90,7 +90,8 @@ def test_fuel_hotter_than_coolant_everywhere():
 def test_rod_node_temperature_chain_increases_from_coolant_to_fuel():
     """Tm -> Tco -> Tmax: rod_node only returns (Tco, Tmax), but both steps of that
     chain must be increasing for a genuinely heated node (qp > 0) -- the coolant is
-    always the coolest point and the fuel centerline the hottest."""
+    always the coolest point and the fuel centerline the hottest.
+    """
     scw_table = rod.build_scw_table(25.0)
     Property = rod.make_Property(scw_table)
     Tm = torch.tensor(620.0, dtype=rod.DTYPE)
@@ -157,7 +158,8 @@ def test_swenson_and_chen_are_both_selectable_and_actually_differ():
     them is a closure rather than a second solver. The check that matters is that the
     choice reaches every axial node: an earlier wiring pass threaded `correlation` into
     the first node but not the marching loop, and the symptom was that both names
-    returned bit-identical profiles."""
+    returned bit-identical profiles.
+    """
     geometry = {'pitch': 0.0125, 'rco': 0.0045, 'tc': 0.00063,
                 'kc': 24.0, 'delta': 5.0e-4, 'G': 1200.0}
     kw = dict(pval=25.0, Tscw_in=553.0, q0=25.0e3, L=3.0, n=20)

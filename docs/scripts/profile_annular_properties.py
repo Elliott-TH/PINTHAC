@@ -1,6 +1,7 @@
 """Count and time the property-evaluation calls inside one annular solve.
 Small case (N=20, outer_iter=3) so it finishes quickly; the per-call cost and the
-call count per (node, outer iteration) are what scale, not the absolute time."""
+call count per (node, outer iteration) are what scale, not the absolute time.
+"""
 import time, numpy as np
 from pinthac.properties import getprop as gp
 from pinthac.sca import annular

@@ -1,5 +1,4 @@
-"""
-Generates the training set for the rod DeepONet-PINN (SCA_PINN_Rod_DeepONet.py)
+"""Generates the training set for the rod DeepONet-PINN (SCA_PINN_Rod_DeepONet.py)
 by running SCA_IAPWS95_Rod.run_SCA_batch() over a Latin-Hypercube sample of
 the rod's geometry/flow inputs *and* a family of random smooth axial LHGR
 (linear heat generation rate) shapes -- unlike SCA_DataGen.py's annular
@@ -98,7 +97,8 @@ def legendre_basis(x, K):
 
 def build_shapes(coeffs, x):
     """coeffs: (N, N_SHAPE_MODES) in [-1,1] each. x: (m,) sensor locations
-    in [-1,1]. Returns (N, m) shapes, each strictly positive with max==1."""
+    in [-1,1]. Returns (N, m) shapes, each strictly positive with max==1.
+    """
     basis = legendre_basis(x, coeffs.shape[1])         # (m, K)
     decay = 1.0 / (1.0 + np.arange(coeffs.shape[1]))    # (K,)
     raw = (coeffs * decay) @ basis.T                    # (N, m)
@@ -106,53 +106,16 @@ def build_shapes(coeffs, x):
     return raw / raw.max(axis=1, keepdims=True)
 
 
-# =============================================================================
-# Squared-Fourier-with-offset axial power shape, the alternative
-# parameterization from docs/reference/Annular_Heat_Transfer_Final.pdf
-# section 2.1, offered alongside the Legendre family above per
-# docs/DECISIONS.md ("Power-profile basis": both, behind one selector).
-#
-# Where build_shapes' Legendre family is *peak*-normalized (max(shape)==1,
-# multiplied by a peak LHGR q0), the Fourier family below is *mean*-
-# normalized (mean(shape)==1 exactly, by the analytic mean derived in the
-# PDF), so it is multiplied by an *average* LHGR <q'> instead -- Fq really
-# is the ratio q'(z)/<q'> the PDF defines it as, not merely a peak-1 curve.
-# The PDF itself notes this exact ambiguity (Fq is defined as a ratio,
-# which requires <Fq>=1, but the surrounding text also writes <q'>=<Fq> --
-# normalizing by the analytic mean is what actually makes Fq a ratio).
-# =============================================================================
 def fourier_basis(x, N):
-    """
-    Cosine/sine design matrices for the squared-Fourier-with-offset power
-    profile (Annular_Heat_Transfer_Final.pdf section 2.1, eq. for S(x)).
+    """Fourier basis on x = 2*z/L in [-1, 1].
 
-    x is the same normalized axial coordinate legendre_basis uses,
-    x = 2z/L in [-1,1] (z in [-L/2, L/2]).
-
-    The PDF literally writes S(x) with argument pi*n*z/L, i.e. cos(pi*n*x/2)
-    here -- but that argument is NOT orthogonal on z in [-L/2, L/2] for
-    mixed-parity mode pairs (verified numerically: e.g. n=1,m=2 gives a
-    cross-product integral of ~0.21*L, not 0), which contradicts the PDF's
-    own next line, "all cross terms (different n, or cos against sin)
-    vanishing," and the analytic-mean formula that line justifies (see
-    fourier_mean). The argument that actually satisfies both the PDF's
-    stated per-mode integral (L/2) and universal cross-term cancellation is
-    2*pi*n*z/L = pi*n*x -- the standard textbook Fourier basis on a
-    length-2 interval, one full period per mode rather than the literal
-    text's half period -- confirmed against numerical quadrature for every
-    (n,m) pair tried. Implemented as pi*n*x below; the PDF's own domain
-    note ([-L/2, L/2], length L) most likely dropped a factor of 2
-    relative to the standard [-L, L]-interval formula it borrowed the
-    argument from. Flagged in docs/OPEN_QUESTIONS.md rather than silently
-    "corrected" -- this is the owner's derivation to confirm, not a call
-    for me to make unilaterally on their reference material.
+    Uses cos(pi*n*x) and sin(pi*n*x), which are orthogonal over this interval.
 
     Inputs:
-        x : (...,) array in [-1,1]
-        N : number of Fourier modes
+        x : (...,) array in [-1, 1]
+        N : number of modes
     Returns:
-        cos_nx, sin_nx : each (..., N): cos(pi*n*x), sin(pi*n*x) for
-                          n = 1..N
+        cos_nx, sin_nx : (..., N) arrays for n = 1, ..., N.
     """
     n = np.arange(1, N + 1)
     arg = np.pi*np.asarray(x)[..., None]*n     # (..., N)
@@ -160,8 +123,7 @@ def fourier_basis(x, N):
 
 
 def fourier_mean(a, b, phi_q):
-    """
-    Analytic mean of Fq(x) = S(x)^2 + phi_q over one axial length,
+    """Analytic mean of Fq(x) = S(x)^2 + phi_q over one axial length,
     S(x) = sum_n [a_n cos(pi n x) + b_n sin(pi n x)], x = 2z/L in [-1,1]
     (Annular_Heat_Transfer_Final.pdf section 2.1 -- see fourier_basis'
     docstring for why the argument is pi*n*x rather than the PDF's literal
@@ -186,8 +148,7 @@ def fourier_mean(a, b, phi_q):
 
 
 def build_fourier_shapes(a, b, phi_q, x):
-    """
-    Squared-Fourier-with-offset axial power-ratio shapes,
+    """Squared-Fourier-with-offset axial power-ratio shapes,
     Fq(z)/<Fq> = q'(z)/<q'> (Annular_Heat_Transfer_Final.pdf section 2.1).
 
         S(x) = sum_n [a_n cos(pi n x) + b_n sin(pi n x)],  x = 2z/L
@@ -215,11 +176,7 @@ def build_fourier_shapes(a, b, phi_q, x):
 
 
 def sample_fourier_coeffs(n_samples, K_max=4, seed=0):
-    """
-    Random Fourier coefficients for build_fourier_shapes, biased toward low
-    order with per-mode amplitude decay -- both requirements the owner
-    stated directly (docs/DECISIONS.md, "Power-profile basis": Fourier
-    "gets matching per-mode decay and a strictly positive offset"):
+    """Random Fourier coefficients for build_fourier_shapes, biased toward low
 
     Order (how many of the K_max modes are active) is drawn from a
     1/k weighting so order 1 is most likely, order 2 next, etc. -- "more
@@ -258,14 +215,7 @@ def sample_fourier_coeffs(n_samples, K_max=4, seed=0):
 
 
 def build_shapes_by_basis(basis, x, coeffs=None, a=None, b=None, phi_q=None):
-    """
-    One entry point selecting between the two axial power-shape
-    parameterizations approved in docs/DECISIONS.md ("Power-profile
-    basis"): Legendre (build_shapes, peak-normalized) or squared-Fourier-
-    with-offset (build_fourier_shapes, mean-normalized). See each
-    function's own docstring for its normalization convention -- this only
-    dispatches between them, so which extra keyword matters depends on
-    `basis`.
+    """One entry point selecting between the two axial power-shape
 
     Inputs:
         basis  : "legendre" or "fourier"
@@ -297,7 +247,8 @@ def sample_params(n_samples, seed=0):
 
 def derive_physical(sample):
     """sample: (N, 14) raw LHS draws -> dict of physical geometry tensors
-    plus the raw shape coefficients, still in numpy."""
+    plus the raw shape coefficients, still in numpy.
+    """
     rco         = sample[:, SCALAR_NAMES.index("rco")]
     tc_frac     = sample[:, SCALAR_NAMES.index("tc_frac")]
     delta_frac  = sample[:, SCALAR_NAMES.index("delta_frac")]

@@ -1,0 +1,10 @@
+# Table 38: coefficients and exponents of the residual part gamma^r of the
+# dimensionless Gibbs free energy for region 5, IAPWS-IF97 Eq. (34).
+# Useful_pdfs/IAPWS_97.pdf
+# columns: I   J   n
+1  1   0.15736404855259E-02
+1  2   0.90153761673944E-03
+1  3  -0.50270077677648E-02
+2  3   0.22440037409485E-05
+2  9  -0.41163275453471E-05
+3  7   0.37919454822955E-07

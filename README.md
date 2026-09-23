@@ -5,16 +5,14 @@
 A Python library for reactor thermal hydraulics: differentiable water properties
 (IAPWS-95/97), liquid-metal properties (sodium, lead, LBE), solid fuel and cladding
 material models (UO2, Zircaloy, HT-9), heat transfer and friction correlations,
-fuel-pin radial conduction (solid and annular), single-channel axial solvers, and a
-trained neural surrogate for the annular-pin channel. Every public function accepts
-Python floats, NumPy arrays, or PyTorch tensors, and stays differentiable under torch.
+fuel-pin radial conduction (solid and annular), single-channel axial solvers, and
+neural surrogate models for fuel-pin channels. Property and correlation models
+support Python floats, NumPy arrays, and PyTorch tensors. The rod batch solver retains
+autograd; the annular axial marcher is NumPy-based.
 
-This repository is the result of an eight-phase cleanup of a research codebase. The
-process is documented in full: `docs/AUDIT.md` (where it started), `docs/DECISIONS.md`
-(scope and convention calls made along the way), `docs/OPEN_QUESTIONS.md` (what is
-still unresolved), and `docs/FINAL_REPORT.md` (what was done, phase by phase, and every
-physics defect found and fixed). Read `CLAUDE.md` for the code style contract every file
-in `pinthac/` follows.
+See `CONTRIBUTING.md` for code style and numerical conventions, and
+`docs/OPEN_QUESTIONS.md` for unresolved model questions. Solver behavior and
+limitations are described in `docs/SCA_SOLVERS.md`.
 
 ## Install
 
@@ -29,20 +27,13 @@ pip install -e .
 of the property and correlation layer still runs, but `pinthac/sca/` and `pinthac/ml/`
 need torch. `torchsolve/` (the batched, bracket-guarded root finder used throughout the
 correlation and single-channel-analysis layers) is a sibling package in this same
-repository, not published separately; its own `pyproject.toml` has a packaging defect
-that makes `pip install -e ./torchsolve` fail as written (see "Known issues" below), so
-run everything from the repository root instead, either as `python -m module.path` or
-under `pytest` -- both add the repository root to `sys.path`, which is how `torchsolve`
-is actually found today.
+repository and is included in the PINTHAC distribution.
 
-This was developed against the conda environment `GenEnv3.12`: Python 3.12.13, torch
-2.9.1 built against ROCm 7.2 (an AMD GPU, exposed through the `cuda` device name), numpy
-2.4.6, scipy 1.17.1, pandas 3.0.3, matplotlib 3.10.9. GPU figures and examples set
-`HIP_VISIBLE_DEVICES=0`; nothing in the library itself requires a GPU.
+A GPU is optional.
 
 ## Quickstart
 
-Ten lines: look up a supercritical-water state through the differentiable IAPWS-95
+Look up a compressed-liquid water state through the differentiable IAPWS-95
 equation of state.
 
 ```python
@@ -58,8 +49,7 @@ cp = IAPWS95.cp(state, units='kJ')     # kJ/kg-K
 print(f"rho={rho[0]:.2f} kg/m^3  h={h[0]:.2f} kJ/kg  cp={cp[0]:.3f} kJ/kg-K")
 ```
 
-Real output from this machine (`python -c "<the snippet above>"`, from the repository
-root):
+Example output:
 
 ```
 rho=726.51 kg/m^3  h=1337.86 kJ/kg  cp=5.458 kJ/kg-K
@@ -70,26 +60,26 @@ joules, so omitting it returns 5457.864 J/kg-K -- the same number, correct, and 
 misread as kilojoules. The docstring states the unit on every accessor; the argument is
 there so the call site states it too.
 
-(The property library used to print `Using device: cuda` on import -- a real defect
-against this project's own style contract, CLAUDE.md section 5.6, "no `print()` at import
-time". Removed. `pinthac.properties.iapws95.device` is a module attribute for anything
-that needs to know which device was selected.)
 
 ## What the library covers
 
 | Layer | Module | What it does |
 |---|---|---|
-| Properties | `properties/iapws95.py` | IAPWS-95 equation of state, GPU-batched, differentiable: p, h, s, cv, cp, speed of sound, saturation, viscosity (R12-08), thermal conductivity (R15-11). |
-| Properties | `properties/iapws97.py` | IAPWS-97 Regions 1, 2, 4 (backward T(p,h)/T(p,s)); surface tension; the viscosity/conductivity formulations `iapws95.py` reaches into. Regions 3 and 5 are not implemented. |
+| Properties | `properties/iapws95.py` | IAPWS-95 equation of state, GPU-batched, differentiable: p, h, u, s, cv, cp, speed of sound, the saturation line from the Maxwell criterion, and the (T,p) and (h,p) inversions. |
+| Properties | `properties/iapws97.py` | IAPWS-IF97, all five regions: 1 and 2 with their backward T(p,h)/T(p,s) equations, 3 (Helmholtz in (rho,T), with the density solve that inverts it), 4 (the saturation line), 5 (high-temperature steam), plus the B23 and B2bc boundary equations and a region selector. |
+| Properties | `properties/iapws_transport.py` | Viscosity (R12-08), thermal conductivity (R15-11) and surface tension (R1-76). Separate IAPWS releases on a (rho,T) basis, not part of IF97 -- they take the thermodynamic derivatives they need from whichever equation of state the caller used. |
+| Properties | `properties/iapws_backend.py` | The float/NumPy/torch round-trip the three IAPWS modules share, and the device placement of their coefficient tables. |
 | Properties | `properties/liqprops.py` | Sodium, lead, lead-bismuth eutectic: rho, sigma, cp, h, mu, k, each with a validated temperature range and a model-form uncertainty band (Sobolev 2020). |
 | Properties | `properties/matmod.py` | UO2 (conductivity, conductivity integrals, emissivity, thermal expansion, swelling, densification), Zircaloy (conductivity, heat capacity, expansion, emissivity, elastic moduli, hardness, irradiation growth, creep), HT-9 (the same set), D9 stainless (two constants only), fill gases. Sourced from PNNL-35702 (MatLib). |
-| Properties | `properties/getprop.py` | The one dispatcher every correlation calls: `_getprop(substance, T, P)` -> a uniform `Props` dict. |
+| Properties | `properties/getprop.py` | The one dispatcher every correlation calls: `_getprop(substance, T, P, formulation=95)` -> a uniform `Props` dict. `formulation=97` answers for water from IF97 instead, with the region picked from the state; `_getprop97(T, P)` is the same lookup called directly, and additionally reports which region it used. |
 | Correlations | `correlations/htc.py` | Single-phase water (Dittus-Boelter, Petukhov, Gnielinski), two-phase water (Schrock-Grossman, Chen, Bjorge), supercritical water (Swenson, Chen & Fang 2014), liquid sodium (Lyon, Seban-Shimazaki, Mikityuk), liquid lead (Shen). |
 | Correlations | `correlations/friction.py` | Blasius, McAdams, Colebrook (single-phase water); Filonenko with an optional Petrov-Popov density correction, Wu (supercritical water). |
 | Correlations | `correlations/bundle.py` | Weissman and Presser rod-bundle correction factors. |
 | Pin | `pin/gap.py`, `pin/clad.py`, `pin/cylindrical.py`, `pin/annular.py` | Gas-gap conductance, clad log-conduction, solid-pellet and annular-pellet radial conduction (Kirchhoff-transformed, temperature-dependent conductivity). |
-| SCA | `sca/rod.py` | Single-channel axial solve, solid fuel rod in a square-pitch bundle, single supercritical-water coolant. |
-| SCA | `sca/annular.py` | Single-channel axial solve, annular fuel pellet with two supercritical-water coolant channels (inner bore + outer bundle cell) -- the library's principal target. |
+| SCA | `sca/rod.py` | Single-channel axial solve, solid fuel rod in a square-pitch bundle, water or liquid-metal coolant. |
+| SCA | `sca/annular_march.py` | Default annular axial march: local radial heat-split solves, complete surface temperatures, and fuel-profile reconstruction. |
+| SCA | `sca/annular.py` | Whole-field Picard annular solver retained for comparison. |
+| SCA | `sca/film.py` | Shared heat-flux interface using pseudocritical bracketing for Swenson and Chen. |
 | SCA | `sca/run.py` | The dispatcher: `run_channel(geometry, conditions, htc=..., friction=..., bundle=..., fuel_conductivity=...)` picks the rod or annular solver and reports which requested correlations the dispatched solver actually honors. |
 | ML | `ml/datagen.py`, `ml/deeponet.py`, `ml/deeponet_predict.py` | Training-set generation (arbitrary Legendre or Fourier axial power shapes) and a trained DeepONet-PINN surrogate for the rod channel. |
 | ML | `ml/pinn.py` | A physics-informed neural network over axial position for the rod channel (steady-state, not transient -- see "What is not covered"). |
@@ -134,23 +124,37 @@ actually ran on this machine -- see the cited file for how to reproduce it.
 
 **Verified against an external reference:**
 
-- **IAPWS-95/97.** `tests/test_iapws_verification.py` transcribes 41 published check
-  values from IAPWS release documents (not produced by this library) and checks this
-  implementation against them: R6-95(2018) Tables 7-8 (the equation of state itself:
-  pressure, isochoric heat capacity, speed of sound, entropy, and the saturation
-  solve), R12-08 Tables 4-5 (viscosity), R15-11 Tables 4-5 (thermal conductivity). 27
-  pass; 14 are documented known failures (`xfail(strict=True)`), all confined to the
-  critical-enhancement terms of viscosity and thermal conductivity within a few kg/m^3
-  of the critical density -- see `docs/OPEN_QUESTIONS.md` Round 6 for the exact
-  mechanism and magnitudes. Nothing downstream should be trusted within that narrow
-  region until those are fixed.
+- **IAPWS-95, IF97 and the transport releases.** `tests/test_iapws_verification.py`
+  transcribes the published check tables from the IAPWS release documents (not produced
+  by this library) and checks this implementation against them, 89 cases in all, with no
+  `xfail`: R6-95(2018) Tables 7-8 (the equation of state and the saturation solve),
+  R12-08 Tables 4-5 (viscosity), R15-11 Tables 4-5 (thermal conductivity), and
+  R7-97(2012) Tables 5, 7, 9, 15, 24, 29, 33 and 42 plus the Section 4, 6.3.1 and 8
+  verification points (all five IF97 regions, both sets of backward equations, and both
+  auxiliary boundary equations). Everything reproduces the release's own nine
+  significant figures except the saturation pressure below about 300 K, which is limited
+  to roughly 1e-8 relative by float64 cancellation in the liquid-phase pressure -- a
+  limitation R6-95's own Table 7 footnote describes.
+
+  The critical-enhancement terms used to be the exception, first as `xfail(strict=True)`
+  and later as documented loose tolerances, on the reading that the near-critical region
+  was badly conditioned. It was not. Two of the delta-derivatives of the non-analytic terms
+  of IAPWS-95 Eq. (6) had been mistranscribed from R6-95 Table 5, and since those terms
+  contribute nothing outside the critical region, the error was invisible everywhere
+  else. Corrected, the viscosity enhancement reproduces to 1e-8 and the conductivity
+  enhancement to 5e-6.
+- **The backend contract.** `tests/test_iapws_backend.py` checks the other half: floats,
+  NumPy arrays and torch tensors in and the same kind back out, shapes preserved and
+  inputs broadcast, a tensor answered on its own device, importing the modules changing
+  no global torch state, and -- the part that is easy to get silently wrong -- every
+  inversion differentiable, with autograd compared against a central difference rather
+  than a stored number. A solver that returns a converged value detached gives the right
+  answer and a zero gradient; only that comparison catches it.
 - **IAPWS-95 GPU speedup.** `figures/iapws95_benchmark.py`, against the reference
   `iapws` PyPI package on the same machine's CPU (AMD Radeon RX 7800 XT / ROCm 7.2 vs.
   CPU, best of 5 runs each, both sides measured up to N=20,000): **59.9x measured at
   N=20,000**; **~67x extrapolated to N=1,000,000** (CPU side extrapolated from its own
-  measured per-point cost -- the GPU side is measured directly at that size). Neither
-  this project's earlier "36x+" page claim nor the owner's recalled "~96x" is what this
-  run reproduces; see `docs/FIGURE_CAPTIONS.md` figure 1.
+  measured per-point cost -- the GPU side is measured directly at that size). See `docs/FIGURE_CAPTIONS.md` figure 1.
 - **IAPWS-95 autograd derivatives.** `figures/iapws95_derivative_validation.py`:
   d(rho)/dT|_p from autograd vs. central finite differences, 200 points at 25 MPa,
   300-800 K. Mean relative error 5.4e-5; worst 4.9e-3, in a narrow band around the
@@ -163,7 +167,7 @@ actually ran on this machine -- see the cited file for how to reproduce it.
   `Ann_flux_split` satisfies `q_i + q_o = q'''*pi*(ro^2-ri^2)` to `4.8e-16` relative,
   at every iterate, not just at convergence (it is an algebraic identity of the
   scheme, not a fitted result) -- see `tests/test_annular.py` and
-  `docs/OPEN_QUESTIONS.md` Round 5.
+  `docs/OPEN_QUESTIONS.md`.
 - **Energy balance closes in both single-channel solvers.** `sca/rod.py::run_SCA` and
   `sca/annular.py::solve_field` both integrate the supplied axial power profile into
   an enthalpy rise that matches the coolant's own enthalpy march to within the axial
@@ -201,68 +205,44 @@ because the target itself is `sca/rod.py`, an unvalidated-against-experiment sol
   keeps the sign it had before this cleanup; the pre-cleanup codebase itself
   disagreed on it (two of three copies used the opposite sign, a difference of
   Nu = 24.0 vs. 7.6 at Pe = 500), and no source document resolves it. See
-  `docs/OPEN_QUESTIONS.md` Q13.
+  `docs/OPEN_QUESTIONS.md`.
 - **Notter-Sleicher (sodium, manual section 2.4.1) is not implemented at all** -- no
   source for it exists in this repository. Lyon and Seban-Shimazaki (the two classic
   constant-flux/constant-wall-temperature sodium correlations) are implemented
-  instead; see `docs/OPEN_QUESTIONS.md` Q15.
+  instead; see `docs/OPEN_QUESTIONS.md`.
 - **Every correlation without a stated valid range or uncertainty says so explicitly**
   in its own docstring ("Not established -- see docs/OPEN_QUESTIONS.md") rather than
-  a plausible-looking invented number. `docs/OPEN_QUESTIONS.md` Q16, Q31 track which
+  a plausible-looking invented number. `docs/OPEN_QUESTIONS.md` track which
   ones and why.
+
+## Single-channel solver outputs
+
+`run_channel` defaults to the annular axial marcher; select `annular_method="picard"`
+for the field solver. Both geometries tally bulk, cladding, and fuel temperatures
+and convective HTC. Annular results include `C1`, `C2`, `q3`, and the conductivity
+transform for radial workup. See [solver conventions and examples](docs/SCA_SOLVERS.md).
 
 ## Examples
 
 `examples/` has five runnable scripts, each short enough to read in one sitting and
-each with its real output pasted at the bottom of the file:
+with example results or runtime balance checks:
 
 | Script | What it shows |
 |---|---|
 | `examples/property_lookup.py` | Water and sodium properties, both directly and through the shared `getprop` dispatcher. |
 | `examples/sca_rod_channel.py` | A single-channel fuel-rod axial solve, run at the supercritical conditions its correlations were actually fit to (see the file's own comment for why this is not a PWR case -- two-phase is not implemented). |
-| `examples/sca_annular_channel.py` | The library's principal target: a full annular dual-coolant single-channel solve. Takes several minutes on this machine -- the file explains why. |
+| `examples/sca_annular_channel.py` | Annular axial march with energy-balance checks and fuel-profile reconstruction. |
 | `examples/deeponet_surrogate.py` | The trained DeepONet surrogate against the ground-truth solver it was trained on: accuracy on held-out cases, and timing across batch sizes. |
 | `examples/monte_carlo_rod.py` | Monte Carlo propagation of the Swenson correlation's own +/- 25 percent model-form uncertainty through a rod channel, with one perturbation drawn per trial and held fixed along the whole channel. Writes two histograms to `examples/output/`. |
 
-Run any of them from the repository root as `python -m examples.<name>` (needed so
-`torchsolve` resolves -- see "Known issues").
+Run any of them from the repository root as `python -m examples.<name>`.
 
-## The model manual
+## Documentation
 
-`docs/PINTHA_Code_Summary.tex` is the formulation reference: every implemented model's
-equations, valid range, uncertainty and source, organized under the same section
-numbering as `docs/reference/PINTHA_Code_Summary.pdf` (the original project's table of
-contents). Sections for models that are not implemented (Notter-Sleicher, Region 3/5 of
-IAPWS-97, two-phase SCA bookkeeping, transient solvers) are marked as such rather than
-silently dropped.
-
-## Known issues
-
-Two defects were carried as known issues through the documentation phase and have since
-been fixed; both fixes are verified rather than asserted:
-
-- `pinthac/properties/iapws95.py` printed `Using device: ...` at module import time,
-  against CLAUDE.md section 5.6. Removed; the selected device is available as the module
-  attribute `pinthac.properties.iapws95.device`. `pinthac/ml/deeponet.py` and
-  `pinthac/ml/pinn.py` still print it on import -- they are training entry points where
-  the message is the point, and they are the only remaining instances.
-- `torchsolve/pyproject.toml` declared `packages = ["torchsolve"]` with no matching
-  subdirectory, so `pip install ./torchsolve` failed. Fixed with
-  `package-dir = {"torchsolve" = "."}` for the flat layout; `pip wheel --no-deps
-  ./torchsolve` now builds successfully.
-
-Still open, and tracked in `docs/OPEN_QUESTIONS.md` rather than papered over: two-phase
-supercritical-transition heat transfer is not implemented, several correlations have no
-published uncertainty band and say so in their docstrings, and the annular solve is slow
-(minutes, not seconds) for the reason `sca/annular.py::_T_hp_fast` explains.
-
-## Ground rules for anyone extending this
-
-Read `CLAUDE.md` in full before touching any file under `pinthac/`. The short version:
-plain functions, flat-namespace classes with no `self`, every public function documented
-with formulation/valid-range/uncertainty/reference, every input path handling floats,
-NumPy arrays and torch tensors identically, and never inventing a number that is not
-traceable to the code or to `docs/reference/`.
+- [Channel solvers](docs/SCA_SOLVERS.md): interfaces, output units, and convergence.
+- [Model limitations](docs/OPEN_QUESTIONS.md): unresolved validation questions.
+- [Contributing](CONTRIBUTING.md): development and numerical conventions.
+- Function docstrings: equations, inputs, units, validity ranges, and references.
 
 ## License
 

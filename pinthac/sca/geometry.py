@@ -1,5 +1,4 @@
-"""
-Channel-geometry helpers shared by the single-channel solvers.
+"""Channel-geometry helpers shared by the single-channel solvers.
 
 Exact unit-cell geometry, not fitted correlations, so there is no valid range,
 uncertainty or reference to state for either function. sca/rod.py's coolant channel and
@@ -10,8 +9,7 @@ import math
 
 
 def square_pitch_cell(pitch, R):
-    """
-    Flow area, wetted perimeter and hydraulic diameter of a square-pitch rod-bundle unit
+    """Flow area, wetted perimeter and hydraulic diameter of a square-pitch rod-bundle unit
     cell: one rod of outer radius R inside a pitch x pitch square.
 
         A_flow = pitch^2 - pi*R^2
@@ -34,8 +32,7 @@ def square_pitch_cell(pitch, R):
 
 
 def circular_channel(R):
-    """
-    Flow area, wetted perimeter and hydraulic diameter of a circular channel of radius R.
+    """Flow area, wetted perimeter and hydraulic diameter of a circular channel of radius R.
 
         A_flow = pi*R^2
         Per    = 2*pi*R

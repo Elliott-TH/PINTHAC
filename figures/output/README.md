@@ -1,1 +1,1 @@
-Committed SVG figures for the portfolio page land here (Phase 7).
+Generated figures. Reproduction commands and descriptions are in `docs/FIGURE_CAPTIONS.md`.

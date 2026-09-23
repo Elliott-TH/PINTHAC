@@ -1,6 +1,4 @@
-"""
-Thermal conductivity vs. temperature for Na, Pb and LBE, with Monte Carlo uncertainty
-bands (docs/brief/PHASE67_BRIEF.md figure 3).
+"""Thermal conductivity vs. temperature for Na, Pb and LBE, with Monte Carlo uncertainty
 
 k(T) itself is the plain formula each class already documents (Sodium.k / Lead.k /
 LBE.k, from Sobolev 2020 -- see their own docstrings in pinthac/properties/liqprops.py
@@ -41,8 +39,7 @@ SPECIES = [
 
 
 def sigma_of_T(T, metal):
-    """
-    Linear interpolation of the metal's documented [sigma_low, sigma_high] uncert_k band
+    """Linear interpolation of the metal's documented [sigma_low, sigma_high] uncert_k band
     across its stated valid range_k -- see this script's module docstring for why linear
     interpolation between the two stated endpoints, rather than a single flat sigma.
 
@@ -59,8 +56,7 @@ def sigma_of_T(T, metal):
 
 
 def mc_band(metal, T):
-    """
-    Monte Carlo mean/low/high band of k(T) using pinthac.uncertainty.perturb.
+    """Monte Carlo mean/low/high band of k(T) using pinthac.uncertainty.perturb.
 
     perturb()'s `rel_sigma` is documented and implemented as one scalar sigma per call
     (it short-circuits on `rel_sigma == 0.0`, which is not well-defined for an array), so

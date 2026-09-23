@@ -1,21 +1,4 @@
-"""
-Heat transfer coefficient correlations for water, supercritical water, and lead.
-
-Moved from HTC.py in Phase 1. Phase 2 brings it up to the docstring, backend and
-flat-namespace standard without changing any formula, constant or exponent -- verified
-numerically identical against the pre-Phase-2 module on a representative state per
-correlation.
-
-`Water` and `SCW` are converted here from the pre-cleanup pattern (`__init__`, instance
-state `self.err`/`self.value`, called as `HTC.Water().Dittus(...)`) to flat namespaces
-matching `MatMod.UO2` and `correlations/bundle.py::Bundle` -- called as
-`Water.Dittus(...)`, no instantiation. Per the brief's section 4, `self.err`'s values
-move into the module-level UNCERTAINTY dict below, preserved verbatim (every one of them
-is a documented accuracy band from the correlation's own literature, not a free
-parameter this cleanup is allowed to touch). `self.value`, which every solve-and-return
-method also stored, is dropped outright: nothing outside this module ever read it, and
-the same number is already the function's return value.
-"""
+"""Heat transfer coefficient correlations for water, supercritical water, and lead."""
 import torch
 import torchsolve as ts
 from pinthac import backend, ranges
@@ -32,10 +15,6 @@ from pinthac import backend, ranges
 
 
 UNCERTAINTY = {
-    # [low, high] relative error bands, preserved verbatim from the pre-cleanup
-    # self.err values -- see each correlation's own docstring for where each number
-    # comes from (a stated database comparison where one exists, otherwise unstated in
-    # the original source).
     "dittus_boelter": [0.25, 0.45],
     "petukhov": [0.05, 0.05],
     "gnielinski": [0.10, 0.10],
@@ -47,10 +26,9 @@ UNCERTAINTY = {
 }
 
 RANGES = {
-    # Already stated in the pre-cleanup docstrings.
     "petukhov": {"Re": (1.0e4, 5.0e6), "Pr": (0.5, 2000.0)},
     "gnielinski": {"Re": (2300.0, 5.0e6), "Pr": (0.5, 2000.0)},
-    # From CLAUDE.md section 6's own worked Dittus-Boelter example.
+    # From CONTRIBUTING.md section 6's own worked Dittus-Boelter example.
     "dittus_boelter": {"Re": (1.0e4, None), "Pr": (0.7, 160.0)},
     # Chen & Fang (2014)'s full validated database, transcribed from Chen_SCW_dT's own
     # docstring below (h_b converted from the kJ/kg the paper states to the J/kg
@@ -60,14 +38,10 @@ RANGES = {
     "chen_scw": {"G": (201.0, 2500.0), "q": (129.0e3, 1735.0e3), "D": (0.006, 0.026),
                  "h_b_kJ": (278.0, 3169.0)},
 }
-# Swenson, SchrockGrossman, Chen_H2O, Bjorge and Lead.Shen have no published validated
-# range in the source, docs/reference/, or docs/PHYSICS_REVIEW.md -- see
-# docs/OPEN_QUESTIONS.md Q16.
 
 
 def _solve_Tw(resid, lo, hi, context):
-    """
-    Solve resid(Tw) = 0 for the wall temperature via torchsolve's guarded
+    """Solve resid(Tw) = 0 for the wall temperature via torchsolve's guarded
     bracketed solver (replaces the previous scipy.optimize.brentq calls).
 
     lo/hi bound the search interval; torchsolve guarantees the returned
@@ -88,89 +62,198 @@ def _solve_Tw(resid, lo, hi, context):
     return float(Tw) if Tw.numel() == 1 else Tw
 
 
+def _bracketed_secant(resid, lo, hi, *, xtol=1e-6, rtol=1e-10,
+                      ftol=1e-9, ftol_rel=0., max_iter=100):
+    """Two-point secant with a maintained bracket and bisection fallback.
+
+    Convergence requires a small last step and residual, or an exact zero.
+    The last step is an estimate, not the enclosing bracket's error bound.
+    """
+    if min(xtol, rtol, ftol, ftol_rel) < 0 or max_iter < 0:
+        raise ValueError("secant tolerances and max_iter must be nonnegative")
+    lo, hi = torch.broadcast_tensors(lo, hi)
+    lo, hi = torch.minimum(lo, hi), torch.maximum(lo, hi)
+    fl, fr = resid(lo), resid(hi)
+    scale = torch.maximum(fl.abs(), fr.abs())
+    threshold = torch.maximum(torch.full_like(lo, ftol), ftol_rel*scale)
+    status = torch.full_like(lo, int(ts.Status.MAX_ITER), dtype=torch.int32)
+    iterations = torch.zeros_like(lo, dtype=torch.int64)
+    finite = torch.isfinite(lo) & torch.isfinite(hi) & torch.isfinite(fl) & torch.isfinite(fr)
+    bracketed = (torch.signbit(fl) != torch.signbit(fr)) | (fl == 0) | (fr == 0)
+    status = torch.where(~bracketed, int(ts.Status.NO_BRACKET), status)
+    status = torch.where(~finite, int(ts.Status.NOT_FINITE), status)
+    active = finite & bracketed
+    take_left = fl.abs() < fr.abs()
+    x = torch.where(take_left, lo, hi)
+    fx = torch.where(take_left, fl, fr)
+    previous = torch.where(take_left, hi, lo)
+    f_previous = torch.where(take_left, fr, fl)
+    exact = active & (fx == 0)
+    status = torch.where(exact, int(ts.Status.CONVERGED), status)
+    active = active & ~exact
+    n_fev = 2
+    for step in range(max_iter):
+        if not bool(active.any()):
+            break
+        denominator = fx-f_previous
+        usable = torch.isfinite(denominator) & (denominator.abs() > torch.finfo(x.dtype).tiny)
+        candidate = x-fx*(x-previous)/torch.where(usable, denominator, torch.ones_like(x))
+        inside = usable & torch.isfinite(candidate) & (candidate >= lo) & (candidate <= hi)
+        # Periodic bisection bounds progress even for a nearly flat residual.
+        if (step+1) % 8 == 0:
+            inside = torch.zeros_like(inside)
+        candidate = torch.where(inside, candidate, lo+(hi-lo)/2)
+        candidate = torch.where(active, candidate, x)
+        value = resid(candidate)
+        n_fev += 1
+        iterations = iterations + active.to(iterations.dtype)
+        bad = active & ~torch.isfinite(value)
+        status = torch.where(bad, int(ts.Status.NOT_FINITE), status)
+        active = active & ~bad
+        small_step = (candidate-x).abs() <= xtol+rtol*candidate.abs()
+        converged = active & ((value == 0) | (small_step & (value.abs() <= threshold)))
+        same_left = torch.signbit(value) == torch.signbit(fl)
+        move_left = active & same_left
+        move_right = active & ~same_left
+        lo, fl = torch.where(move_left, candidate, lo), torch.where(move_left, value, fl)
+        hi, fr = torch.where(move_right, candidate, hi), torch.where(move_right, value, fr)
+        previous, f_previous = x, fx
+        x, fx = torch.where(active, candidate, x), torch.where(active, value, fx)
+        status = torch.where(converged, int(ts.Status.CONVERGED), status)
+        active = active & ~converged
+    root = torch.where(status == int(ts.Status.CONVERGED), x, torch.full_like(x, float('nan')))
+    return ts.SolveResult(root=root, f_root=fx, status=status, iterations=iterations,
+                          lo=lo, hi=hi, n_fev=n_fev, method="bracketed secant", x_last=x)
+
+
 def _solve_Tw_scw(resid, Tb, hi, context, tol_kw=None, anchor=None, branch_n=33):
+    """Select the lowest-superheat sampled root and solve inside its bracket.
+
+    Split the search at the pseudocritical anchor and search the lower branch
+    first, even when the full interval has opposite endpoint signs. The anchor
+    is a search aid, not a proof that the heat-flux residual has its extremum
+    there. Finite scans can miss closely spaced roots; branch_n controls resolution.
+    Both the last secant step and residual must converge; failures raise SolverFailure.
     """
-    Wall-temperature solve for the SCW correlations, whose htc(Tw) peaks
-    near the pseudocritical temperature -- torchsolve's README calls this
-    out by name as the motivating case for non-monotone residuals, since
-    resid = h(Tw)*(Tw-Tb) - q can then have zero, one or two roots on
-    [Tb, hi] depending on q.
-
-    Try the plain bracket first (the common case: q reached on the rising
-    branch below any peak). Wherever that fails to bracket a root, locate
-    the peak with find_extremum and search only the branch between Tb and
-    the peak -- the branch nearest the bulk temperature, i.e. the smallest
-    wall superheat that satisfies the flux, matching the convention used
-    by the boiling correlations above (and normal, as opposed to
-    deteriorated, heat transfer).
-
-    Tb/hi (and so resid) may be batched: the fallback branch-search runs
-    on the *whole* batch (torchsolve evaluates branch-free, so this is
-    just some redundant work on the elements that already converged, not
-    a correctness issue -- see torchsolve/README.md's Performance notes)
-    and each element keeps whichever of the two attempts converged for
-    it, rather than an earlier version of this function's all-or-nothing
-    per-batch check.
-
-    tol_kw overrides the default (tight, ~1e-6 K) tolerances passed to
-    ts.solve -- each resid() evaluation calls the property library, which
-    has a fixed per-call overhead independent of batch size (see
-    Ann_SCA._T_hp_fast's docstring), so a caller that re-solves this
-    inside its own outer iteration (as Ann_SCA.closure does, every
-    training step) should pass a looser tol_kw: the outer loop supplies
-    the additional refinement, so this call doesn't need to.
-
-    anchor: precomputed pseudocritical temperature, if the caller already
-    knows it -- skips find_extremum's coarse-scan-plus-golden-section
-    search (33 + up to 100 resid() evaluations by default) when the
-    primary bracket fails, per torchsolve/README.md's own note ("if the
-    property library gives the pseudocritical temperature directly, use
-    that instead -- it is exact and free"). Same shape as Tb, or a
-    scalar.
-
-    branch_n: scan-point count for bracket_from_anchor / unique_scan on
-    the fallback path (default 33, matching torchsolve's own default).
-    Lower it for a cheaper (but less certain to isolate a unique root)
-    fallback when resid() is expensive and the caller re-solves inside
-    its own outer iteration anyway (as Ann_SCA.closure does).
-    """
-    Tb_t = torch.as_tensor(Tb, dtype=torch.float64)
-    lo_t = Tb_t + 1e-6
-    hi_t = torch.as_tensor(hi, dtype=torch.float64)
-    kw = dict(ftol=1e-6, ftol_rel=1e-8, xtol=1e-6, rtol=1e-10)
+    device = Tb.device if torch.is_tensor(Tb) else None
+    Tb_t = torch.as_tensor(Tb, dtype=torch.float64, device=device)
+    lo, hi = torch.broadcast_tensors(Tb_t + 1e-6,
+                                     torch.as_tensor(hi, dtype=torch.float64, device=device))
+    split = (lo + hi)/2 if anchor is None else torch.as_tensor(anchor, dtype=lo.dtype, device=lo.device)
+    split = torch.minimum(torch.maximum(split, lo), hi)
+    kw = dict(ftol=1e-9, ftol_rel=0.0, xtol=1e-6, rtol=1e-10, max_iter=100)
     if tol_kw:
         kw.update(tol_kw)
+    with torch.no_grad():
+        if branch_n < 2 or int(branch_n) != branch_n:
+            raise ValueError("branch_n must be an integer >= 2")
+        fraction = torch.linspace(0., 1., branch_n, dtype=lo.dtype, device=lo.device)
+        fraction = fraction.reshape((-1,) + (1,)*lo.ndim)
+        nodes = torch.cat((lo + fraction*(split-lo), split + fraction[1:]*(hi-split)))
+        values = resid(nodes)
+        left, right = values[:-1], values[1:]
+        finite = torch.isfinite(left) & torch.isfinite(right)
+        changes = finite & ((torch.signbit(left) != torch.signbit(right)) |
+                            (left == 0) | (right == 0))
+        found = changes.any(dim=0)
+        index = changes.to(torch.int64).argmax(dim=0, keepdim=True)
+        a = nodes[:-1].gather(0, index).squeeze(0)
+        b = nodes[1:].gather(0, index).squeeze(0)
+        if not bool(found.all()):
+            failure = ts.SolveResult(
+                root=torch.full_like(a, float('nan')), f_root=torch.full_like(a, float('nan')),
+                status=torch.where(found, int(ts.Status.CONVERGED), int(ts.Status.NO_BRACKET)),
+                iterations=torch.zeros_like(a, dtype=torch.int64))
+            failure.raise_if_failed(context + ' (no sampled sign-changing branch)')
+        result = _bracketed_secant(resid, a, b, **kw)
+        result.raise_if_failed(context)
+        root = result.root
+    # Reattach parameter sensitivities by the implicit function theorem. The
+    # bracket search is discrete; differentiating its iterations is inappropriate.
+    if torch.is_grad_enabled():
+        F = resid(root)
+        if F.requires_grad:
+            step = torch.minimum(torch.full_like(root, 1e-4), (root-Tb_t)/4)
+            with torch.no_grad():
+                slope = (resid(root + step) - resid(root - step))/(2*step)
+            root = root - (F - F.detach())/slope
+    return root
 
-    res = ts.solve(resid, bracket=(lo_t, hi_t), **kw)
-    if res.ok:
-        Tw = res.root
-    else:
-        if anchor is not None:
-            peak = torch.as_tensor(anchor, dtype=torch.float64).expand_as(lo_t)
+
+def _scw_flux(correlation, Props_b, Props_w_func, G, D, q, Tb, *,
+              psi=1.0, tol_kw=None, anchor=None, branch_n=33, hi=None, lo=None,
+              return_state=False):
+    """Shared heat-flux interface for Swenson and Chen, in W/m² and kelvin."""
+    values = [Tb, q, G, D, psi, *Props_b.values()]
+    native_torch = any(torch.is_tensor(v) for v in values)
+    def output(Tw, coefficient):
+        result = dict(Tw=Tw, htc=coefficient, residual=coefficient*(Tw-Tb)-q)
+        if not native_torch:
+            result = {key: float(value.detach()) if value.ndim == 0
+                      else value.detach().cpu().numpy() for key, value in result.items()}
+        return result if return_state else result['htc']
+    device = next((v.device for v in values if torch.is_tensor(v)), None)
+    tensor = lambda v: torch.as_tensor(v, dtype=torch.float64, device=device)
+    Tb, q, G, D, psi = torch.broadcast_tensors(*(tensor(v) for v in (Tb, q, G, D, psi)))
+    if bool((~torch.isfinite(q) | ~torch.isfinite(psi) | (psi <= 0) | (G <= 0) | (D <= 0)).any()):
+        raise ValueError("SCW heat-flux solvers require finite q and positive psi, G, D")
+    bulk = {k: tensor(v) for k, v in Props_b.items()}
+    hi = Tb + 200 if hi is None else tensor(hi)
+    zero = q == 0
+    direction = torch.where(q < 0, -torch.ones_like(q), torch.ones_like(q))
+    lo = Tb-200 if lo is None else tensor(lo)
+    search_hi = torch.where(q < 0, 2*Tb-lo, hi)
+    search_hi = torch.where(zero, Tb+2., search_hi)
+    if bool(zero.any()):
+        if correlation == 'swenson':
+            wall = dict(bulk, h=bulk['h']+bulk['cp']*1e-3)
+            h_zero = psi * SCW.Swenson_dT(bulk, wall, Tb+1e-3, Tb, G, D)
         else:
-            peak, _ = ts.find_extremum(resid, lo_t, hi_t, mode="max")
-        branch = ts.bracket_from_anchor(resid, peak, lo_t, n=branch_n)
-        branch.raise_if_failed(context + " (locating pseudocritical branch)")
-        res2 = ts.solve(resid, bracket=branch.as_tuple(), unique_scan=branch_n, **kw)
-
-        use_res2 = ~res.converged
-        converged = res.converged | res2.converged
-        if not bool(converged.all()):
-            combined = ts.SolveResult(
-                root=torch.where(use_res2, res2.root, res.root),
-                f_root=torch.where(use_res2, res2.f_root, res.f_root),
-                status=torch.where(use_res2, res2.status, res.status),
-                iterations=torch.where(use_res2, res2.iterations, res.iterations),
-            )
-            combined.raise_if_failed(context)
-        Tw = torch.where(use_res2, res2.root, res.root)
-
-    return float(Tw) if Tw.numel() == 1 else Tw
+            Re = G*D/bulk['mu']
+            prefactor = .46*Re**.16*(D/bulk['k'])**.81*bulk['k']/D
+            h_zero = (psi*prefactor)**(1/.19)
+    if bool(zero.all()):
+        return output(Tb+q/h_zero, h_zero)
+    if anchor is None:
+        nodes = torch.stack([Tb+direction*(search_hi-Tb)*fraction
+                             for fraction in torch.linspace(0., 1., 65)])
+        # Include endpoints: cp can be monotone (bulk already above T_pc), or
+        # constant in a test/property approximation, with no interior extremum.
+        with torch.enable_grad():
+            heat_capacity = tensor(Props_w_func(nodes)['cp']).expand_as(nodes).detach()
+        anchor = nodes.gather(0, heat_capacity.argmax(dim=0, keepdim=True)).squeeze(0)
+    # In mixed batches, solve inactive zero-flux entries at a valid reference
+    # flux and replace them with the analytic zero-superheat limit below.
+    qs = torch.where(zero, torch.full_like(q, 129000.), q)
+    def coefficient(Tw):
+        # Live IAPWS density inversion uses autograd internally even when the
+        # enclosing wall search is value-only.
+        with torch.enable_grad():
+            wall = {k: tensor(v) for k, v in Props_w_func(Tw).items()}
+        if correlation == "swenson":
+            return SCW.Swenson_dT(bulk, wall, Tw, Tb, G, D)
+        return SCW.Chen_SCW_dT(bulk, wall, Tw, Tb, G, D, qs)
+    scale = torch.maximum(qs.abs(), torch.ones_like(qs))
+    def residual(search_T):
+        Tw = Tb + direction*(search_T-Tb)
+        physical = (psi * coefficient(Tw) * (Tw - Tb) - qs)/scale
+        # Zero-flux entries must not depend on whether a reference-flux root
+        # exists. Give inactive entries a simple, guaranteed numerical root.
+        return torch.where(zero, search_T-Tb-1., physical)
+    search_anchor = Tb+direction*(tensor(anchor)-Tb)
+    search_T = _solve_Tw_scw(residual, Tb, search_hi, correlation + " wall temperature",
+                            tol_kw=tol_kw, anchor=search_anchor, branch_n=branch_n)
+    Tw = Tb + direction*(search_T-Tb)
+    h = psi * coefficient(Tw)
+    if bool(zero.any()):
+        h = torch.where(zero, h_zero, h)
+    if bool(zero.any()):
+        Tw = torch.where(zero, Tb+q/h_zero, Tw)
+    return output(Tw, h)
 
 
 class Water:
-    """
-    Single-phase and flow-boiling heat transfer correlations for water.
+    """Single-phase and flow-boiling heat transfer correlations for water.
 
     Convention:
       - Props dicts carry 'rho','mu','k','cp' (and 'hfg','h', etc. where needed)
@@ -183,14 +266,8 @@ class Water:
     """
 
     def Dittus(Props, G, D):
-        """
-        Dittus-Boelter correlation for the single-phase turbulent heat transfer
+        """Dittus-Boelter correlation for the single-phase turbulent heat transfer
         coefficient.
-
-        Why this model is here:
-            The workhorse single-phase correlation for forced convection in tubes. It is
-            the default in most system codes and serves as the baseline that the more
-            accurate Petukhov and Gnielinski correlations (below) are compared against.
 
         Formulation:
             Pr = mu*cp/k
@@ -199,7 +276,7 @@ class Water:
             htc = Nu*k/D
 
             The published form selects the Prandtl exponent by heating/cooling
-            (n = 0.4 heating, n = 0.3 cooling, per CLAUDE.md section 6's worked
+            (n = 0.4 heating, n = 0.3 cooling, per CONTRIBUTING.md section 6's worked
             example); this implementation, preserved exactly as found, always uses
             n = 0.4 -- every existing call site in this repository heats the coolant,
             never cools it, so this was not flagged as a defect. A cooling variant
@@ -230,22 +307,12 @@ class Water:
         Pr = mu * cp / k
         Re = G * D / mu
         ranges.check("dittus_boelter", {"Re": Re, "Pr": Pr}, RANGES["dittus_boelter"])
-        # Dittus-Boelter's leading constant is 0.023, not 0.026. 0.026 belongs to the
-        # Colburn j-factor correlation, which pairs it with Pr^(1/3) rather than Pr^0.4 --
-        # taking one constant from one correlation and one exponent from the other
-        # overpredicts by 13 percent. Every other copy of Dittus-Boelter in this
-        # repository already used 0.023.
         Nu = 0.023 * Re**(0.8) * Pr**(0.4)
         val = Nu * k / D
         return val
 
     def Petchukov(Props, G, D):
-        """
-        Petukhov correlation for the single-phase turbulent heat transfer coefficient.
-
-        Why this model is here:
-            A more accurate (and more expensive -- an implicit friction factor) single-
-            phase alternative to Water.Dittus, valid over a wider Reynolds/Prandtl range.
+        """Petukhov correlation for the single-phase turbulent heat transfer coefficient.
 
         Formulation:
             Pr = mu*cp/k
@@ -288,14 +355,8 @@ class Water:
         return val
 
     def Gnielinski(Props, G, D):
-        """
-        Gnielinski correlation for the single-phase turbulent heat transfer
+        """Gnielinski correlation for the single-phase turbulent heat transfer
         coefficient.
-
-        Why this model is here:
-            Another accurate single-phase alternative to Water.Dittus, and the one that
-            remains valid down to a lower Reynolds number (2300, versus Petukhov's
-            1e4) -- useful near the laminar-turbulent transition.
 
         Formulation:
             Pr = mu*cp/k
@@ -333,24 +394,11 @@ class Water:
         return val
 
     def SchrockGrossman(Props_l, Props_v, htc_lo, x, G, D, q_pp):
-        """
-        Schrock & Grossman (1959) saturated flow-boiling correlation.
-
-        Why this model is here:
-            The two-phase flow-boiling heat transfer coefficient, combining a
-            convective (Lockhart-Martinelli two-phase multiplier) term with a
-            nucleate-boiling term, referenced to the caller-supplied liquid-only
-            Dittus-Boelter coefficient htc_lo.
+        """Schrock & Grossman (1959) saturated flow-boiling correlation.
 
         Formulation:
             Xtt = (mu_l/mu_v)^0.1 * (rho_v/rho_l)^0.5 * ((1-x)/x)^0.9
             h_tp = htc_lo * (1.11*Xtt^-0.66 + 7400*q''/(G*h_fg))
-
-            Note: the original source's docstring here stated a different formula,
-            h_tp = 2.5*h_l*(1/Xtt)^0.75 -- that was a transcription error (apparently
-            copied from a different correlation); the formula above is what the body
-            has always computed, matches SCA_Example.py's htc2phi, and is the standard
-            Schrock-Grossman form. See docs/DUPLICATES.md D12.
 
         Valid range:
             Not established -- see docs/OPEN_QUESTIONS.md (Q16).
@@ -387,15 +435,7 @@ class Water:
 
     @staticmethod
     def Chen_H2O_dT(Props_l, Props_v, G, D, x, Tw, Tsat, dPsat, sigma, hfg):
-        """
-        Chen (1966) superposition correlation, evaluated from a known wall superheat.
-
-        Why this model is here:
-            The two-phase flow-boiling heat transfer coefficient as a superposition of
-            a suppressed convective term (F*h_c) and a suppressed nucleate-boiling term
-            (S*h_nb), the more widely used alternative to Water.SchrockGrossman. This
-            "_dT" form evaluates directly from a known wall temperature; Water.Chen_H2O
-            (below) solves for Tw given a heat flux instead.
+        """Chen (1966) superposition correlation, evaluated from a known wall superheat.
 
         Formulation:
             h_tp = F*h_c + S*h_nb
@@ -441,11 +481,6 @@ class Water:
 
         Xtt = (mu_l / mu_v)**0.1 * (rho_v / rho_l)**0.5 * ((1 - x) / x)**0.9
         inv_Xtt = 1 / Xtt
-        # F was a Python `if` on inv_Xtt, which is fine for a scalar call but raises (or
-        # silently evaluates only one branch) once inv_Xtt is a batched tensor -- the
-        # same class of bug as a Python `if` on any other array value. backend.where
-        # evaluates both branches and selects elementwise, so this works identically for
-        # a float, a numpy array, or a torch tensor.
         F = backend.where(inv_Xtt <= 0.1, 1.0, 2.35 * (inv_Xtt + 0.213)**0.736)
 
         dTsat = Tw - Tsat
@@ -460,16 +495,8 @@ class Water:
         return val
 
     def Chen_H2O(Props_l, Props_v, G, D, x, q, Tb, Tsat, dPsat, sigma, hfg):
-        """
-        Chen (1966) superposition correlation, solved for the wall temperature that
+        """Chen (1966) superposition correlation, solved for the wall temperature that
         satisfies a given heat flux.
-
-        Why this model is here:
-            Water.Chen_H2O_dT needs a known wall temperature; this wraps it in a
-            torchsolve bracketed root-find (replacing the pre-cleanup
-            scipy.optimize-based solve, retired per docs/DECISIONS.md) so a caller can
-            instead supply the heat flux q directly, as sca/annular.py-style closures do
-            for the single-phase correlations.
 
         Formulation:
             Solve q = h(Tw)*(Tw-Tb) for Tw over Tw in [Tb, Tb+200], then evaluate
@@ -502,14 +529,8 @@ class Water:
 
     @staticmethod
     def Bjorge_dT(Props_l, Props_v, G, D, x, Tw, Tsat, dPsat, sigma, hfg):
-        """
-        Bjorge, Hall & Rohsenow (1982) asymptotic combination, evaluated from a known
+        """Bjorge, Hall & Rohsenow (1982) asymptotic combination, evaluated from a known
         wall superheat.
-
-        Why this model is here:
-            An alternative to Water.Chen_H2O_dT's suppression-factor superposition:
-            combines the convective and nucleate-boiling terms as an asymptotic (root-
-            sum-square) blend instead.
 
         Formulation:
             h_tp = sqrt(h_fc^2 + h_nb^2)
@@ -557,13 +578,8 @@ class Water:
         return val
 
     def Bjorge(Props_l, Props_v, G, D, x, q, Tb, Tsat, dPsat, sigma, hfg):
-        """
-        Bjorge, Hall & Rohsenow (1982) asymptotic combination, solved for the wall
+        """Bjorge, Hall & Rohsenow (1982) asymptotic combination, solved for the wall
         temperature that satisfies a given heat flux.
-
-        Why this model is here:
-            Water.Bjorge_dT needs a known wall temperature; this wraps it in the same
-            torchsolve bracketed root-find as Water.Chen_H2O.
 
         Formulation:
             Solve q = h(Tw)*(Tw-Tb) for Tw over Tw in [Tb, Tb+200], then evaluate
@@ -596,29 +612,24 @@ class Water:
 
 
 class SCW:
-    """
-    Supercritical water forced-convection correlations.
+    """Supercritical water forced-convection correlations.
     Props_b / Props_w = properties at bulk / wall temperature; 'h' = specific enthalpy.
     """
 
     @staticmethod
     def Swenson_dT(Props_b, Props_w, Tw, Tb, G, D):
-        """
-        Swenson, Carver & Kakarala (1965) supercritical-water forced-convection
-        correlation, evaluated from a known wall temperature.
-
-        Why this model is here:
-            The legacy benchmark supercritical-water heat transfer correlation used
-            throughout the annular and rod SCA paths; per docs/DECISIONS.md, retained
-            alongside SCW.Chen_SCW_dT (the more accurate, recommended-default option).
+        """Swenson, Carver & Kakarala (1965) supercritical-water forced-convection
+        benchmark variant, evaluated from a known wall temperature.
 
         Formulation:
-            Pr_b = mu_b*cp_b/k_b ;  Re_b = G*D/mu_b
             Pr_w = mu_w*cp_w/k_w ;  Re_w = G*D/mu_w
             cp_bar = (h_w - h_b)/(Tw - Tb)
-            Nu = 0.00459 * Re_w^0.923 * Pr_w^0.613 * (cp_bar/cp_w)^0.613
-                 * (rho_w/rho_b)^0.231
+            Nu = 0.00459 * Re_w^0.92 * Pr_w^0.61 * (cp_bar/cp_b)^0.61
+                 * (rho_w/rho_b)^0.23
             htc = Nu*k_w/D
+
+        Uses the bulk-cp correction and rounded exponents of the benchmarked
+        implementation. cp_bar is the enthalpy secant, not either endpoint cp.
 
         Valid range:
             Not established -- see docs/OPEN_QUESTIONS.md (Q16).
@@ -629,7 +640,7 @@ class SCW:
         Reference:
             Swenson, H.S., Carver, J.R. and Kakarala, C.R. (1965), per Hughes, Pelaez,
             Schubring & Jordan, Nucl. Eng. Des. 270 (2014) 412-420, Eq. (8) -- see
-            docs/PHYSICS_REVIEW.md.
+            the model references.
 
         Inputs (float, numpy array, or torch tensor; broadcastable against each other):
             Props_b : bulk-temperature property dict with keys 'rho', 'mu', 'k', 'cp',
@@ -651,16 +662,11 @@ class SCW:
         Re_w = G * D / mu_w
 
         cp_bar = (h_w - h_b) / (Tw - Tb)
-        # Swenson's Prandtl number is the *averaged* one, Pr_bar_w = mu_w*cp_bar/k_w, so
-        # splitting it into Pr_w * (cp_bar/cp_w) leaves both halves carrying the same
-        # 0.613 exponent. c_cp was 0.231 -- that is the density-ratio exponent, and it is
-        # also the Prandtl exponent of the neighbouring Bishop correlation, which shares
-        # Swenson's 0.00459 lead constant and sits on the facing column of Hughes et al.
-        # (2014). See that paper's Eq. (8) against its Eq. (1).
-        c1, c_Re, c_Pr, c_cp, c_rho = 0.00459, 0.923, 0.613, 0.613, 0.231
+        # Retain the benchmarked coefficients and bulk-cp correction.
+        c1, c_Re, c_Pr, c_cp, c_rho = 0.00459, 0.92, 0.61, 0.61, 0.23
 
         R_rho = rho_w / rho_b
-        R_cp = cp_bar / cp_w
+        R_cp = cp_bar / cp_b
 
         Nu = c1 * Re_w**c_Re * Pr_w**c_Pr * R_cp**c_cp * R_rho**c_rho
         htc = Nu * k_w / D
@@ -668,81 +674,21 @@ class SCW:
         return htc
 
     def Swenson(Props_b, Props_w_func, G, D, q, Tb, tol_kw=None, anchor=None,
-                branch_n=33, hi=None):
+                branch_n=33, hi=None, psi=1.0, return_state=False, lo=None):
+        """Solve q'' = psi*h(Tw)*(Tw-Tb) with a pseudocritical branch scan.
+
+        q is heated-surface flux [W/m²], D hydraulic diameter [m], Tb/hi/anchor
+        temperatures [K]. anchor is the cp-peak temperature at the case pressure.
+        The lowest-superheat sampled root is selected. Failures raise SolverFailure.
+        Return effective htc [W/m²/K], or {Tw, htc, residual} with return_state=True.
         """
-        Swenson, Carver & Kakarala (1965) supercritical-water forced-convection
-        correlation, solved for the wall temperature that satisfies a given heat flux.
-
-        Why this model is here:
-            SCW.Swenson_dT needs a known wall temperature and Props_w evaluated there;
-            this wraps it in _solve_Tw_scw's bracket-then-branch-search solve, since
-            htc(Tw) is non-monotone near the pseudocritical point (see that function's
-            docstring, and torchsolve/README.md, which names this correlation as its
-            motivating case).
-
-        Formulation:
-            Solve q = h(Tw)*(Tw-Tb) for Tw over Tw in [Tb, hi] (default Tb+200), then
-            evaluate SCW.Swenson_dT at that Tw.
-
-        Props_w_func(Tw) -> wall Props dict for a trial Tw (needed since
-        SCW wall properties vary strongly near the pseudocritical point).
-
-        tol_kw: optional override for the internal wall-temperature
-        solve's tolerances (see _solve_Tw_scw) -- pass a looser one if
-        this is called repeatedly inside an outer iteration that will
-        itself refine the result further.
-        anchor: precomputed pseudocritical temperature, if known -- see
-        _solve_Tw_scw. Narrowing the search interval around a previous
-        estimate does *not* reliably avoid the branch search the way
-        skipping find_extremum does: a solution sitting right at the
-        peak (the case that needs the branch search at all) still has
-        both signs on either side of it in *any* interval that straddles
-        it, however narrow.
-        branch_n: scan-point count for the fallback path -- see
-        _solve_Tw_scw.
-        hi: upper end of the search interval, default Tb+200. A high
-        enough flux needs more than 200 K of superheat to satisfy
-        Nu*(Tw-Tb) -- that's a property of this search window, not of
-        the correlation, so widen hi rather than treat "no bracket" as
-        necessarily meaning no physical solution exists.
-
-        Valid range:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
-
-        Uncertainty:
-            +/- 25 percent (UNCERTAINTY["swenson"]).
-
-        Reference:
-            Swenson, H.S., Carver, J.R. and Kakarala, C.R. (1965) -- see
-            SCW.Swenson_dT's docstring.
-
-        Inputs:
-            Props_b : bulk-temperature property dict (float, numpy array, or torch
-                      tensor values), keys 'rho', 'mu', 'k', 'cp', 'h'
-            Props_w_func : callable, trial wall temperature -> wall Props dict
-            G, D    : mass flux (kg/m^2-s), hydraulic diameter (m)
-            q       : surface heat flux, W/m^2
-            Tb      : bulk temperature, K
-            tol_kw, anchor, branch_n, hi : see above
-        Returns:
-            val : heat transfer coefficient, W/m^2-K, evaluated at the solved Tw, same
-                  type as G
-        """
-        hi = Tb + 200 if hi is None else hi
-
-        def resid(Tw):
-            h = SCW.Swenson_dT(Props_b, Props_w_func(Tw), Tw, Tb, G, D)
-            return h * (Tw - Tb) - q
-
-        Tw = _solve_Tw_scw(resid, Tb, hi, "Swenson wall temperature",
-                            tol_kw=tol_kw, anchor=anchor, branch_n=branch_n)
-        val = SCW.Swenson_dT(Props_b, Props_w_func(Tw), Tw, Tb, G, D)
-        return val
+        return _scw_flux("swenson", Props_b, Props_w_func, G, D, q, Tb,
+                         tol_kw=tol_kw, anchor=anchor, branch_n=branch_n, hi=hi,
+                         psi=psi, return_state=return_state, lo=lo)
 
     @staticmethod
     def Chen_SCW_dT(Props_b, Props_w, Tw, Tb, G, D, q):
-        """
-        Chen & Fang (2014), Int. J. Heat Mass Transfer 78, 156-160: a
+        """Chen & Fang (2014), Int. J. Heat Mass Transfer 78, 156-160: a
         correlation for supercritical water in vertical tubes, regressed
         from 5366 data points spanning bulk enthalpy 278-3169 kJ/kg,
         G 201-2500 kg/m^2-s, q 129-1735 kW/m^2, P 22-34.3 MPa,
@@ -757,11 +703,6 @@ class SCW:
         with the Boussinesq finite-difference approximation
         beta_b = (rho_b-rho_w)/(rho_b*(Tw-Tb)), which collapses
         Gr_b*/Gr_b to q*D/(k_b*(Tw-Tb)) (g, beta and nu_b all cancel).
-
-        Why this model is here:
-            Per docs/DECISIONS.md, promoted to a first-class supercritical option
-            alongside SCW.Swenson_dT and the recommended default (more accurate, and
-            regressed against a much larger, explicitly stated database).
 
         Valid range:
             Bulk enthalpy 278-3169 kJ/kg ; G 201-2500 kg/m^2-s ; q 129-1735 kW/m^2 ;
@@ -810,52 +751,23 @@ class SCW:
 
         return htc
 
-    def Chen_SCW(Props_b, Props_w_func, G, D, q, Tb):
+    def Chen_SCW(Props_b, Props_w_func, G, D, q, Tb, tol_kw=None, anchor=None,
+                 branch_n=33, hi=None, psi=1.0, return_state=False, lo=None):
+        """Chen & Fang heat-flux solve; arguments and branch policy match Swenson.
+
+        q remains the physical surface flux inside Chen_SCW_dT; psi multiplies
+        the heat-transfer coefficient inside the wall balance.
         """
-        Chen & Fang (2014) supercritical-water correlation, solved for the wall
-        temperature that satisfies a given heat flux.
+        return _scw_flux("chen_scw", Props_b, Props_w_func, G, D, q, Tb,
+                         tol_kw=tol_kw, anchor=anchor, branch_n=branch_n, hi=hi,
+                         psi=psi, return_state=return_state, lo=lo)
 
-        Why this model is here:
-            SCW.Chen_SCW_dT needs a known wall temperature and Props_w evaluated there;
-            this wraps it in the same non-monotone-aware solve as SCW.Swenson.
-
-        Formulation:
-            Solve q = h(Tw)*(Tw-Tb) for Tw over Tw in [Tb, Tb+200], then evaluate
-            SCW.Chen_SCW_dT at that Tw.
-
-        Valid range:
-            See SCW.Chen_SCW_dT.
-
-        Uncertainty:
-            MAD 5.4 percent ; 95.7 percent of the database within +/- 15 percent
-            (UNCERTAINTY["chen_scw"]).
-
-        Reference:
-            Chen, W. and Fang, X. (2014) -- see SCW.Chen_SCW_dT's docstring.
-
-        Inputs:
-            Props_b : bulk-temperature property dict (float, numpy array, or torch
-                      tensor values), keys 'rho', 'mu', 'k', 'cp', 'h'
-            Props_w_func : callable, trial wall temperature -> wall Props dict
-            G, D    : mass flux (kg/m^2-s), hydraulic diameter (m)
-            q       : surface heat flux, W/m^2
-            Tb      : bulk temperature, K
-        Returns:
-            val : heat transfer coefficient, W/m^2-K, evaluated at the solved Tw, same
-                  type as G
-        """
-        def resid(Tw):
-            h = SCW.Chen_SCW_dT(Props_b, Props_w_func(Tw), Tw, Tb, G, D, q)
-            return h * (Tw - Tb) - q
-
-        Tw = _solve_Tw_scw(resid, Tb, Tb + 200, "Chen_SCW wall temperature")
-        val = SCW.Chen_SCW_dT(Props_b, Props_w_func(Tw), Tw, Tb, G, D, q)
-        return val
+    Chen_dT = Chen_SCW_dT
+    Chen = Chen_SCW
 
 
 class Sodium:
-    """
-    Liquid-metal forced-convection correlations.
+    """Liquid-metal forced-convection correlations.
 
     Liquid metals behave unlike water in a way that shows up in the form of the
     correlation, not just its constants: their Prandtl number is of order 0.005, so
@@ -870,15 +782,8 @@ class Sodium:
 
     @staticmethod
     def Lyon(Props, G, D, check_range=True):
-        """
-        Lyon correlation for liquid-metal heat transfer in a circular tube at constant
+        """Lyon correlation for liquid-metal heat transfer in a circular tube at constant
         heat flux.
-
-        Why this model is here:
-            The manual's section 2.4 asks for a sodium correlation, and this is the
-            standard one for the boundary condition a fuel pin actually imposes --
-            constant heat flux along and around the tube, which is what a fuel rod
-            approximates far better than a uniform wall temperature.
 
             It is here rather than Notter-Sleicher, which section 2.4.1 names, because
             no source for Notter-Sleicher is available in this repository. Guessing its
@@ -925,16 +830,8 @@ class Sodium:
 
     @staticmethod
     def SebanShimazaki(Props, G, D, check_range=True):
-        """
-        Seban and Shimazaki correlation for liquid-metal heat transfer in a circular tube
+        """Seban and Shimazaki correlation for liquid-metal heat transfer in a circular tube
         at uniform wall temperature.
-
-        Why this model is here:
-            The companion to Lyon for the other classic boundary condition. Worth having
-            alongside it because the difference between the two is exactly the conduction
-            floor -- 5.0 against 7.0 -- which makes the sensitivity of a liquid-metal
-            channel to its thermal boundary condition visible rather than hidden in a
-            choice of correlation.
 
         Formulation:
             Pe = Re*Pr
@@ -970,17 +867,7 @@ class Sodium:
 
     @staticmethod
     def Mikityuk(Props, G, D, pitch, check_range=True):
-        """
-        Mikityuk correlation for liquid-metal heat transfer in a rod bundle.
-
-        Why this model is here:
-            Lyon and Seban-Shimazaki above are circular-tube correlations. A fuel bundle
-            is not a tube: the subchannel shape varies azimuthally around each rod and
-            the pitch-to-diameter ratio controls how much. This is the bundle correlation
-            proper, and Mikityuk derived it as a best fit across four experimental sets
-            -- 658 points, NaK and mercury, triangular and square lattices -- after
-            reviewing eight correlations published between 1960 and 1977. Todreas &
-            Kazimi single it out as the best fit over its range.
+        """Mikityuk correlation for liquid-metal heat transfer in a rod bundle.
 
             Note this returns a Nusselt number outright rather than a correction factor
             to a tube correlation, which is why it lives here and not in
@@ -1033,12 +920,6 @@ class Sodium:
             htc : heat transfer coefficient, W/m^2-K, same type as G
         """
         mu, cp, k = Props['mu'], Props['cp'], Props['k']
-        # Promote across the properties as well as the geometry, not just among the
-        # geometry. Either side can be the batch: a fixed lattice swept over many mass
-        # fluxes leaves pitch/D a float, and a single operating point evaluated over a
-        # batch of property states leaves G, D and pitch floats while mu is the tensor.
-        # Only the second case reaches xp.exp with a bare float, and only that one fails
-        # -- which is exactly why the contract test sweeps each argument separately.
         G, D, pitch, mu, cp, k = backend.promote_all(G, D, pitch, mu, cp, k)
         xp = backend.lib(G, D, pitch, mu, cp, k)
 
@@ -1058,15 +939,7 @@ class Sodium:
 class Lead:
     @staticmethod
     def Shen(Props, T, G, D):
-        """
-        Shen correlation for the heat transfer coefficient of liquid lead.
-
-        Why this model is here:
-            The liquid-metal (Peclet-number-based, rather than Prandtl-number-based)
-            forced-convection correlation used for a lead-cooled channel; per
-            docs/DECISIONS.md the lead channel in the annular SCA files is a toy, so
-            this is property-library infrastructure and the Phase 7 uncertainty figure,
-            not an active SCA path today.
+        """Shen correlation for the heat transfer coefficient of liquid lead.
 
         Formulation:
             Pr = mu*cp/k ;  Re = G*D/mu ;  Pe = Re*Pr
@@ -1083,8 +956,8 @@ class Lead:
             Not established -- see docs/OPEN_QUESTIONS.md (Q13). Two of the three
             pre-cleanup copies of this correlation used a *negative* exponent on the
             leading Peclet term (Nu = 10.287*Pe^-0.1175 + ...), a substantial difference
-            (Nu = 24.0 vs. 7.6 at Pe = 500) -- see docs/DUPLICATES.md D3. This module
-            keeps the positive-exponent form it already had; Phase 2 changes no physics,
+            (Nu = 24.0 vs. 7.6 at Pe = 500) -- see the model references D3. This module
+            keeps the positive-exponent form it already had; development changes no physics,
             so this is flagged rather than resolved.
 
         Inputs (float, numpy array, or torch tensor; broadcastable against each other):

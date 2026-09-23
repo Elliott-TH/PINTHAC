@@ -1,5 +1,4 @@
-"""
-Monte Carlo uncertainty propagation through a supercritical rod single-channel analysis.
+"""Monte Carlo uncertainty propagation through a supercritical rod single-channel analysis.
 
 What this shows: how far the answers move when the heat transfer correlation is allowed to
 be wrong by its own documented uncertainty. Swenson's band is +/- 25 percent
@@ -97,7 +96,8 @@ def main():
 
         `factor` is indexed by trial, not by axial node, so every node of a given trial
         sees the same multiplier -- a correlation that is systematically off, which is
-        what a model-form error is."""
+        what a model-form error is.
+        """
         return Bundle.Presser(pitch, D) * factor.to(pitch.device)
 
     print("running...")

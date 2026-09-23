@@ -1,6 +1,4 @@
-"""
-Permanent tests for pinthac.ml.datagen's Fourier power-profile parameterization
-(Phase 6, docs/brief/PHASE67_BRIEF.md part A2).
+"""Permanent tests for pinthac.ml.datagen's Fourier power-profile parameterization
 
 The analytic mean <Fq> = 0.5*sum(a_n^2+b_n^2) + phi_q is checked against numerical
 quadrature of the same S(x)^2 + phi_q profile -- an independent computation of the same
@@ -42,17 +40,10 @@ def test_fourier_shape_is_strictly_positive_and_mean_normalized():
     shape = datagen.build_fourier_shapes(a, b, phi_q, x)
 
     assert np.all(shape > 0.0)   # phi_q > 0 keeps Fq, and therefore shape, off zero
-    # Mean-normalized (not peak-normalized like the Legendre family): the arithmetic
-    # mean over a discrete grid is only an approximation of the analytic (integral)
-    # mean that shape was actually normalized by, so this needs a slightly looser
-    # tolerance than the quadrature check above (which integrates rather than averages).
     np.testing.assert_allclose(shape.mean(axis=1), 1.0, atol=5e-3)
 
 
 def test_fourier_order_is_weighted_toward_low_order():
-    # "vary the order, weighted toward low order (more 2nd than 3rd or 4th)" --
-    # docs/brief/PHASE67_BRIEF.md A2. Check the *active* mode count (nonzero coefficients)
-    # is monotonically less common as order increases, over a large draw.
     a, b, phi_q = datagen.sample_fourier_coeffs(20000, K_max=4, seed=5)
     active = (a != 0.0) | (b != 0.0)
     order = active.sum(axis=1)   # 1..4

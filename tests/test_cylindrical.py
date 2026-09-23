@@ -1,5 +1,4 @@
-"""
-Smoke tests for pinthac.pin.cylindrical: does it import, does Cyl_HT accept a float /
+"""Smoke tests for pinthac.pin.cylindrical: does it import, does Cyl_HT accept a float /
 numpy array / torch tensor and return the matching type with a finite gradient, is the
 centerline (r=0) temperature exactly C.
 
@@ -46,9 +45,6 @@ def test_temperature_decreases_outward_for_positive_generation():
     assert T_edge < T_center
 
 
-# =======================================================================================
-# The conductivity-integral radial solve (manual section 4.3), added in Phase 4.
-# =======================================================================================
 from pinthac.properties import matmod as _matmod
 
 RFO = 0.0041
@@ -67,7 +63,8 @@ def _k(T):
 @pytest.mark.parametrize("r", [0.0, 0.001, 0.002, 0.003, RFO])
 def test_radial_temperature_matches_an_independent_inversion(r):
     """Theta is inverted here, so the check is an independent root solve of the same
-    equation -- brentq on Theta(T) - target -- not a value this module produced."""
+    equation -- brentq on Theta(T) - target -- not a value this module produced.
+    """
     from scipy.optimize import brentq
 
     theta_fo = float(_theta(800.0))
@@ -80,7 +77,8 @@ def test_radial_temperature_matches_an_independent_inversion(r):
 
 def test_surface_boundary_condition_is_recovered_exactly():
     """At r = rfo the solve must return the surface temperature it was given. This is the
-    one point where the answer is known without solving anything."""
+    one point where the answer is known without solving anything.
+    """
     for Tfo in (600.0, 800.0, 1100.0):
         got = float(cylindrical.Cyl_T(RFO, RFO, Q3, float(_theta(Tfo)), _theta, k_func=_k))
         assert got == pytest.approx(Tfo, abs=1.0e-6)
@@ -96,7 +94,8 @@ def test_temperature_falls_monotonically_outward():
 def test_temperature_dependent_conductivity_matters():
     """UO2's conductivity roughly halves between 800 K and 1800 K, so freezing it at the
     surface value understates the centreline rise. Not a fitted comparison -- the point
-    is the direction and that it is large enough to care about."""
+    is the direction and that it is large enough to care about.
+    """
     theta_fo = float(_theta(800.0))
     varying = float(cylindrical.Cyl_T(0.0, RFO, Q3, theta_fo, _theta, k_func=_k))
     k_surface = float(_k(800.0))
@@ -106,8 +105,7 @@ def test_temperature_dependent_conductivity_matters():
 
 
 def test_analytic_derivative_and_autograd_agree():
-    """k_func is dTheta/dT, the identity the Phase 3 conductivity-integral fix
-    established. Supplying it must not change the answer, only the cost."""
+    """k_func is dTheta/dT, the identity the development conductivity-integral fix"""
     theta_fo = float(_theta(800.0))
     with_k = float(cylindrical.Cyl_T(0.002, RFO, Q3, theta_fo, _theta, k_func=_k))
     without = float(cylindrical.Cyl_T(0.002, RFO, Q3, theta_fo, _theta))
@@ -125,7 +123,8 @@ def test_flux_and_linear_heat_close_the_energy_balance():
 def test_cyl_theta_collapses_to_the_annular_solution_with_c1_zero():
     """A solid pellet is the ri -> 0 limit of the annular problem, where log(r) forces
     C1 = 0. Checked against pin/annular.py's own flux relation rather than by restating
-    the formula."""
+    the formula.
+    """
     from pinthac.pin import annular as ann
     for r in (0.0005, 0.002, RFO):
         assert float(cylindrical.Cyl_qpp(r, Q3)) == pytest.approx(float(ann.Ann_qpp(r, Q3, 0.0)),

@@ -1,21 +1,9 @@
-"""
-Pure-inference wrapper around the trained rod DeepONet-PINN
+"""Pure-inference wrapper around the trained rod DeepONet-PINN
 (SCA_PINN_Rod_DeepONet.py's model + sca_rod_deeponet_best.pth) -- the
 surrogate counterpart to SCA_IAPWS95_Rod.run_SCA_batch(), deliberately
 given the same calling convention (inputs_b dict + Tscw_in_b +
 q_sensors_b) so the two are interchangeable in scripts that compare or
 benchmark one against the other.
-
-Only the architecture and input/output normalization are duplicated
-here rather than imported from SCA_PINN_Rod_DeepONet.py -- importing
-that module directly would also execute its full training-data load and
-SOAP/SSBroyden setup as an import side effect, which a plain "give me a
-prediction" caller shouldn't have to pay for. The normalization stats
-(Xb_mean/std, z_mean/std, Y_mean/std) aren't stored in the .pth
-checkpoint, so _load() recomputes them from the training split the
-first time predict_rod() runs -- deterministic (fixed dataset + fixed
-split seed), so this reproduces the exact stats the checkpoint was
-trained under, it just needs the dataset file present alongside it.
 """
 import os
 
@@ -37,7 +25,8 @@ OUT_NAMES = ["T_i", "T_fuel_max"]
 
 class DeepONet(nn.Module):
     """Identical architecture to SCA_PINN_Rod_DeepONet.DeepONet -- kept in
-    sync by hand since it has to match the checkpoint's state_dict."""
+    sync by hand since it has to match the checkpoint's state_dict.
+    """
     def __init__(self, n_branch_in, n_out=2, p=128, width=192):
         super().__init__()
         self.n_out, self.p = n_out, p
@@ -116,7 +105,8 @@ def _load(device):
 
 def sensor_grid(device=None):
     """The m=21 axial locations [m] this model's q_sensors_b columns must
-    line up with (see SCA_Rod_DataGen.N_SENSORS/L_FIXED)."""
+    line up with (see SCA_Rod_DataGen.N_SENSORS/L_FIXED).
+    """
     device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     _, _, sensor_z, _ = _load(device)
     return sensor_z.cpu().numpy()

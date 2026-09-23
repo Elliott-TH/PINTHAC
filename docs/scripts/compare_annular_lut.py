@@ -1,5 +1,4 @@
-"""
-solve_field(use_lut=True) against solve_field(use_lut=False), same case, same seed of
+"""solve_field(use_lut=True) against solve_field(use_lut=False), same case, same seed of
 inputs -- the accuracy-for-speed trade, measured rather than assumed.
 
 Run: HIP_VISIBLE_DEVICES=0 python docs/scripts/compare_annular_lut.py

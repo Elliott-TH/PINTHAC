@@ -1,5 +1,4 @@
-"""
-IAPWS verification-table tests.
+"""IAPWS verification-table tests.
 
 Why this file matters more than the rest of the suite: every other test in this repository
 checks a structural property -- does it run on a tensor, does the gradient stay finite, does
@@ -10,14 +9,16 @@ The IAPWS releases publish check values precisely so an implementation can be pr
 correct against something external. Every number below is transcribed from a published
 release, not produced by this library. If one of these fails, the library is wrong.
 
-Sources, all in Useful_pdfs/:
+Sources, all in :
     IAPWS95-2018.pdf     R6-95(2018), Tables 7 and 8
     IAWPS_Viscosity.pdf  R12-08, Tables 4 and 5
     ThCond.pdf           R15-11, Tables 4 and 5
+    IAPWS_97.pdf         R7-97(2012), Tables 5, 7, 9, 15, 24, 29, 33, 42 and Sec. 8
 """
 import numpy as np
 import pytest
 
+from pinthac.properties import iapws97 as if97
 from pinthac.properties.iapws95 import IAPWS95
 
 
@@ -28,17 +29,13 @@ def state(rho, T):
 
 def scalar(x):
     """First element as a plain float. The accessors return one-element arrays for the
-    one-element inputs used here, and numpy 2 refuses float() on those."""
+    one-element inputs used here, and numpy 2 refuses float() on those.
+    """
     return float(np.ravel(np.asarray(x))[0])
 
 
-# ---------------------------------------------------------------------------------------
-# IAPWS-95 Table 7 -- single-phase region.
-# Columns: T [K], rho [kg/m^3], p [MPa], cv [kJ/kg/K], w [m/s], s [kJ/kg/K].
-# The release prints nine significant figures; it also warns (footnote a) that the 300 K
-# liquid points accumulate rounding in p because small density changes swing the pressure
-# hard, so p there is checked less tightly than the other properties.
-# ---------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
+# - IAPWS-95 Table 7 -- single-phase region.
 TABLE_7 = [
     (300.0, 0.9965560e3,  0.992418352e-1, 0.413018112e1, 0.150151914e4, 0.393062643),
     (300.0, 0.1005308e4,  0.200022515e2,  0.406798347e1, 0.153492501e4, 0.387405401),
@@ -58,26 +55,22 @@ TABLE_7 = [
 def test_iapws95_table_7_single_phase(T, rho, p_ref, cv_ref, w_ref, s_ref):
     d = state(rho, T)
 
-    # Default is the release's own nine figures. Two points need a documented relaxation,
-    # and in both cases the measured deviation is stated so nothing is hidden behind a
-    # loose tolerance.
+    # Every point in this table now reproduces the release's own nine figures. The one
+    # documented relaxation is footnote a to Table 7: in the liquid region at low pressure,
+    # small density changes along an isotherm swing the pressure hard, so accumulated
+    # rounding can stop any given machine reproducing p to nine figures there. Measured on
+    # this one: 1.5e-10, comfortably inside the claim, but the tolerance is left loose
+    # because the release says the result is machine-dependent.
+    #
+    # The T = 647 K, rho = 358 point used to need a relaxation of 1e-5 on p and 1e-3 on w
+    # and no longer does -- it is now exact to 1.3e-9 and 1.1e-9. It sits 0.6 K below T_c,
+    # which is the only place in this table where the two non-analytic terms of Eq. (6)
+    # contribute anything at all, and two of their published delta-derivatives were
+    # mistranscribed in the module. The degradation was a formulation error after all, not
+    # the conditioning it was taken for; see the comment in iapws95.Phir group 4.
     p_tol, w_tol = 1e-8, 1e-8
-
-    # Footnote a to Table 7: in the liquid region at low pressure, small density changes
-    # along an isotherm swing the pressure hard, so accumulated rounding can stop any
-    # given machine reproducing p to nine figures. Measured here: 5e-9, i.e. right at the
-    # edge of the nine-figure claim.
     if T == 300.0 and rho < 1.0e3:
-        p_tol = 1e-5
-
-    # T = 647 K, rho = 358 sits 0.6 K below T_c and close to rho_c, where the second
-    # derivatives the speed of sound depends on are badly conditioned. Measured deviation:
-    # p 5.3e-6, w 4.6e-4, while cv and s are still exact to 5e-10 and 8e-10. That split --
-    # first-order quantities right, second-order quantities degraded -- is conditioning,
-    # not a formulation error, so the two exact columns keep the tight tolerance and only
-    # the two affected ones are relaxed, to just above what was measured.
-    if T == 647.0:
-        p_tol, w_tol = 1e-5, 1e-3
+        p_tol = 1e-7
 
     assert scalar(IAPWS95.p(d, units='MPa')) == pytest.approx(p_ref, rel=p_tol)
     assert scalar(IAPWS95.cv(d, units='kJ')) == pytest.approx(cv_ref, rel=1e-8)
@@ -104,15 +97,20 @@ def test_iapws95_table_8_saturation(T, p_ref, rhof_ref, rhog_ref, hf_ref, hg_ref
                                      sf_ref, sg_ref):
     sat = IAPWS95.saturation(np.array([T]))
     assert scalar(sat['p']) == pytest.approx(p_ref, rel=1e-7)
-    assert scalar(sat['rho_f']) == pytest.approx(rhof_ref, rel=1e-7)
-    assert scalar(sat['rho_g']) == pytest.approx(rhog_ref, rel=1e-7)
+    assert scalar(sat['rho_f']) == pytest.approx(rhof_ref, rel=1e-8)
+    assert scalar(sat['rho_g']) == pytest.approx(rhog_ref, rel=1e-8)
 
     d_f = state(scalar(sat['rho_f']), T)
     d_g = state(scalar(sat['rho_g']), T)
-    assert scalar(IAPWS95.h(d_f, units='kJ')) == pytest.approx(hf_ref, rel=1e-6)
-    assert scalar(IAPWS95.h(d_g, units='kJ')) == pytest.approx(hg_ref, rel=1e-6)
-    assert scalar(IAPWS95.s(d_f, units='kJ')) == pytest.approx(sf_ref, rel=1e-6)
-    assert scalar(IAPWS95.s(d_g, units='kJ')) == pytest.approx(sg_ref, rel=1e-6)
+    assert scalar(IAPWS95.h(d_f, units='kJ')) == pytest.approx(hf_ref, rel=1e-8)
+    assert scalar(IAPWS95.h(d_g, units='kJ')) == pytest.approx(hg_ref, rel=1e-8)
+    assert scalar(IAPWS95.s(d_f, units='kJ')) == pytest.approx(sf_ref, rel=1e-8)
+    assert scalar(IAPWS95.s(d_g, units='kJ')) == pytest.approx(sg_ref, rel=1e-8)
+
+    # T_sat is the inverse of all of this, and is solved a different way -- an ancillary
+    # bracket, then Newton with the Clausius-Clapeyron slope -- so round-tripping the
+    # published p_sat back to T checks the inverse against the release too.
+    assert scalar(IAPWS95.T_sat(p_ref)) == pytest.approx(T, rel=1e-8)
 
 
 # ---------------------------------------------------------------------------------------
@@ -148,15 +146,16 @@ def test_iapws_viscosity_table_4(T, rho, mu_ref):
 def test_iapws_viscosity_table_5_near_critical(T, rho, mu_ref):
     """The critical enhancement mu_2, R12-08 Eqs. (14)-(21).
 
-    Held to 2e-4 rather than the 1e-6 used for Table 4, and the reason is worth recording.
-    mu_2 is driven by delta-chi, a *difference* of two isothermal compressibilities
-    (Eq. 21), one of them at T_R = 970.644 K. Near the critical point those two nearly
-    cancel, so the difference loses significant figures that neither input had lost, and
-    it is then raised to nu/gamma = 0.508 to get the correlation length. Measured
-    deviation across the table: 0.000 % at 122 and at rho_c itself, and at most +0.015 %
-    at 422 kg/m3 -- far inside the correlation's own stated uncertainty here."""
+    This table is the sharpest test in the file of the non-analytic terms of IAPWS-95.
+    mu_2 is driven by delta-chi, a difference of two isothermal compressibilities
+    (Eq. 21), and (drho/dp)_T is the second delta-derivative of the Helmholtz energy --
+    so an error in those terms shows up here magnified rather than damped. It used to
+    need a tolerance of 2e-4; with the group 4 derivatives corrected the whole table
+    reproduces to 1e-8, and the tolerance below is set at 1e-6 only to leave room for
+    a different machine's rounding.
+    """
     mu = scalar(IAPWS95.mu(state(rho, T))) * 1.0e6
-    assert mu == pytest.approx(mu_ref, rel=2.0e-4)
+    assert mu == pytest.approx(mu_ref, rel=1.0e-6)
 
 
 # ---------------------------------------------------------------------------------------
@@ -173,9 +172,9 @@ CONDUCTIVITY_TABLE_4 = [
     (298.15, 1200.0, 799.038144),
 ]
 
-# The two end points of Table 5 -- the dilute limit and the dense liquid -- are reproduced
-# exactly, which localizes the defect: lambda_0 and lambda_1 are right and only the critical
-# enhancement lambda_2 in between is wrong.
+# The two end points of Table 5 -- the dilute limit and the dense liquid -- bracket the
+# critical enhancement, so checking them separately says whether a failure in the middle of
+# the isotherm belongs to lambda_0 and lambda_1 or to lambda_2.
 CONDUCTIVITY_TABLE_5_EXACT = [
     (647.35, 1.0,   51.9298924),
     (647.35, 750.0, 600.961346),
@@ -198,7 +197,8 @@ def test_iapws_conductivity_table_4(T, rho, lam_ref):
     invisible. At 298.15 K that factor is 1.17 and every row contributes. A transposed
     digit in L_22 -- 3.55772244 shipped against 3.55777244 published -- was therefore
     undetectable anywhere except here, and cost -0.094 % and -0.190 % at these two points.
-    Fixed in the coefficient file; these now reproduce exactly."""
+    Fixed in the coefficient file; these now reproduce exactly.
+    """
     lam = scalar(IAPWS95.lam(state(rho, T))) * 1.0e3     # W/m/K -> mW/m/K
     assert lam == pytest.approx(lam_ref, rel=1e-6)
 
@@ -206,15 +206,12 @@ def test_iapws_conductivity_table_4(T, rho, lam_ref):
 @pytest.mark.parametrize("T,rho,lam_ref", CONDUCTIVITY_TABLE_5_EXACT)
 def test_iapws_conductivity_table_5_end_points(T, rho, lam_ref):
     """The dilute-gas and dense-liquid ends of the 647.35 K isotherm, where the critical
-    enhancement is small. These passing is what localizes the defect to lambda_2: the
-    dilute-gas term lambda_0 and the finite-density term lambda_1 are correct.
+    enhancement is small, so these check lambda_0 and lambda_1 nearly on their own.
 
-    Not quite the same quality at the two ends, and the difference is informative.
-    At rho = 1 the enhancement is 0.00013 of 51.93 mW/m/K and the result is exact to 1e-8.
-    At rho = 750 it is 3.34 of 600.96, and the measured deviation is 2.3e-6 -- small, but
-    a trace of the same lambda_2 error that reaches several percent nearer rho_c. The
-    tolerance here is set just above that, rather than at the release's own precision,
-    and this comment records why."""
+    Measured: 3.5e-9 at rho = 1, where the enhancement is 0.00013 of 51.93 mW/m/K, and
+    2.3e-6 at rho = 750, where it is 3.34 of 600.96. The tolerance is set above the
+    larger of the two.
+    """
     lam = scalar(IAPWS95.lam(state(rho, T))) * 1.0e3
     assert lam == pytest.approx(lam_ref, rel=1e-5)
 
@@ -223,12 +220,253 @@ def test_iapws_conductivity_table_5_end_points(T, rho, lam_ref):
 def test_iapws_conductivity_table_5_critical_enhancement(T, rho, lam_ref):
     """The critical enhancement lambda_2, R15-11 Eqs. (18)-(24).
 
-    Held to 3e-3. lambda_2 inherits the delta-chi cancellation described in the viscosity
-    test above, and then divides by mu -- which carries its own critical enhancement and
-    so its own share of that error. Measured deviation: 0.000 % at rho_c, at most +0.29 %
-    at 422 kg/m3.
+    The strictest end-to-end test in the file: lambda_2 needs (drho/dp)_T, cp, cv and a
+    viscosity that carries its own critical enhancement, so it exercises three separate
+    IAPWS releases and the second derivatives of the Helmholtz energy at once. It was
+    held to 3e-3 while the group 4 delta-derivatives were wrong and reproduces to 4.6e-6
+    now; 1e-5 leaves room for a different machine's rounding.
 
-    Before the viscosity enhancement existed these points were off by up to +2.7 % and
-    returned NaN at rho_c, because Eq. (18) divides by a mu that had no enhancement."""
+    Before the viscosity enhancement existed at all these points were off by up to +2.7 %
+    and returned NaN at rho_c, because Eq. (18) divides by a mu that had no enhancement.
+    """
     lam = scalar(IAPWS95.lam(state(rho, T))) * 1.0e3
-    assert lam == pytest.approx(lam_ref, rel=3.0e-3)
+    assert lam == pytest.approx(lam_ref, rel=1.0e-5)
+
+
+# =======================================================================================
+# IAPWS-IF97, R7-97(2012).
+#
+# Every region of IF97 has a published check table, and between them they pin down the
+# basic equations, the backward equations, the two auxiliary boundary equations and the
+# saturation line. They are worth having in full because IF97 is the formulation whose
+# coefficient tables are longest and most error-prone to transcribe -- eight of the nine
+# backward-equation tables in this repository turned out to have digits transposed in
+# them, and every one of those errors was invisible to a structural test and obvious to
+# these.
+# =======================================================================================
+
+def one(x):
+    """IF97's accessors take a state dict; scalars in, scalars out."""
+    return float(np.ravel(np.asarray(x))[0])
+
+
+# ---------------------------------------------------------------------------------------
+# Region 1 basic equation, Table 5. T [K], p [MPa], then v, h, u, s, cp, w.
+# ---------------------------------------------------------------------------------------
+IF97_TABLE_5 = [
+    (300.0, 3.0,  0.100215168e-2, 0.115331273e3, 0.112324818e3,
+     0.392294792,    0.417301218e1, 0.150773921e4),
+    (300.0, 80.0, 0.971180894e-3, 0.184142828e3, 0.106448356e3,
+     0.368563852,    0.401008987e1, 0.163469054e4),
+    (500.0, 3.0,  0.120241800e-2, 0.975542239e3, 0.971934985e3,
+     0.258041912e1,  0.465580682e1, 0.124071337e4),
+]
+
+
+@pytest.mark.parametrize("T,p,v_ref,h_ref,u_ref,s_ref,cp_ref,w_ref", IF97_TABLE_5)
+def test_if97_region1_basic(T, p, v_ref, h_ref, u_ref, s_ref, cp_ref, w_ref):
+    d = if97.R1.gibbs(p, T)
+    assert one(if97.R1.v(d)) == pytest.approx(v_ref, rel=1e-8)
+    assert one(if97.R1.h(d, units='kJ')) == pytest.approx(h_ref, rel=1e-8)
+    assert one(if97.R1.u(d, units='kJ')) == pytest.approx(u_ref, rel=1e-8)
+    assert one(if97.R1.s(d, units='kJ')) == pytest.approx(s_ref, rel=1e-8)
+    assert one(if97.R1.cp(d, units='kJ')) == pytest.approx(cp_ref, rel=1e-8)
+    assert one(if97.R1.c(d)) == pytest.approx(w_ref, rel=1e-8)
+
+
+# Tables 7 and 9: region 1 backward equations. p [MPa], h or s, T [K].
+IF97_TABLE_7 = [(3.0, 500.0, 0.391798509e3), (80.0, 500.0, 0.378108626e3),
+                (80.0, 1500.0, 0.611041229e3)]
+IF97_TABLE_9 = [(3.0, 0.5, 0.307842258e3), (80.0, 0.5, 0.309979785e3),
+                (80.0, 3.0, 0.565899909e3)]
+
+
+@pytest.mark.parametrize("p,h,T_ref", IF97_TABLE_7)
+def test_if97_region1_backward_ph(p, h, T_ref):
+    assert one(if97.R1.Tph(p, h)) == pytest.approx(T_ref, rel=1e-8)
+
+
+@pytest.mark.parametrize("p,s,T_ref", IF97_TABLE_9)
+def test_if97_region1_backward_ps(p, s, T_ref):
+    assert one(if97.R1.Tps(p, s)) == pytest.approx(T_ref, rel=1e-8)
+
+
+# ---------------------------------------------------------------------------------------
+# Region 2 basic equation, Table 15.
+# ---------------------------------------------------------------------------------------
+IF97_TABLE_15 = [
+    (300.0, 0.0035, 0.394913866e2, 0.254991145e4, 0.241169160e4,
+     0.852238967e1, 0.191300162e1, 0.427920172e3),
+    (700.0, 0.0035, 0.923015898e2, 0.333568375e4, 0.301262819e4,
+     0.101749996e2, 0.208141274e1, 0.644289068e3),
+    (700.0, 30.0,   0.542946619e-2, 0.263149474e4, 0.246861076e4,
+     0.517540298e1, 0.103505092e2, 0.480386523e3),
+]
+
+
+@pytest.mark.parametrize("T,p,v_ref,h_ref,u_ref,s_ref,cp_ref,w_ref", IF97_TABLE_15)
+def test_if97_region2_basic(T, p, v_ref, h_ref, u_ref, s_ref, cp_ref, w_ref):
+    """cp and cv are the reason this test matters beyond transcription."""
+    d = if97.R2.gibbs(p, T)
+    assert one(if97.R2.v(d)) == pytest.approx(v_ref, rel=1e-8)
+    assert one(if97.R2.h(d, units='kJ')) == pytest.approx(h_ref, rel=1e-8)
+    assert one(if97.R2.u(d, units='kJ')) == pytest.approx(u_ref, rel=1e-8)
+    assert one(if97.R2.s(d, units='kJ')) == pytest.approx(s_ref, rel=1e-8)
+    assert one(if97.R2.cp(d, units='kJ')) == pytest.approx(cp_ref, rel=1e-8)
+    assert one(if97.R2.c(d)) == pytest.approx(w_ref, rel=1e-8)
+    # cv has no column in Table 15, but it must stay below cp for a single-phase fluid.
+    assert one(if97.R2.cv(d, units='kJ')) < one(if97.R2.cp(d, units='kJ'))
+
+
+# Tables 24 and 29: region 2 backward equations, three points per subregion. These also
+# check the subregion selection, since the three 2a points, three 2b points and three 2c
+# points are only reached if the p <= 4 MPa split, the B2bc boundary and the s = 5.85
+# kJ/kg-K split all resolve the way the release says.
+IF97_TABLE_24 = [
+    (0.001, 3000.0, 0.534433241e3), (3.0, 3000.0, 0.575373370e3),
+    (3.0, 4000.0, 0.101077577e4),
+    (5.0, 3500.0, 0.801299102e3), (5.0, 4000.0, 0.101531583e4),
+    (25.0, 3500.0, 0.875279054e3),
+    (40.0, 2700.0, 0.743056411e3), (60.0, 2700.0, 0.791137067e3),
+    (60.0, 3200.0, 0.882756860e3),
+]
+IF97_TABLE_29 = [
+    (0.1, 7.5, 0.399517097e3), (0.1, 8.0, 0.514127081e3), (2.5, 8.0, 0.103984917e4),
+    (8.0, 6.0, 0.600484040e3), (8.0, 7.5, 0.106495556e4), (90.0, 6.0, 0.103801126e4),
+    (20.0, 5.75, 0.697992849e3), (80.0, 5.25, 0.854011484e3),
+]
+
+
+@pytest.mark.parametrize("p,h,T_ref", IF97_TABLE_24)
+def test_if97_region2_backward_ph(p, h, T_ref):
+    assert one(if97.R2.Tph(p, h)) == pytest.approx(T_ref, rel=1e-8)
+
+
+@pytest.mark.parametrize("p,s,T_ref", IF97_TABLE_29)
+def test_if97_region2_backward_ps(p, s, T_ref):
+    assert one(if97.R2.Tps(p, s)) == pytest.approx(T_ref, rel=1e-8)
+
+
+def test_if97_b2bc_boundary():
+    """Sec. 6.3.1's verification point for the B2bc-equation, p = 100 MPa -> h = 3516.0043230."""
+    assert one(if97.R2.h_B2bc(100.0)) == pytest.approx(3516.0043230, rel=1e-9)
+
+
+def test_if97_b23_boundary():
+    """Sec. 4's verification point: the B23 line passes through T = 623.15 K, p = 16.5291643
+    MPa, and Eqs. (5) and (6) must both reproduce it.
+    """
+    assert one(if97.B23.p(623.15)) == pytest.approx(16.5291643, rel=1e-8)
+    assert one(if97.B23.T(16.5291643)) == pytest.approx(623.15, rel=1e-8)
+
+
+# --------------------------------------------------------------------------------------
+# - Region 3 basic equation, Table 33.
+IF97_TABLE_33 = [
+    (650.0, 500.0, 0.255837018e2, 0.186343019e4, 0.181226279e4,
+     0.405427273e1, 0.138935717e2, 0.502005554e3),
+    (650.0, 200.0, 0.222930643e2, 0.237512401e4, 0.226365868e4,
+     0.485438792e1, 0.446579342e2, 0.383444594e3),
+    (750.0, 500.0, 0.783095639e2, 0.225868845e4, 0.210206932e4,
+     0.446971906e1, 0.634165359e1, 0.760696041e3),
+]
+
+
+@pytest.mark.parametrize("T,rho,p_ref,h_ref,u_ref,s_ref,cp_ref,w_ref", IF97_TABLE_33)
+def test_if97_region3_basic(T, rho, p_ref, h_ref, u_ref, s_ref, cp_ref, w_ref):
+    d = if97.R3.helmholtz(rho, T)
+    assert one(if97.R3.p(d, units='MPa')) == pytest.approx(p_ref, rel=1e-8)
+    assert one(if97.R3.h(d, units='kJ')) == pytest.approx(h_ref, rel=1e-8)
+    assert one(if97.R3.u(d, units='kJ')) == pytest.approx(u_ref, rel=1e-8)
+    assert one(if97.R3.s(d, units='kJ')) == pytest.approx(s_ref, rel=1e-8)
+    assert one(if97.R3.cp(d, units='kJ')) == pytest.approx(cp_ref, rel=1e-8)
+    assert one(if97.R3.c(d)) == pytest.approx(w_ref, rel=1e-8)
+
+
+@pytest.mark.parametrize("T,rho,p_ref,h_ref,u_ref,s_ref,cp_ref,w_ref", IF97_TABLE_33)
+def test_if97_region3_density_solve(T, rho, p_ref, h_ref, u_ref, s_ref, cp_ref, w_ref):
+    """rho_pT inverts Eq. (28) for the density the table started from.
+
+    Held to 1e-6 rather than the solver's own precision, and the reason is the check
+    table rather than the solver: the published pressures carry nine figures, and at
+    (650 K, 200 kg/m^3) the isotherm is so flat that a 1e-9 relative perturbation in p
+    moves the density by 1.6e-8. That sensitivity is what region 3 exists to describe.
+    """
+    assert one(if97.R3.rho_pT(p_ref, T)) == pytest.approx(rho, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------------------
+# Region 4, the saturation line, Sec. 8's verification points.
+# ---------------------------------------------------------------------------------------
+IF97_SAT_P = [(300.0, 0.353658941e-2), (500.0, 0.263889776e1), (600.0, 0.123443146e2)]
+IF97_SAT_T = [(0.1, 0.372755919e3), (1.0, 0.453035632e3), (10.0, 0.584149488e3)]
+
+
+@pytest.mark.parametrize("T,p_ref", IF97_SAT_P)
+def test_if97_region4_psat(T, p_ref):
+    assert one(if97.R4.p(T)) == pytest.approx(p_ref, rel=1e-8)
+
+
+@pytest.mark.parametrize("p,T_ref", IF97_SAT_T)
+def test_if97_region4_tsat(p, T_ref):
+    assert one(if97.R4.T(p)) == pytest.approx(T_ref, rel=1e-8)
+
+
+# ---------------------------------------------------------------------------------------
+# Region 5 basic equation, Table 42.
+# ---------------------------------------------------------------------------------------
+IF97_TABLE_42 = [
+    (1500.0, 0.5,  0.138455090e1,  0.521976855e4, 0.452749310e4,
+     0.965408875e1, 0.261609445e1, 0.917068690e3),
+    (1500.0, 30.0, 0.230761299e-1, 0.516723514e4, 0.447495124e4,
+     0.772970133e1, 0.272724317e1, 0.928548002e3),
+    (2000.0, 30.0, 0.311385219e-1, 0.657122604e4, 0.563707038e4,
+     0.853640523e1, 0.288569882e1, 0.106736948e4),
+]
+
+
+@pytest.mark.parametrize("T,p,v_ref,h_ref,u_ref,s_ref,cp_ref,w_ref", IF97_TABLE_42)
+def test_if97_region5_basic(T, p, v_ref, h_ref, u_ref, s_ref, cp_ref, w_ref):
+    d = if97.R5.gibbs(p, T)
+    assert one(if97.R5.v(d)) == pytest.approx(v_ref, rel=1e-8)
+    assert one(if97.R5.h(d, units='kJ')) == pytest.approx(h_ref, rel=1e-8)
+    assert one(if97.R5.u(d, units='kJ')) == pytest.approx(u_ref, rel=1e-8)
+    assert one(if97.R5.s(d, units='kJ')) == pytest.approx(s_ref, rel=1e-8)
+    assert one(if97.R5.cp(d, units='kJ')) == pytest.approx(cp_ref, rel=1e-8)
+    assert one(if97.R5.c(d)) == pytest.approx(w_ref, rel=1e-8)
+
+
+def test_if97_region_selector():
+    """region() against the corners of Fig. 1, one state known to belong to each region.
+
+    The last two entries are the ones worth having: a state above 100 MPa and one above
+    2273.15 K are outside the formulation entirely, and must be reported as such rather
+    than handed to whichever equation is nearest.
+    """
+    p = np.array([3.0, 0.0035, 25.0, 0.5, 20.0, 40.0, 150.0, 10.0])
+    T = np.array([300.0, 300.0, 650.0, 1500.0, 700.0, 700.0, 500.0, 2500.0])
+    expect = np.array([1, 2, 3, 5, 2, 3, 0, 0])
+    assert np.array_equal(if97.region(p, T), expect)
+
+
+def test_if97_agrees_with_iapws95_away_from_boundaries():
+    """IF97 is a fit of IAPWS-95, so the two must agree to within IF97's stated tolerance.
+
+    This is the one test here that is not against a published number, and it earns its
+    place by checking something the tables cannot: that the two modules use compatible
+    unit conventions and state-dict layouts. A factor-of-1000 slip in either would pass
+    every check-value test in its own module and fail here.
+
+    The tolerances are set from what was measured, not from a claimed consistency figure:
+    across these three region 1 states the density agrees to 3e-5 relative and the
+    enthalpy to 0.20 kJ/kg, the larger deviation being at 550 K where region 1 is nearest
+    its upper temperature limit.
+    """
+    T = np.array([320.0, 400.0, 550.0])           # region 1, comfortably subcooled
+    p = np.full(3, 15.0)
+    rho95 = IAPWS95.rho_Tp(T, p)
+    h95 = IAPWS95.h(IAPWS95.helmholtz(rho95, T), units='kJ')
+
+    d97 = if97.R1.gibbs(p, T)
+    assert if97.R1.rho(d97) == pytest.approx(rho95, rel=1e-4)
+    assert if97.R1.h(d97, units='kJ') == pytest.approx(h95, abs=0.3)

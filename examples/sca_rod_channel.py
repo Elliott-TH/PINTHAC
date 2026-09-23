@@ -1,27 +1,6 @@
-"""
-Example 2: a single-channel fuel-rod axial solve.
+"""Single-channel rod example at supercritical-water conditions.
 
-The brief for this example asked for "a PWR-conditions single channel -- or, if
-two-phase is unavailable, a subcritical-water rod at conditions the code does support,
-and say why in a comment."
-
-Two-phase IS unavailable: pinthac.sca.run's own module docstring states it plainly --
-neither pinthac/sca/rod.py nor pinthac/sca/annular.py has onset-of-nucleate-boiling,
-quality/void-fraction tracking, or subcooled-boiling bookkeeping, and
-pinthac.sca.run.run_channel raises NotImplementedError if asked for a two-phase htc
-selection (see HTC_MODELS/_TWO_PHASE_HTC there) rather than pretending to run a boiling
-channel that does not exist. A real PWR hot-leg condition (~15.5 MPa, ~590 K, subcooled
-nucleate boiling near the hottest rods) is therefore not something this library can
-solve end to end.
-
-What IS implemented and validated is the single-phase supercritical-water rod solver
-(pinthac/sca/rod.py), fit to run at conditions matching the Swenson/Chen correlations it
-actually calls -- 25 MPa, above the critical pressure, which is the SCWR regime this
-codebase's annular DeepONet work targets (docs/DECISIONS.md, "Scope: annular water
-SCA"). So this example runs THAT channel -- the rod geometry, not the annular one (the
-annular example is next) -- at the conditions its own __main__ block is checked against,
-not PWR conditions the solver was never fit for.
-
+Two-phase channel balances are not implemented.
 Run: python examples/sca_rod_channel.py
 """
 import time

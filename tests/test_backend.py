@@ -1,5 +1,4 @@
-"""
-Smoke tests for the shared foundation: backend dispatch, range checking, and the Monte
+"""Smoke tests for the shared foundation: backend dispatch, range checking, and the Monte
 Carlo perturbation.
 
 These three modules are what everything else stands on, so they are tested first and
@@ -33,8 +32,6 @@ def test_lib_picks_numpy_for_scalars_and_arrays():
 
 
 def test_lib_picks_torch_if_any_input_is_a_tensor():
-    # The mixed case is the one that matters: a tensor hiding among plain floats is
-    # exactly how the pre-cleanup code silently fell back to numpy.
     assert backend.lib(grad_tensor()) is torch
     assert backend.lib(FLOAT, ARRAY, grad_tensor()) is torch
     assert backend.is_torch(FLOAT, grad_tensor()) is True

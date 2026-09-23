@@ -1,19 +1,4 @@
-"""
-Surrogate (DeepONet) vs. iterative FVM solver wall-clock time, as a function of batch
-size (docs/brief/PHASE67_BRIEF.md figure 5).
-
-docs/brief/PHASE67_BRIEF.md's own "already measured" numbers on CPU show the speedup
-collapsing with batch size --
-    N=100    surrogate  27.3 ms   FVM 1415.1 ms   51.8x
-    N=1000   surrogate 426.6 ms   FVM 2343.3 ms    5.5x
--- because pinthac/sca/rod.py's run_SCA_batch is itself vectorized over the batch (one
-gpu_solve() per axial node handles the whole batch in one shot), so its wall-clock time
-does not scale linearly with N the way a per-case Python loop would. The surrogate's
-forward pass is even more strongly batched (one matrix multiply covers the whole batch),
-so the two curves converge as N grows rather than staying at a fixed ratio. This script
-re-measures the same comparison on the RX 7800 XT GPU across a sweep of batch sizes and
-plots speedup **against batch size**, specifically so nobody can read a single headline
-number off this figure the way the CPU numbers above would invite.
+"""Surrogate (DeepONet) vs. iterative FVM solver wall-clock time, as a function of batch
 
 Both sides run through the same shapes/inputs the training-set generator
 (pinthac/ml/datagen.py) used, sampled fresh each batch size (LHS over the same
@@ -54,8 +39,7 @@ N_REPEAT = 3       # repeats per batch size; minimum wall-clock kept
 
 
 def sample_batch(B, seed):
-    """
-    Fresh random (geometry, LHGR shape) draws from the same box
+    """Fresh random (geometry, LHGR shape) draws from the same box
     pinthac/ml/datagen.py samples for training, independent of the held-out dataset --
     see this script's module docstring for why that's fine for a timing comparison.
 
@@ -158,12 +142,6 @@ def main():
     # FVM curve already sits at small N. The bottom-right stays empty at every batch size.
     ax_t.legend(frameon=False, fontsize=8, loc="lower right")
 
-    # No per-point value labels: the curve is steep enough that each label sits on the
-    # line rather than beside it, and the y axis already reads the value off directly.
-    # Log y as well as log x: the speedup spans three decades, from ~2000x on a batch of
-    # ten rods down to under 2x at twenty thousand, and a linear axis flattens everything
-    # below the first point into the baseline. The decline is the whole content of this
-    # panel, so it has to stay legible across its full range.
     ax_s.loglog(ns, speedups, "o-", color=style.ACCENT, lw=1.8, ms=6)
     ax_s.axhline(1.0, color=style.MUTED, lw=0.9, ls=":", alpha=0.7)
     ax_s.text(ns[0], 1.15, "break-even", color=style.MUTED, fontsize=7.5, va="bottom")

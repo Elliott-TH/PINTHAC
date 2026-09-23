@@ -1,5 +1,4 @@
-"""
-Example 4: the rod DeepONet surrogate vs. the ground-truth FVM solver.
+"""Example 4: the rod DeepONet surrogate vs. the ground-truth FVM solver.
 
 pinthac.ml.deeponet_predict.predict_rod() is a trained neural surrogate for
 pinthac.sca.rod.run_SCA_batch() -- same inputs (rod geometry, inlet temperature, an
@@ -18,10 +17,6 @@ docs/FIGURE_CAPTIONS.md for the full-dataset numbers, 2,000 held-out runs):
      break-even as the batch grows, because run_SCA_batch is itself already vectorized
      over the batch (see figures/sca_inference_speed.py's docstring).
 
-Needs data/sca_rod_deeponet_dataset.npz and data/sca_rod_deeponet_best.pth (both
-present in this repository; see docs/reference and docs/FINAL_REPORT.md for how they
-were produced).
-
 Run: python -m examples.deeponet_surrogate   (run from the repository root)
 """
 import time
@@ -36,7 +31,8 @@ from pinthac.sca.rod import run_SCA_batch, build_scw_table, device as rod_device
 
 def held_out_run_ids(n_runs, n_show=3):
     """Same split pinthac/ml/deeponet.py trains against -- see that module and
-    deeponet_predict.py's _load()."""
+    deeponet_predict.py's _load().
+    """
     rng = np.random.default_rng(0)
     run_perm = rng.permutation(n_runs)
     n_val_runs = max(1, int(0.15 * n_runs))
@@ -74,7 +70,8 @@ def sample_batch(B, seed):
     """Fresh random (geometry, LHGR shape) draws from the same box
     pinthac/ml/datagen.py samples for training -- see figures/sca_inference_speed.py's
     docstring for why that is fine for a timing comparison (nothing here checks
-    accuracy, only wall-clock time)."""
+    accuracy, only wall-clock time).
+    """
     from pinthac.ml.datagen import PARAM_BOUNDS, SCALAR_NAMES, N_SHAPE_MODES, build_shapes, L_FIXED, N_SENSORS
 
     rng = np.random.default_rng(seed)

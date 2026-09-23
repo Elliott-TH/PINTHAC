@@ -12,11 +12,6 @@ requires-python = ">=3.10"
 authors = [{ name = "Elliott Hirko", email = "elliott.hirko@ufl.edu" }]
 keywords = ["thermal-hydraulics", "nuclear", "IAPWS", "supercritical-water", "deeponet"]
 
-# numpy is the only hard requirement: pinthac.backend degrades to numpy-only when torch
-# is absent, and every property and correlation model still runs. scipy, torch, pandas
-# and matplotlib are needed by specific layers rather than by the whole library, but
-# every realistic use of this package needs at least the solvers, so they are listed
-# here rather than being made optional and then failing at the first import.
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
@@ -27,18 +22,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The IAPWS-95 GPU benchmark compares against this reference CPU implementation.
-# Nothing in the library itself imports it.
 benchmark = ["iapws>=1.5"]
-# SOAP, used by the PINN and DeepONet training loops.
 ml = ["pytorch_optimizer>=3.0"]
 test = ["pytest>=7.0"]
 
 [tool.setuptools.packages.find]
-include = ["pinthac*"]
+include = ["pinthac*", "torchsolve"]
 
 [tool.setuptools.package-data]
-# The IAPWS-97 coefficient tables are published data that ships with the code.
 "pinthac.properties" = ["iapws_data/*.txt"]
 
 [tool.pytest.ini_options]

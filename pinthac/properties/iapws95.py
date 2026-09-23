@@ -1,252 +1,267 @@
-import functools
-import numpy as np
+"""IAPWS-95: the scientific formulation for the thermodynamic properties of ordinary water,
+as a single differentiable Helmholtz free-energy surface that runs batched on the GPU.
+
+Why this module is here:
+    IAPWS-95 is the reference equation of state for water -- one Helmholtz energy
+    phi(delta, tau) covering liquid, vapor and the whole supercritical region, from which
+    every thermodynamic property follows by differentiation. That makes it the right
+    thing to put underneath a solver: the properties are thermodynamically consistent
+    with each other by construction, and because every property is an analytic derivative
+    of one function, the whole surface is differentiable with respect to its inputs. IF97
+    (properties/iapws97.py) is faster for a plain lookup, but it is a piecewise fit with
+    visible seams at the region boundaries, and a solver that takes derivatives will feel
+    them.
+
+    The reason it is written in torch rather than NumPy is throughput. A supercritical
+    channel solve evaluates properties at every axial node at every iteration, and a
+    surrogate trained on this evaluates them a million points at a time. The whole
+    formulation here is array arithmetic against stacked coefficient tables, so a batch
+    of a million states costs one pass.
+
+How it is used:
+    Every property is read off one state evaluation, so the expensive part happens once:
+
+        d = IAPWS95.helmholtz(rho, T)     # rho [kg/m^3], T [K]
+        IAPWS95.p(d)                       # MPa
+        IAPWS95.h(d)                       # J/kg
+        IAPWS95.cp(d)                      # J/kg-K
+
+    When the state is given as (T, p) rather than (rho, T), invert first with rho_Tp();
+    when it is given as (h, p), with T_hp(). Both are differentiable in every argument --
+    see rho_Tp for how, and why it matters.
+
+    Transport properties are separate IAPWS releases and live in properties/iapws_transport.py;
+    mu() and lam() below are thin wrappers that hand that module the thermodynamic
+    derivatives it needs and that only IAPWS-95 can supply.
+
+Reference:
+    IAPWS R6-95(2018), "Revised Release on the IAPWS Formulation 1995 for the
+    Thermodynamic Properties of Ordinary Water Substance for General and Scientific Use"
+    (IAPWS95-2018.pdf). Wagner, W. and Pruss, A., J. Phys. Chem. Ref. Data
+    31, 387 (2002) for the ancillary equations. Equation and table numbers in the
+    docstrings below refer to the release.
+"""
 import torch
-from pinthac.properties import iapws97 as w97
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# No print here. CLAUDE.md section 5 rule 6 forbids side effects at import time, and a
-# library that announces itself on import is one whose output a caller cannot control:
-# it lands in the middle of a user's own stdout, in every subprocess, and in the middle
-# of every example's pasted output. `device` is a module attribute -- anything that wants
-# to know which one was chosen can read it.
+
+from pinthac.properties import iapws_backend as w
+from pinthac.properties import iapws_transport as transport
+
+device = w.device
+accelerator = w.accelerator
 
 # ====================
 # Critical Properties
 # ====================
 
-Tc = 647.096       # Critical temperature [K]
-rhoc = 322.0        # Critical density [kg m^-3]
-R = 0.46151805       # Specific gas constant [kJ kg^-1 K^-1]
+Tc = 647.096         # Critical temperature [K], Eq. (1)
+rhoc = 322.0         # Critical density [kg m^-3], Eq. (2)
+R = 0.46151805       # Specific gas constant [kJ kg^-1 K^-1], Eq. (3)
 pc = 22.064          # Critical pressure [MPa]
 Tt = 273.16          # Triple-point temperature [K]
 
 
-
 class IAPWS95:
     # =========================================
-    # Table 1: Ideal-Gas Part Coefficients
+    # Table 1: ideal-gas part coefficients
+    # (n_i^o, gamma_i^o), Eq. (5)
     # =========================================
-    n0 = torch.tensor([
-        -8.32044648374970, 6.68321052759320, 3.00632,
-        0.012436, 0.97315, 1.27950, 0.96956, 0.24873
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    gamma0 = torch.tensor([
-        0.0, 0.0, 0.0,
-        1.28728967, 3.53734222, 7.74073708, 9.24437796, 27.5075105
-    ], dtype=torch.float64, device=device).unsqueeze(1)
+    C0 = w.stack(
+        [-8.32044648374970, 6.68321052759320, 3.00632,
+         0.012436, 0.97315, 1.27950, 0.96956, 0.24873],
+        [0.0, 0.0, 0.0,
+         1.28728967, 3.53734222, 7.74073708, 9.24437796, 27.5075105])
 
     # =========================================
-    # Table 2: Residual Part Coefficients
-    # (verified against IAPWS R6-95(2018) Table 2)
+    # Table 2: residual part coefficients,
+    # Eq. (6), verified against R6-95(2018).
+    # The four groups are stacked one table
+    # each so that a formula takes one trip to
+    # the caller's device, and so that the
+    # columns of a group cannot drift apart.
     # =========================================
-    n1 = torch.tensor([
-        0.012533547935523, 7.8957634722828, -8.7803203303561, 0.31802509345418, -0.26145533859358, -0.0078199751687981, 0.0088089493102134
-    ], dtype=torch.float64, device=device).unsqueeze(1)
 
-    d1 = torch.tensor([
-        1.0, 1.0, 1.0, 2.0, 2.0, 3.0, 4.0
-    ], dtype=torch.float64, device=device).unsqueeze(1)
+    # ---- Group 1, terms 1-7: n, d, t ----
+    C1 = w.stack(
+        [0.012533547935523, 7.8957634722828, -8.7803203303561, 0.31802509345418,
+         -0.26145533859358, -0.0078199751687981, 0.0088089493102134],
+        [1.0, 1.0, 1.0, 2.0, 2.0, 3.0, 4.0],
+        [-0.5, 0.875, 1.0, 0.5, 0.75, 0.375, 1.0])
 
-    t1 = torch.tensor([
-        -0.5, 0.875, 1.0, 0.5, 0.75, 0.375, 1.0
-    ], dtype=torch.float64, device=device).unsqueeze(1)
+    # ---- Group 2, terms 8-51: n, d, t, c ----
+    C2 = w.stack(
+        [-0.66856572307965, 0.20433810950965, -6.6212605039687e-05, -0.19232721156002,
+         -0.25709043003438, 0.16074868486251, -0.040092828925807, 3.9343422603254e-07,
+         -7.5941377088144e-06, 0.00056250979351888, -1.5608652257135e-05, 1.1537996422951e-09,
+         3.6582165144204e-07, -1.3251180074668e-12, -6.2639586912454e-10, -0.10793600908932,
+         0.017611491008752, 0.22132295167546, -0.40247669763528, 0.58083399985759,
+         0.0049969146990806, -0.031358700712549, -0.74315929710341, 0.4780732991548,
+         0.020527940895948, -0.13636435110343, 0.014180634400617, 0.0083326504880713,
+         -0.029052336009585, 0.038615085574206, -0.020393486513704, -0.0016554050063734,
+         0.0019955571979541, 0.00015870308324157, -1.638856834253e-05, 0.043613615723811,
+         0.034994005463765, -0.076788197844621, 0.022446277332006, -6.2689710414685e-05,
+         -5.5711118565645e-10, -0.19905718354408, 0.31777497330738, -0.11841182425981],
+        [1.0, 1.0, 1.0, 2.0, 2.0, 3.0, 4.0, 4.0, 5.0, 7.0, 9.0, 10.0, 11.0, 13.0, 15.0,
+         1.0, 2.0, 2.0, 2.0, 3.0, 4.0, 4.0, 4.0, 5.0, 6.0, 6.0, 7.0, 9.0, 9.0, 9.0,
+         9.0, 9.0, 10.0, 10.0, 12.0, 3.0, 4.0, 4.0, 5.0, 14.0, 3.0, 6.0, 6.0, 6.0],
+        [4.0, 6.0, 12.0, 1.0, 5.0, 4.0, 2.0, 13.0, 9.0, 3.0, 4.0, 11.0, 4.0, 13.0, 1.0,
+         7.0, 1.0, 9.0, 10.0, 10.0, 3.0, 7.0, 10.0, 10.0, 6.0, 10.0, 10.0, 1.0, 2.0, 3.0,
+         4.0, 8.0, 6.0, 9.0, 8.0, 16.0, 22.0, 23.0, 23.0, 10.0, 50.0, 44.0, 46.0, 50.0],
+        [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+         2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0,
+         2.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0, 4.0, 6.0, 6.0, 6.0, 6.0])
 
+    # ---- Group 3, terms 52-54: n, d, t, alpha, beta, gamma, epsilon ----
+    C3 = w.stack(
+        [-31.306260323435, 31.546140237781, -2521.3154341695],
+        [3.0, 3.0, 3.0],
+        [0.0, 1.0, 4.0],
+        [20.0, 20.0, 20.0],
+        [150.0, 150.0, 250.0],
+        [1.21, 1.21, 1.25],
+        [1.0, 1.0, 1.0])
 
+    # ---- Group 4, terms 55-56: n, a, b, B, C, D, A, beta ----
+    C4 = w.stack(
+        [-0.14874640856724, 0.31806110878444],
+        [3.5, 3.5],
+        [0.85, 0.95],
+        [0.2, 0.2],
+        [28.0, 32.0],
+        [700.0, 800.0],
+        [0.32, 0.32],
+        [0.3, 0.3])
 
-    n2 = torch.tensor([
-        -0.66856572307965, 0.20433810950965, -6.6212605039687e-05, -0.19232721156002,
-        -0.25709043003438, 0.16074868486251, -0.040092828925807, 3.9343422603254e-07,
-        -7.5941377088144e-06, 0.00056250979351888, -1.5608652257135e-05, 1.1537996422951e-09,
-        3.6582165144204e-07, -1.3251180074668e-12, -6.2639586912454e-10, -0.10793600908932,
-        0.017611491008752, 0.22132295167546, -0.40247669763528, 0.58083399985759,
-        0.0049969146990806, -0.031358700712549, -0.74315929710341, 0.4780732991548,
-        0.020527940895948, -0.13636435110343, 0.014180634400617, 0.0083326504880713,
-        -0.029052336009585, 0.038615085574206, -0.020393486513704, -0.0016554050063734,
-        0.0019955571979541, 0.00015870308324157, -1.638856834253e-05, 0.043613615723811,
-        0.034994005463765, -0.076788197844621, 0.022446277332006, -6.2689710414685e-05,
-        -5.5711118565645e-10, -0.19905718354408, 0.31777497330738, -0.11841182425981
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    d2 = torch.tensor([
-        1.0, 1.0, 1.0, 2.0, 2.0, 3.0, 4.0, 4.0, 5.0, 7.0, 9.0, 10.0, 11.0, 13.0, 15.0,
-        1.0, 2.0, 2.0, 2.0, 3.0, 4.0, 4.0, 4.0, 5.0, 6.0, 6.0, 7.0, 9.0, 9.0, 9.0,
-        9.0, 9.0, 10.0, 10.0, 12.0, 3.0, 4.0, 4.0, 5.0, 14.0, 3.0, 6.0, 6.0, 6.0
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    t2 = torch.tensor([
-        4.0, 6.0, 12.0, 1.0, 5.0, 4.0, 2.0, 13.0, 9.0, 3.0, 4.0, 11.0, 4.0, 13.0, 1.0,
-        7.0, 1.0, 9.0, 10.0, 10.0, 3.0, 7.0, 10.0, 10.0, 6.0, 10.0, 10.0, 1.0, 2.0, 3.0,
-        4.0, 8.0, 6.0, 9.0, 8.0, 16.0, 22.0, 23.0, 23.0, 10.0, 50.0, 44.0, 46.0, 50.0
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    c2 = torch.tensor([
-        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-        2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0,
-        2.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0, 4.0, 6.0, 6.0, 6.0, 6.0
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-
-
-    n3 = torch.tensor([
-        -31.306260323435, 31.546140237781, -2521.3154341695
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    d3 = torch.tensor([
-        3.0, 3.0, 3.0
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    t3 = torch.tensor([
-        0.0, 1.0, 4.0
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    alpha3 = torch.tensor([
-        20.0, 20.0, 20.0
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    beta3 = torch.tensor([
-        150.0, 150.0, 250.0
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    gamma3 = torch.tensor([
-        1.21, 1.21, 1.25
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    epsilon3 = torch.tensor([
-        1.0, 1.0, 1.0
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-
-
-    n4 = torch.tensor([
-        -0.14874640856724, 0.31806110878444
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    a4 = torch.tensor([
-        3.5, 3.5
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    b4 = torch.tensor([
-        0.85, 0.95
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    B4 = torch.tensor([
-        0.2, 0.2
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    C4 = torch.tensor([
-        28.0, 32.0
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    D4 = torch.tensor([
-        700.0, 800.0
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    A4 = torch.tensor([
-        0.32, 0.32
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-
-    beta4 = torch.tensor([
-        0.3, 0.3
-    ], dtype=torch.float64, device=device).unsqueeze(1)
-    # =========================================
-    # Ideal-gas part: Eq. (5), Table 4
-    # =========================================
     @classmethod
-    def Phi0(cls, rho, T):
-        """phi^o(delta, tau) and its derivatives."""
-        #rho = rho.unsqueeze(0)
-        #T = T.unsqueeze(0)
-        delta = rho / rhoc
-        tau = Tc / T
+    def Phi0(cls, delta, tau):
+        """Ideal-gas part of the dimensionless Helmholtz energy and its derivatives, Eq. (5).
 
-        n, gam = cls.n0, cls.gamma0
-        n1_, n2_, n3_ = n[0], n[1], n[2]      # n1^o, n2^o, n3^o
-        ng, gamg = n[3:], gam[3:]             # terms 4-8
+        Formulation:
+            phi^o = ln(delta) + n1 + n2*tau + n3*ln(tau)
+                    + sum_{i=4..8} n_i * ln(1 - exp(-gamma_i*tau))
+            with the derivatives of Table 4. phi^o has no mixed derivative: it is a
+            function of delta plus a function of tau, so phi^o_deltatau is identically
+            zero and is returned as such.
 
-        phi = (torch.log(delta) + n1_ + n2_*tau + n3_*torch.log(tau)
-               + (ng * torch.log(1 - torch.exp(-gamg*tau))).sum(dim=0))
+        Valid range:
+            All delta > 0 and tau > 0.
 
-        phi_d = 1/delta
-        phi_dd = -1/delta**2
+        Uncertainty:
+            Not applicable on its own; see helmholtz().
 
-        phi_t = (n2_ + n3_/tau
-                 + (ng * gamg * ((1 - torch.exp(-gamg*tau))**-1 - 1)).sum(dim=0))
-        phi_tt = (-n3_/tau**2
-                  - (ng * gamg**2 * torch.exp(-gamg*tau)
-                     * (1 - torch.exp(-gamg*tau))**-2).sum(dim=0))
+        Reference:
+            IAPWS R6-95(2018) Eq. (5), Table 1 (coefficients), Table 4 (derivatives).
+
+        Inputs (1-D torch tensors, same shape):
+            delta : reduced density rho/rho_c, dimensionless
+            tau   : inverse reduced temperature T_c/T, dimensionless
+
+        Returns:
+            phi, phi_d, phi_dd, phi_t, phi_tt, phi_dt -- each a 1-D tensor
+        """
+        n, gam = w.on(cls.C0, delta)
+
+        n1, n2, n3 = n[0], n[1], n[2]          # n1^o, n2^o, n3^o
+        ng, gamg = n[3:], gam[3:]              # the five Einstein terms, i = 4..8
+
+        phi = (torch.log(delta) + n1 + n2 * tau + n3 * torch.log(tau)
+               + (ng * torch.log(1.0 - torch.exp(-gamg * tau))).sum(dim=0))
+
+        phi_d = 1.0 / delta
+        phi_dd = -1.0 / delta**2
+
+        phi_t = (n2 + n3 / tau
+                 + (ng * gamg * ((1.0 - torch.exp(-gamg * tau))**-1 - 1.0)).sum(dim=0))
+        phi_tt = (-n3 / tau**2
+                  - (ng * gamg**2 * torch.exp(-gamg * tau)
+                     * (1.0 - torch.exp(-gamg * tau))**-2).sum(dim=0))
 
         phi_dt = torch.zeros_like(phi)
 
         return phi, phi_d, phi_dd, phi_t, phi_tt, phi_dt
 
-    # =========================================
-    # Residual part: Eq. (6), Table 5
-    # =========================================
     @classmethod
-    def Phir(cls, rho, T):
-        """phi^r(delta, tau) and its derivatives."""
-        #rho = rho.unsqueeze(0)
-        #T = T.unsqueeze(0)
-        delta = rho / rhoc
-        tau = Tc / T
+    def Phir(cls, delta, tau):
+        """Residual part of the dimensionless Helmholtz energy and its derivatives, Eq. (6).
 
-        n1_, d1_, t1_ = cls.n1, cls.d1, cls.t1
-        n2_, d2_, t2_, c2_ = cls.n2, cls.d2, cls.t2, cls.c2
-        n3_, d3_, t3_, alpha3_, beta3_, gamma3_, epsilon3_ = (
-            cls.n3, cls.d3, cls.t3, cls.alpha3, cls.beta3, cls.gamma3, cls.epsilon3)
-        n4_, a4_, b4_, B4_, C4_, D4_, A4_, beta4_ = (
-            cls.n4, cls.a4, cls.b4, cls.B4, cls.C4, cls.D4, cls.A4, cls.beta4)
+        Formulation:
+            phi^r = sum_1 n*delta^d*tau^t                                   (group 1)
+                  + sum_2 n*delta^d*tau^t*exp(-delta^c)                     (group 2)
+                  + sum_3 n*delta^d*tau^t*exp(-alpha(delta-eps)^2 - beta(tau-gamma)^2)
+                  + sum_4 n*Delta^b*delta*psi                               (group 4)
+            with the derivatives of Table 5.
+
+        Valid range:
+            All delta > 0 and tau > 0; see helmholtz() for the range over which the
+            release itself is valid.
+
+        Uncertainty:
+            Not applicable on its own; see helmholtz().
+
+        Reference:
+            IAPWS R6-95(2018) Eq. (6), Table 2 (coefficients), Table 5 (derivatives).
+
+        Inputs (1-D torch tensors, same shape):
+            delta : reduced density rho/rho_c, dimensionless
+            tau   : inverse reduced temperature T_c/T, dimensionless
+
+        Returns:
+            phi, phi_d, phi_dd, phi_t, phi_tt, phi_dt -- each a 1-D tensor
+        """
+        n1, d1, t1 = w.on(cls.C1, delta)
+        n2, d2, t2, c2 = w.on(cls.C2, delta)
+        n3, d3, t3, alpha3, beta3, gamma3, epsilon3 = w.on(cls.C3, delta)
+        n4, a4, b4, B4, C4, D4, A4, beta4 = w.on(cls.C4, delta)
 
         # ---- Group 1: simple polynomial terms ----
-        phi_1 = (n1_ * delta**d1_ * tau**t1_).sum(dim=0)
-        phi_1_d = (n1_ * d1_ * delta**(d1_-1) * tau**t1_).sum(dim=0)
-        phi_1_dd = (n1_ * d1_ * (d1_-1) * delta**(d1_-2) * tau**t1_).sum(dim=0)
-        phi_1_t = (n1_ * t1_ * delta**d1_ * tau**(t1_-1)).sum(dim=0)
-        phi_1_tt = (n1_ * t1_ * (t1_-1) * delta**d1_ * tau**(t1_-2)).sum(dim=0)
-        phi_1_dt = (n1_ * d1_ * t1_ * delta**(d1_-1) * tau**(t1_-1)).sum(dim=0)
+        phi_1 = (n1 * delta**d1 * tau**t1).sum(dim=0)
+        phi_1_d = (n1 * d1 * delta**(d1 - 1) * tau**t1).sum(dim=0)
+        phi_1_dd = (n1 * d1 * (d1 - 1) * delta**(d1 - 2) * tau**t1).sum(dim=0)
+        phi_1_t = (n1 * t1 * delta**d1 * tau**(t1 - 1)).sum(dim=0)
+        phi_1_tt = (n1 * t1 * (t1 - 1) * delta**d1 * tau**(t1 - 2)).sum(dim=0)
+        phi_1_dt = (n1 * d1 * t1 * delta**(d1 - 1) * tau**(t1 - 1)).sum(dim=0)
 
         # ---- Group 2: exponential terms, exp(-delta^c) ----
-        E2 = torch.exp(-delta**c2_)
-        phi_2 = (n2_ * delta**d2_ * tau**t2_ * E2).sum(dim=0)
-        phi_2_d = (n2_ * E2 * delta**(d2_-1) * tau**t2_
-                   * (d2_ - c2_*delta**c2_)).sum(dim=0)
-        phi_2_dd = (n2_ * E2 * delta**(d2_-2) * tau**t2_
-                    * ((d2_ - c2_*delta**c2_) * (d2_ - 1 - c2_*delta**c2_)
-                       - c2_**2 * delta**c2_)).sum(dim=0)
-        phi_2_t = (n2_ * t2_ * delta**d2_ * tau**(t2_-1) * E2).sum(dim=0)
-        phi_2_tt = (n2_ * t2_ * (t2_-1) * delta**d2_ * tau**(t2_-2) * E2).sum(dim=0)
-        phi_2_dt = (n2_ * t2_ * tau**(t2_-1) * E2 * delta**(d2_-1)
-                    * (d2_ - c2_*delta**c2_)).sum(dim=0)
+        E2 = torch.exp(-delta**c2)
+        phi_2 = (n2 * delta**d2 * tau**t2 * E2).sum(dim=0)
+        phi_2_d = (n2 * E2 * delta**(d2 - 1) * tau**t2
+                   * (d2 - c2 * delta**c2)).sum(dim=0)
+        phi_2_dd = (n2 * E2 * delta**(d2 - 2) * tau**t2
+                    * ((d2 - c2 * delta**c2) * (d2 - 1 - c2 * delta**c2)
+                       - c2**2 * delta**c2)).sum(dim=0)
+        phi_2_t = (n2 * t2 * delta**d2 * tau**(t2 - 1) * E2).sum(dim=0)
+        phi_2_tt = (n2 * t2 * (t2 - 1) * delta**d2 * tau**(t2 - 2) * E2).sum(dim=0)
+        phi_2_dt = (n2 * t2 * tau**(t2 - 1) * E2 * delta**(d2 - 1)
+                    * (d2 - c2 * delta**c2)).sum(dim=0)
 
         # ---- Group 3: Gaussian bell terms ----
-        E3 = torch.exp(-alpha3_*(delta-epsilon3_)**2 - beta3_*(tau-gamma3_)**2)
-        phi_3 = (n3_ * delta**d3_ * tau**t3_ * E3).sum(dim=0)
+        E3 = torch.exp(-alpha3 * (delta - epsilon3)**2 - beta3 * (tau - gamma3)**2)
+        phi_3 = (n3 * delta**d3 * tau**t3 * E3).sum(dim=0)
 
-        dEd = -2*alpha3_*(delta-epsilon3_) * E3
-        d2Ed = (2*alpha3_*(delta-epsilon3_))**2 * E3 - 2*alpha3_*E3
-        dEt = -2*beta3_*(tau-gamma3_) * E3
-        d2Et = (2*beta3_*(tau-gamma3_))**2 * E3 - 2*beta3_*E3
-        dEdt = 4*alpha3_*beta3_*(delta-epsilon3_)*(tau-gamma3_) * E3
+        dEd = -2 * alpha3 * (delta - epsilon3) * E3
+        d2Ed = (2 * alpha3 * (delta - epsilon3))**2 * E3 - 2 * alpha3 * E3
+        dEt = -2 * beta3 * (tau - gamma3) * E3
+        d2Et = (2 * beta3 * (tau - gamma3))**2 * E3 - 2 * beta3 * E3
+        dEdt = 4 * alpha3 * beta3 * (delta - epsilon3) * (tau - gamma3) * E3
 
-        phi_3_d = (n3_ * delta**d3_ * tau**t3_
-                   * (d3_/delta * E3 + dEd)).sum(dim=0)
-        phi_3_dd = (n3_ * tau**t3_ * delta**(d3_-2)
-                    * (d3_*(d3_-1)*E3
-                       + 2*d3_*delta*dEd
-                       + delta**2*d2Ed)).sum(dim=0)
-        phi_3_t = (n3_ * delta**d3_ * tau**(t3_-1)
-                   * (t3_*E3 + tau*dEt)).sum(dim=0)
-        phi_3_tt = (n3_ * delta**d3_ * tau**(t3_-2)
-                    * (t3_*(t3_-1)*E3
-                       + 2*t3_*tau*dEt
-                       + tau**2*d2Et)).sum(dim=0)
-        phi_3_dt = (n3_ * delta**(d3_-1) * tau**(t3_-1)
-                    * (d3_*t3_*E3
-                       + d3_*tau*dEt
-                       + t3_*delta*dEd
-                       + delta*tau*dEdt)).sum(dim=0)
+        phi_3_d = (n3 * delta**d3 * tau**t3
+                   * (d3 / delta * E3 + dEd)).sum(dim=0)
+        phi_3_dd = (n3 * tau**t3 * delta**(d3 - 2)
+                    * (d3 * (d3 - 1) * E3
+                       + 2 * d3 * delta * dEd
+                       + delta**2 * d2Ed)).sum(dim=0)
+        phi_3_t = (n3 * delta**d3 * tau**(t3 - 1)
+                   * (t3 * E3 + tau * dEt)).sum(dim=0)
+        phi_3_tt = (n3 * delta**d3 * tau**(t3 - 2)
+                    * (t3 * (t3 - 1) * E3
+                       + 2 * t3 * tau * dEt
+                       + tau**2 * d2Et)).sum(dim=0)
+        phi_3_dt = (n3 * delta**(d3 - 1) * tau**(t3 - 1)
+                    * (d3 * t3 * E3
+                       + d3 * tau * dEt
+                       + t3 * delta * dEd
+                       + delta * tau * dEdt)).sum(dim=0)
 
-        # ---- Group 4: nonanalytic (critical-region) terms ----
+        # ---- Group 4: non-analytic (critical-region) terms ----
         # These are singular at delta = 1 exactly, and not removably so in floating point:
         # d2Delta_dd2 below divides by (delta-1), and carries ((delta-1)^2) raised to
         # 1/(2*beta) - 2 = -1/3. Both blow up at the critical density, and the resulting
@@ -262,53 +277,54 @@ class IAPWS95:
         # keep the exact value.
         delta = torch.where(torch.abs(delta - 1.0) < 1.0e-11, delta + 1.0e-11, delta)
 
-        theta = (1 - tau) + A4_ * ((delta-1)**2) ** (1/(2*beta4_))
-        Delta = theta**2 + B4_ * ((delta-1)**2) ** a4_
-        psi = torch.exp(-C4_*(delta-1)**2 - D4_*(tau-1)**2)
+        theta = (1 - tau) + A4 * ((delta - 1)**2) ** (1 / (2 * beta4))
+        Delta = theta**2 + B4 * ((delta - 1)**2) ** a4
+        psi = torch.exp(-C4 * (delta - 1)**2 - D4 * (tau - 1)**2)
 
-        dtheta_dd = A4_/beta4_ * ((delta-1)**2) ** (1/(2*beta4_) - 1) * (delta-1)
-        dDelta_dd = (delta-1) * (B4_*a4_*((delta-1)**2)**(a4_-1)
-                                  + 2*theta*A4_/beta4_*((delta-1)**2)**(1/(2*beta4_)-1))
-        dDelta_dt = -2*theta
+        X = ((delta - 1)**2) ** (1 / (2 * beta4) - 1)
 
-        dDeltab_dd = b4_ * Delta**(b4_-1) * dDelta_dd
-        d2Delta_dd2 = (1/(delta-1)) * dDelta_dd \
-                      + (delta-1)**2 * (B4_*a4_*(a4_-1)*4*((delta-1)**2)**(a4_-2)
-                                        + 2*A4_/beta4_*((delta-1)**2)**(1/(2*beta4_)-1)
-                                          * (A4_/beta4_*((delta-1)**2)**(1/(2*beta4_)-1)
-                                             + theta*(1/beta4_-1)*2*((delta-1)**2)**(1/(2*beta4_)-2)*(delta-1)**0))
-        d2Deltab_dd2 = (b4_*(b4_-1)*Delta**(b4_-2)*dDelta_dd**2
-                        + b4_*Delta**(b4_-1)*d2Delta_dd2)
-        dDeltab_dt = -2*theta*b4_*Delta**(b4_-1)
-        d2Deltab_dt2 = 2*b4_*Delta**(b4_-1) + 4*theta**2*b4_*(b4_-1)*Delta**(b4_-2)
-        d2Deltab_ddt = -2*b4_*Delta**(b4_-1)*dtheta_dd \
-                       - 2*theta*b4_*(b4_-1)*Delta**(b4_-2)*dDelta_dd
+        dtheta_dd = A4 / beta4 * X * (delta - 1)
+        dDelta_dd = (delta - 1) * (A4 * theta * (2 / beta4) * X
+                                   + 2 * B4 * a4 * ((delta - 1)**2)**(a4 - 1))
+        d2Delta_dd2 = ((1 / (delta - 1)) * dDelta_dd
+                       + (delta - 1)**2 * (4 * B4 * a4 * (a4 - 1) * ((delta - 1)**2)**(a4 - 2)
+                                           + 2 * (A4 / beta4)**2 * X**2
+                                           + A4 * theta * (4 / beta4) * (1 / (2 * beta4) - 1)
+                                           * ((delta - 1)**2)**(1 / (2 * beta4) - 2)))
 
-        dpsi_dd = -2*C4_*(delta-1)*psi
-        d2psi_dd2 = (2*C4_*(delta-1)**2 - 1) * 2*C4_*psi
-        dpsi_dt = -2*D4_*(tau-1)*psi
-        d2psi_dt2 = (2*D4_*(tau-1)**2 - 1) * 2*D4_*psi
-        d2psi_ddt = 4*C4_*D4_*(delta-1)*(tau-1)*psi
+        dDeltab_dd = b4 * Delta**(b4 - 1) * dDelta_dd
+        d2Deltab_dd2 = (b4 * (b4 - 1) * Delta**(b4 - 2) * dDelta_dd**2
+                        + b4 * Delta**(b4 - 1) * d2Delta_dd2)
+        dDeltab_dt = -2 * theta * b4 * Delta**(b4 - 1)
+        d2Deltab_dt2 = 2 * b4 * Delta**(b4 - 1) + 4 * theta**2 * b4 * (b4 - 1) * Delta**(b4 - 2)
+        d2Deltab_ddt = -2 * b4 * Delta**(b4 - 1) * dtheta_dd \
+                       - 2 * theta * b4 * (b4 - 1) * Delta**(b4 - 2) * dDelta_dd
 
-        phi_4 = (n4_ * Delta**b4_ * delta * psi).sum(dim=0)
+        dpsi_dd = -2 * C4 * (delta - 1) * psi
+        d2psi_dd2 = (2 * C4 * (delta - 1)**2 - 1) * 2 * C4 * psi
+        dpsi_dt = -2 * D4 * (tau - 1) * psi
+        d2psi_dt2 = (2 * D4 * (tau - 1)**2 - 1) * 2 * D4 * psi
+        d2psi_ddt = 4 * C4 * D4 * (delta - 1) * (tau - 1) * psi
 
-        phi_4_d = (n4_ * (Delta**b4_ * (psi + delta*dpsi_dd)
-                           + dDeltab_dd * delta * psi)).sum(dim=0)
+        phi_4 = (n4 * Delta**b4 * delta * psi).sum(dim=0)
 
-        phi_4_dd = (n4_ * (Delta**b4_ * (2*dpsi_dd + delta*d2psi_dd2)
-                            + 2*dDeltab_dd * (psi + delta*dpsi_dd)
-                            + d2Deltab_dd2 * delta * psi)).sum(dim=0)
+        phi_4_d = (n4 * (Delta**b4 * (psi + delta * dpsi_dd)
+                         + dDeltab_dd * delta * psi)).sum(dim=0)
 
-        phi_4_t = (n4_ * delta * (dDeltab_dt*psi + Delta**b4_*dpsi_dt)).sum(dim=0)
+        phi_4_dd = (n4 * (Delta**b4 * (2 * dpsi_dd + delta * d2psi_dd2)
+                          + 2 * dDeltab_dd * (psi + delta * dpsi_dd)
+                          + d2Deltab_dd2 * delta * psi)).sum(dim=0)
 
-        phi_4_tt = (n4_ * delta * (d2Deltab_dt2*psi
-                                    + 2*dDeltab_dt*dpsi_dt
-                                    + Delta**b4_*d2psi_dt2)).sum(dim=0)
+        phi_4_t = (n4 * delta * (dDeltab_dt * psi + Delta**b4 * dpsi_dt)).sum(dim=0)
 
-        phi_4_dt = (n4_ * (Delta**b4_ * (dpsi_dt + delta*d2psi_ddt)
-                            + delta*dDeltab_dd*dpsi_dt
-                            + dDeltab_dt * (psi + delta*dpsi_dd)
-                            + delta*d2Deltab_ddt*psi)).sum(dim=0)
+        phi_4_tt = (n4 * delta * (d2Deltab_dt2 * psi
+                                  + 2 * dDeltab_dt * dpsi_dt
+                                  + Delta**b4 * d2psi_dt2)).sum(dim=0)
+
+        phi_4_dt = (n4 * (Delta**b4 * (dpsi_dt + delta * d2psi_ddt)
+                          + delta * dDeltab_dd * dpsi_dt
+                          + dDeltab_dt * (psi + delta * dpsi_dd)
+                          + delta * d2Deltab_ddt * psi)).sum(dim=0)
 
         phi = phi_1 + phi_2 + phi_3 + phi_4
         phi_d = phi_1_d + phi_2_d + phi_3_d + phi_4_d
@@ -318,520 +334,685 @@ class IAPWS95:
         phi_dt = phi_1_dt + phi_2_dt + phi_3_dt + phi_4_dt
 
         return phi, phi_d, phi_dd, phi_t, phi_tt, phi_dt
-    
+
     @classmethod
     def helmholtz(cls, rho, T):
-        """Compute all phi^o and phi^r derivatives once.
-        Returns a dict — arrays if rho/T are arrays."""
-        if isinstance(rho,torch.Tensor):
-            intype = 'torch'
-            size = rho.shape
-            orig_device = rho.device
-            rho = rho.reshape(-1)
-            T = T.reshape(-1)
-        elif isinstance(rho,np.ndarray):
-            rho = torch.from_numpy(rho)
-            T = torch.from_numpy(T)
-            intype = 'np'
-            size = rho.shape
-            rho = rho.reshape(-1)
-            T = T.reshape(-1)
-        elif isinstance(rho or T,float) or isinstance(rho or T,int):
-            rho = torch.tensor([rho])
-            T = torch.tensor([T])
-            intype='single'
-        elif isinstance(rho,list):
-            rho = torch.tensor(rho)
-            T = torch.tensor(T)
-            intype='list'
+        """Evaluate the IAPWS-95 Helmholtz surface at (rho, T), once.
 
-        rho = rho.unsqueeze(0).to(device)
-        T   = T.unsqueeze(0).to(device)
+        Formulation:
+            f(rho,T)/(R*T) = phi^o(delta, tau) + phi^r(delta, tau),
+            delta = rho/322 kg/m^3, tau = 647.096 K/T, Eq. (4).
+
+        Valid range:
+            From the melting line to 1273 K at pressures to 1000 MPa, and the equation
+            also behaves sensibly in the metastable regions bordering the saturation
+            line. Nothing is range-checked here.
+
+        Uncertainty:
+            See R6-95(2018) Sec. 7 -- density to about 0.0001 percent in the liquid at
+            ambient conditions, degrading near the critical point and in the
+            high-temperature gas.
+
+        Reference:
+            IAPWS R6-95(2018) Eqs. (4)-(6).
+
+        Inputs (float, numpy array, or torch tensor; broadcastable):
+            rho : density, kg/m^3
+            T   : temperature, K
+
+        Returns:
+            d : dict of delta, tau, and the six derivatives each of phi^o and phi^r,
+                keyed phi0, phi0_d, phi0_dd, phi0_t, phi0_tt, phi0_dt and phir, phir_d,
+                phir_dd, phir_t, phir_tt, phir_dt. Each entry is the same type and shape
+                that rho and T broadcast to, and a torch entry carries the autograd graph
+                back to rho and T. Pass the dict to the property accessors below.
+        """
+        (rho_, T_), state = w.prepare(rho, T)
+        vals = cls._state(rho_, T_)
+        return {key: w.restore(val, state) for key, val in vals.items()}
+
+    @classmethod
+    def _state(cls, rho, T):
+        """The same state dict helmholtz() returns, but in raw 1-D torch tensors.
+
+        The solvers below -- saturation(), rho_Tp(), T_hp() -- evaluate this hundreds of
+        times inside their iteration loops, where the type round-trip helmholtz() does on
+        every call would be wasted work and, for a NumPy caller, would break the loop's
+        arithmetic. Private, and takes float64 tensors only.
+        """
         delta = rho / rhoc
-        tau   = Tc / T
+        tau = Tc / T
 
-        phi0,  phi0_d,  phi0_dd,  phi0_t,  phi0_tt,  phi0_dt  = cls.Phi0(rho, T)
-        phir,  phir_d,  phir_dd,  phir_t,  phir_tt,  phir_dt  = cls.Phir(rho, T)
+        phi0, phi0_d, phi0_dd, phi0_t, phi0_tt, phi0_dt = cls.Phi0(delta, tau)
+        phir, phir_d, phir_dd, phir_t, phir_tt, phir_dt = cls.Phir(delta, tau)
 
-        vals = {
-            'delta': delta.squeeze(0), 'tau': tau.squeeze(0),
+        return {
+            'delta': delta, 'tau': tau,
             'phi0': phi0, 'phi0_d': phi0_d, 'phi0_dd': phi0_dd,
             'phi0_t': phi0_t, 'phi0_tt': phi0_tt, 'phi0_dt': phi0_dt,
             'phir': phir, 'phir_d': phir_d, 'phir_dd': phir_dd,
             'phir_t': phir_t, 'phir_tt': phir_tt, 'phir_dt': phir_dt,
         }
 
-        if intype == 'torch':
-            vals = {key: val.reshape(size).to(orig_device) for key,val in vals.items()}
-        elif intype == 'np':
-            vals = {key: val.detach().cpu().numpy() for key, val in vals.items()}
-            vals = {key: val.reshape(size) for key,val in vals.items()}
-        elif intype == 'single':
-            vals = {key: val.item() for key, val in vals.items()}
-        elif intype == 'list':
-            vals = {key: val.tolist() for key, val in vals.items()}
-        
-        return vals
+    # =========================================
+    # Properties, Table 3 of R6-95(2018).
+    # Each is closed-form arithmetic on the dict
+    # helmholtz() returned, so none of them
+    # re-evaluates the 56-term sum.
+    # =========================================
 
     @classmethod
-    def p(cls, d,units='MPa'):
-        unit = {
-            'Pa':1000,
-            'kPa':1,
-            'MPa':1/1000
-        }
-        scale = unit[units]
-        """p = rho * R * T * (1 + delta * phi^r_delta)"""
-        return rhoc * d['delta'] * R * (Tc / d['tau']) * (1 + d['delta'] * d['phir_d']) * scale
-    
+    def p(cls, d, units='MPa'):
+        """Pressure [MPa by default] from a helmholtz() state.
+
+        p/(rho*R*T) = 1 + delta*phi^r_delta.
+
+        Inputs:
+            d     : state dict from helmholtz()
+            units : 'Pa', 'kPa' or 'MPa'
+        Returns:
+            p : pressure, same type as the state
+        """
+        scale = w.pressure_units[units]
+        T = Tc / d['tau']
+        return scale * rhoc * d['delta'] * R * T * (1.0 + d['delta'] * d['phir_d'])
+
     @classmethod
     def p_rho(cls, d, units='MPa'):
-        unit = {
-            'Pa':1000,
-            'kPa':1,
-            'MPa':1/1000
-        }
-        scale = unit[units]
-        """p = rho * R * T * (1 + delta * phi^r_delta)"""
-        T=(Tc / d['tau'])
-        return (R*T + 2*R*T*d['delta'] * d['phir_d'] + R*T*d['delta']**2*d['phir_dd']) * scale
+        """(dp/drho)_T [MPa/(kg/m^3) by default] from a helmholtz() state.
+
+        dp/drho = R*T*(1 + 2*delta*phi^r_delta + delta^2*phi^r_deltadelta).
+
+        This is the derivative the density solve uses for its Newton step and the one
+        properties/iapws_transport.py needs inverted as the isothermal compressibility, which
+        is why it is a named accessor and not left to the caller to differentiate.
+        """
+        scale = w.pressure_units[units]
+        T = Tc / d['tau']
+        return scale * R * T * (1.0 + 2.0 * d['delta'] * d['phir_d']
+                                + d['delta']**2 * d['phir_dd'])
 
     @classmethod
-    def s(cls, d,units='J'):
-        unit = {
-            'J':1000,
-            'kJ':1,
-            'MJ':1/1000
-        }
-        scale = unit[units]
-        """s = R * (tau*(phi^o_tau + phi^r_tau) - phi^o - phi^r)"""
-        return scale * R * (d['tau']*(d['phi0_t'] + d['phir_t']) - d['phi0'] - d['phir'])
+    def drhodp(cls, d):
+        """Isothermal compressibility (drho/dp)_T [kg/m^3/MPa], for iapws_transport.py."""
+        return 1.0 / cls.p_rho(d, units='MPa')
 
     @classmethod
-    def h(cls, d,units='J'):
-        unit = {
-            'J':1000,
-            'kJ':1,
-            'MJ':1/1000
-        }
-        scale = unit[units]
-        """h = R*T * (1 + tau*(phi^o_tau + phi^r_tau) + delta*phi^r_delta)"""
-        return scale * R * (Tc/d['tau']) * (1 + d['tau']*(d['phi0_t'] + d['phir_t'])
-                                    + d['delta']*d['phir_d'])
+    def s(cls, d, units='J'):
+        """Specific entropy [J/kg-K by default].
+
+        s/R = tau*(phi^o_tau + phi^r_tau) - phi^o - phi^r
+        """
+        scale = w.energy_units[units]
+        return scale * R * (d['tau'] * (d['phi0_t'] + d['phir_t'])
+                            - d['phi0'] - d['phir'])
 
     @classmethod
-    def cv(cls, d,units='J'):
-        unit = {
-            'J':1000,
-            'kJ':1,
-            'MJ':1/1000
-        }
-        scale = unit[units]
-        """cv = -R * tau^2 * (phi^o_tautau + phi^r_tautau)"""
-        return (-R * d['tau']**2 * (d['phi0_tt'] + d['phir_tt']) ) * scale
+    def h(cls, d, units='J'):
+        """Specific enthalpy [J/kg by default].
+
+        h/(R*T) = 1 + tau*(phi^o_tau + phi^r_tau) + delta*phi^r_delta
+        """
+        scale = w.energy_units[units]
+        T = Tc / d['tau']
+        return scale * R * T * (1.0 + d['tau'] * (d['phi0_t'] + d['phir_t'])
+                                + d['delta'] * d['phir_d'])
 
     @classmethod
-    def cp(cls, d,units='J'):
-        unit = {
-            'J':1000,
-            'kJ':1,
-            'MJ':1/1000
-        }
-        scale = unit[units]
-        num = (1 + d['delta']*d['phir_d'] - d['delta']*d['tau']*d['phir_dt'])**2
-        den = 1 + 2*d['delta']*d['phir_d'] + d['delta']**2*d['phir_dd'] \
-            - d['tau']**2*(d['phi0_tt'] + d['phir_tt'])
-        # Note: den includes -tau^2*(phi0_tt+phir_tt) which is cv/R
-        denom = 1 + 2*d['delta']*d['phir_d'] + d['delta']**2*d['phir_dd']
-        return (-R * d['tau']**2 * (d['phi0_tt'] + d['phir_tt']) + R * num/denom)*scale
+    def u(cls, d, units='J'):
+        """Specific internal energy [J/kg by default].
+
+        u/(R*T) = tau*(phi^o_tau + phi^r_tau)
+        """
+        scale = w.energy_units[units]
+        T = Tc / d['tau']
+        return scale * R * T * d['tau'] * (d['phi0_t'] + d['phir_t'])
+
+    @classmethod
+    def cv(cls, d, units='J'):
+        """Isochoric heat capacity [J/kg-K by default].
+
+        cv/R = -tau^2 * (phi^o_tautau + phi^r_tautau)
+        """
+        scale = w.energy_units[units]
+        return scale * (-R * d['tau']**2 * (d['phi0_tt'] + d['phir_tt']))
+
+    @classmethod
+    def cp(cls, d, units='J'):
+        """Isobaric heat capacity [J/kg-K by default].
+
+        cp/R = -tau^2*(phi^o_tautau + phi^r_tautau)
+               + (1 + delta*phi^r_delta - delta*tau*phi^r_deltatau)^2
+                 / (1 + 2*delta*phi^r_delta + delta^2*phi^r_deltadelta)
+
+        The denominator is (dp/drho)_T in reduced form, so cp diverges where the isotherm
+        goes flat. That is not a defect: it is the reason the pseudo-critical peak in cp
+        exists, and it is what supercritical heat transfer is built around.
+        """
+        scale = w.energy_units[units]
+        num = (1.0 + d['delta'] * d['phir_d'] - d['delta'] * d['tau'] * d['phir_dt'])**2
+        den = 1.0 + 2.0 * d['delta'] * d['phir_d'] + d['delta']**2 * d['phir_dd']
+        return scale * (-R * d['tau']**2 * (d['phi0_tt'] + d['phir_tt']) + R * num / den)
 
     @classmethod
     def c(cls, d):
+        """Speed of sound [m/s] from a helmholtz() state.
+
+        w^2/(R*T) = 1 + 2*delta*phi^r_delta + delta^2*phi^r_deltadelta
+                    + (1 + delta*phi^r_delta - delta*tau*phi^r_deltatau)^2 / (cv/R)
+
+        R is in kJ/kg/K, so the factor of 1000 turns R*T into m^2/s^2.
+        """
         cv_R = -d['tau']**2 * (d['phi0_tt'] + d['phir_tt'])
-        num  = (1 + d['delta']*d['phir_d'] - d['delta']*d['tau']*d['phir_dt'])**2
-        den  = 1 + 2*d['delta']*d['phir_d'] + d['delta']**2*d['phir_dd']
-        val = R*1000 * (Tc/d['tau']) * (den + num/cv_R)  # m/s^2 (R in kJ -> *1000)
-        # d['tau'] carries whichever type helmholtz() returned (torch/np/float/list)
-        return torch.sqrt(val) if isinstance(val, torch.Tensor) else np.sqrt(val)
-
-    @staticmethod
-    def _match_type(val, like):
-        """Cast a torch result back to whatever container type `like`
-        came in as (mirrors the type handling helmholtz() already does),
-        so mu()/lam()/saturation() behave like every other property
-        accessor on this class regardless of scalar/array/tensor input."""
-        if isinstance(like, torch.Tensor):
-            return val.reshape(like.shape).to(like.device)
-        if isinstance(like, np.ndarray):
-            return val.detach().cpu().numpy().reshape(like.shape)
-        if isinstance(like, list):
-            return val.tolist()
-        return val.item()
+        num = (1.0 + d['delta'] * d['phir_d'] - d['delta'] * d['tau'] * d['phir_dt'])**2
+        den = 1.0 + 2.0 * d['delta'] * d['phir_d'] + d['delta']**2 * d['phir_dd']
+        val = R * 1000.0 * (Tc / d['tau']) * (den + num / cv_R)
+        return w.sqrt(val)
 
     # =========================================
-    # Transport properties (IAPWS_97.VISC/COND)
-    # Both formulations only need (rho, T) plus,
-    # for thermal conductivity, (drho/dp)_T, cp,
-    # cv, mu -- all of which the IAPWS-95 EOS
-    # supplies directly, so these are valid over
-    # the whole surface, not just Region 1/2.
+    # Transport properties.
+    # The formulations live in iapws_transport.py --
+    # they are separate IAPWS releases, not part
+    # of R6-95. What IAPWS-95 supplies is the
+    # thermodynamic input they need: (drho/dp)_T,
+    # cp and cv, over the whole surface rather
+    # than one IF97 region.
     # =========================================
+
     @classmethod
     def mu(cls, d, enhancement=True):
-        """Dynamic viscosity [Pa.s], IAPWS 2008 formulation (R12-08), Eq. (10).
+        """Dynamic viscosity [Pa-s] at a helmholtz() state, IAPWS R12-08.
 
-        The critical enhancement mu2 needs the isothermal compressibility at two
-        temperatures -- the state's own T, and the fixed reference T_R = 1.5*Tc =
-        970.644 K -- and R12-08 says both must come from IAPWS-95. VISC lives in the
-        IAPWS-97 module, which this module imports, so it cannot reach back here for
-        them; they are computed on this side and passed down.
+        Formulation:
+            See transport.VISC.mu. This wrapper computes (drho/dp)_T at T and at T_R and
+            passes both down.
 
-        The second one costs an extra Helmholtz evaluation at (rho, T_R), so mu is
-        about twice the price with the enhancement on. That is worth knowing before
-        benchmarking property throughput. Pass enhancement=False for the industrial
-        simplification mu2 = 1, which R12-08 Sec. 2.8 and Sec. 3 sanction outside the
-        near-critical region -- there it agrees with the full form to better than the
-        correlation's own uncertainty.
+            The second compressibility costs an extra Helmholtz evaluation at (rho, T_R),
+            so mu is about twice the price with the enhancement on -- worth knowing
+            before benchmarking property throughput. Pass enhancement=False for the
+            industrial simplification mu2 = 1, which R12-08 Sec. 2.8 and Sec. 3 sanction
+            outside the near-critical region, where it agrees with the full form to
+            better than the correlation's own uncertainty.
 
-        Leaving it on by default is deliberate: mu feeds the thermal-conductivity
-        critical enhancement (R15-11 Eq. 18 divides by it), so a mu missing its own
-        enhancement silently inflates lambda near the critical point.
+            Leaving it on by default is deliberate: mu feeds the thermal-conductivity
+            critical enhancement (R15-11 Eq. 18 divides by it), so a mu missing its own
+            enhancement silently inflates lambda near the critical point.
+
+        Valid range:
+            That of R12-08; see transport.VISC.mu.
+
+        Uncertainty:
+            That of R12-08; see transport.VISC.mu.
+
+        Reference:
+            IAPWS R12-08 (IAWPS_Viscosity.pdf).
+
+        Inputs:
+            d           : state dict from helmholtz()
+            enhancement : include the critical enhancement mu2
+
+        Returns:
+            mu : dynamic viscosity, Pa-s, same type as the state
         """
         rho = rhoc * d['delta']
         T = Tc / d['tau']
         if not enhancement:
-            val = w97.VISC.mu(rho, T)
-            return cls._match_type(val, d['delta'])
+            return transport.VISC.mu(rho, T)
 
-        drhodp_T = 1.0 / cls.p_rho(d, units='MPa')            # (drho/dp)_T at T
+        drhodp_T = cls.drhodp(d)
         T_R = 1.5 * Tc
-        # rho arrives as whatever the caller passed in -- numpy or torch -- so build the
-        # matching constant array by arithmetic rather than with a library-specific
+        # rho arrives as whatever the caller passed in -- float, numpy or torch -- so
+        # build the matching constant by arithmetic rather than with a library-specific
         # full_like, which would pin this to one backend.
         d_R = cls.helmholtz(rho, rho * 0.0 + T_R)
-        drhodp_TR = 1.0 / cls.p_rho(d_R, units='MPa')          # (drho/dp)_T at T_R
-        val = w97.VISC.mu(rho, T, drhodp_T=drhodp_T, drhodp_TR=drhodp_TR)
-        return cls._match_type(val, d['delta'])
+        drhodp_TR = cls.drhodp(d_R)
+        return transport.VISC.mu(rho, T, drhodp_T=drhodp_T, drhodp_TR=drhodp_TR)
 
     @classmethod
-    def lam(cls, d):
-        """Thermal conductivity [W/m/K], IAPWS 2011 formulation (R15-11)."""
+    def lam(cls, d, mu=None):
+        """Thermal conductivity [W/m-K] at a helmholtz() state, IAPWS R15-11.
+
+        Formulation:
+            See transport.COND.lam.
+
+            The viscosity is the expensive input: with its critical enhancement on, it
+            costs a second Helmholtz evaluation at the reference temperature T_R. A
+            caller who already has mu at this state -- getprop._getprop does, since it
+            returns both -- passes it in rather than paying for it twice.
+
+        Valid range:
+            That of R15-11; see transport.COND.lam.
+
+        Uncertainty:
+            That of R15-11; see transport.COND.lam.
+
+        Reference:
+            IAPWS R15-11 (ThCond.pdf).
+
+        Inputs:
+            d  : state dict from helmholtz()
+            mu : optional, dynamic viscosity [Pa-s] already computed at this state. It
+                 must carry its own critical enhancement -- R15-11 Eq. (18) divides by
+                 it, so a mu without one inflates lambda near the critical point.
+
+        Returns:
+            lam : thermal conductivity, W/m-K, same type as the state
+        """
         rho = rhoc * d['delta']
         T = Tc / d['tau']
-        drhodp = 1.0 / cls.p_rho(d, units='MPa')   # (drho/dp)_T [kg/m^3/MPa]
-        cp = cls.cp(d, units='kJ')
-        cv = cls.cv(d, units='kJ')
-        mu = cls.mu(d)
-        val = w97.COND.lam(rho, T, drhodp, cp, cv, mu)
-        return cls._match_type(val, d['delta'])
+        if mu is None:
+            mu = cls.mu(d)
+        return transport.COND.lam(rho, T, cls.drhodp(d),
+                                  cls.cp(d, units='kJ'), cls.cv(d, units='kJ'), mu)
 
     # =========================================
-    # Saturation region (Region 4): the phase-
-    # coexistence conditions p'=p'', g'=g'' are
-    # solved directly against the Helmholtz
-    # energy (Newton, autograd Jacobian), seeded
-    # by the IAPWS-95 ancillary equations Eq.
-    # (2.5a-c) of Wagner & Pruss (2002).
+    # Saturation line.
+    # IAPWS-95 has no explicit saturation
+    # equation: the two-phase boundary is where
+    # the Maxwell criterion holds, and it has to
+    # be solved for. The ancillary equations of
+    # Wagner and Pruss (2002) Eqs. (2.5)-(2.7)
+    # seed that solve; they are not the answer.
     # =========================================
+
+    A_SAT = w.stack(
+        [-7.85951783, 1.84408259, -11.7866497, 22.6807411, -15.9618719, 1.80122502],
+        [1.0, 1.5, 3.0, 3.5, 4.0, 7.5])
+
+    B_SAT = w.stack(
+        [1.99274064, 1.09965342, -0.510839303, -1.75493479, -45.5170352, -6.74694450e5],
+        [1 / 3, 2 / 3, 5 / 3, 16 / 3, 43 / 3, 110 / 3])
+
+    C_SAT = w.stack(
+        [-2.03150240, -2.68302940, -5.38626492, -17.2991605, -44.7586581, -63.9201063],
+        [2 / 6, 4 / 6, 8 / 6, 18 / 6, 37 / 6, 71 / 6])
+
     @classmethod
     def _sat_ancillary(cls, T):
-        """Initial guess for (p_sat, rho_f, rho_g) from the IAPWS-95
-        ancillary equations. Good to a few hundredths of a percent on
-        their own -- used here only to seed the exact Newton solve
-        below, so that accuracy doesn't matter beyond landing in the
-        basin of convergence."""
+        """Approximate p_sat, rho_f and rho_g from the IAPWS-95 ancillary equations.
+
+        Formulation:
+            ln(p_sat/p_c)   = (T_c/T) * sum a_i * theta^(t_i)
+            rho_f/rho_c     = 1 + sum b_i * theta^(u_i)
+            ln(rho_g/rho_c) = sum c_i * theta^(v_i),      theta = 1 - T/T_c
+
+        Valid range:
+            273.16 K <= T <= T_c. theta must be non-negative -- a non-integer power of a
+            negative number is NaN -- which is why saturation() clamps T below T_c before
+            calling this.
+
+        Uncertainty:
+            A few hundredths of a percent, and it does not propagate: these values are
+            only a seed.
+
+        Reference:
+            Wagner, W. and Pruss, A., J. Phys. Chem. Ref. Data 31, 387 (2002),
+            Eqs. (2.5), (2.6) and (2.7).
+
+        Inputs:
+            T : temperature, K, 1-D torch tensor
+
+        Returns:
+            p0, rhof0, rhog0 : saturation pressure [MPa] and the two saturated densities
+                               [kg/m^3], each a 1-D tensor
+        """
+        a, ta = w.on(cls.A_SAT, T)
+        b, tb = w.on(cls.B_SAT, T)
+        c, tcv = w.on(cls.C_SAT, T)
+
         theta = 1.0 - T / Tc
 
-        a  = torch.tensor([-7.85951783, 1.84408259, -11.7866497,
-                            22.6807411, -15.9618719, 1.80122502],
-                           dtype=torch.float64, device=T.device)
-        ta = torch.tensor([1.0, 1.5, 3.0, 3.5, 4.0, 7.5],
-                           dtype=torch.float64, device=T.device)
-        b  = torch.tensor([1.99274064, 1.09965342, -0.510839303,
-                            -1.75493479, -45.5170352, -6.74694450e5],
-                           dtype=torch.float64, device=T.device)
-        tb = torch.tensor([1/3, 2/3, 5/3, 16/3, 43/3, 110/3],
-                           dtype=torch.float64, device=T.device)
-        c  = torch.tensor([-2.03150240, -2.68302940, -5.38626492,
-                            -17.2991605, -44.7586581, -63.9201063],
-                           dtype=torch.float64, device=T.device)
-        tcv = torch.tensor([2/6, 4/6, 8/6, 18/6, 37/6, 71/6],
-                            dtype=torch.float64, device=T.device)
+        ln_p_pc = (Tc / T) * (a * theta**ta).sum(dim=0)
+        rho_f_rat = 1.0 + (b * theta**tb).sum(dim=0)
+        ln_rho_g = (c * theta**tcv).sum(dim=0)
 
-        theta_a = theta.unsqueeze(0) ** ta.unsqueeze(1)   # (6, N)
-        theta_b = theta.unsqueeze(0) ** tb.unsqueeze(1)
-        theta_c = theta.unsqueeze(0) ** tcv.unsqueeze(1)
-
-        ln_p_pc   = (Tc / T) * (a.unsqueeze(1) * theta_a).sum(dim=0)
-        rho_f_rat = 1.0 + (b.unsqueeze(1) * theta_b).sum(dim=0)
-        ln_rho_g  = (c.unsqueeze(1) * theta_c).sum(dim=0)
-
-        p0    = pc * torch.exp(ln_p_pc)
-        rhof0 = rhoc * rho_f_rat
-        rhog0 = rhoc * torch.exp(ln_rho_g)
-        return p0, rhof0, rhog0
+        return pc * torch.exp(ln_p_pc), rhoc * rho_f_rat, rhoc * torch.exp(ln_rho_g)
 
     @classmethod
-    def saturation(cls, T, iters=40, tol=1e-11):
-        """Solve for the coexisting liquid/vapor state at temperature T
-        by driving p(rho_f,T)-p(rho_g,T) and g(rho_f,T)-g(rho_g,T) to
-        zero with Newton's method (2x2 system, Jacobian via autograd).
-        Valid for Tt <= T <= Tc. Returns a dict {'T','p','rho_f','rho_g'}
-        in the same array convention as helmholtz()/p()/etc (K, MPa,
-        kg/m^3)."""
-        if isinstance(T, torch.Tensor):
-            intype, size = 'torch', T.shape
-            orig_device = T.device
-            Tt_ = T.reshape(-1).to(torch.float64).to(device)
-        elif isinstance(T, np.ndarray):
-            intype, size = 'np', T.shape
-            Tt_ = torch.from_numpy(T).reshape(-1).to(torch.float64).to(device)
-        elif isinstance(T, list):
-            Tt_ = torch.tensor(T, dtype=torch.float64, device=device)
-            intype, size = 'list', Tt_.shape
-        else:
-            Tt_ = torch.tensor([float(T)], dtype=torch.float64, device=device)
-            intype, size = 'single', Tt_.shape
+    def saturation(cls, T, iters=20):
+        """The coexisting liquid and vapor state at temperature T.
 
-        # theta**(non-integer) of a negative number is NaN, so keep T
-        # strictly inside (Tt, Tc) -- there is no saturation state above
-        # the critical point anyway.
-        Tt_ = torch.clamp(Tt_, min=Tt, max=Tc - 1e-6)
+        Formulation:
+            Solve, for rho_f and rho_g at fixed T,
+                F1 = p(rho_f,T) - p(rho_g,T)                    = 0
+                F2 = g(rho_f,T) - g(rho_g,T)                    = 0,  g = h - T*s
+            by Newton's method on the 2x2 system, seeded from _sat_ancillary().
 
-        p0, rhof0, rhog0 = cls._sat_ancillary(Tt_)
-        rho_f = rhof0.clone().requires_grad_(True)
-        rho_g = rhog0.clone().requires_grad_(True)
+            Newton is quadratic from this seed, and twenty iterations reaches the
+            equation of state's own precision across the whole line -- the cold end,
+            where the vapor density is five orders of magnitude below the liquid one,
+            is the slow case and takes about twice as many steps as the middle. The loop
+            runs a fixed count with no convergence test, because testing one would mean
+            reading a tensor back to the host every iteration and stalling the GPU. The correction step afterwards is what carries the derivative with
+            respect to T -- see rho_Tp() for why that construction gives the exact
+            implicit derivative.
 
-        for it in range(iters):
-            d_f = cls.helmholtz(rho_f, Tt_)
-            d_g = cls.helmholtz(rho_g, Tt_)
-            F1 = cls.p(d_f) - cls.p(d_g)
-            F2 = (cls.h(d_f) - Tt_*cls.s(d_f)) - (cls.h(d_g) - Tt_*cls.s(d_g))
+        Valid range:
+            273.16 K <= T <= T_c = 647.096 K. T is clamped into that interval, since
+            there is no saturation state above the critical point to return.
 
-            dF1_drf = torch.autograd.grad(F1, rho_f, grad_outputs=torch.ones_like(F1), retain_graph=True)[0]
-            dF1_drg = torch.autograd.grad(F1, rho_g, grad_outputs=torch.ones_like(F1), retain_graph=True)[0]
-            dF2_drf = torch.autograd.grad(F2, rho_f, grad_outputs=torch.ones_like(F2), retain_graph=True)[0]
-            dF2_drg = torch.autograd.grad(F2, rho_g, grad_outputs=torch.ones_like(F2), retain_graph=False)[0]
+        Uncertainty:
+            The two saturated densities come out exact to the equation of state, to about
+            1e-10 relative against the R6-95 Table 8 check values. The saturation pressure
+            is not that good at the cold end and cannot be: below about 300 K the liquid
+            pressure is a difference of terms nine digits larger than itself, so float64
+            leaves roughly 1e-8 relative noise in it whatever the solver does. R6-95's own
+            Table 7 carries a footnote saying exactly this. Over the whole line p_sat
+            agrees with the reference implementation to better than 3e-8 relative, and to
+            1e-10 above 350 K.
 
-            det = dF1_drf*dF2_drg - dF1_drg*dF2_drf
-            d_rho_f = -(F1*dF2_drg - F2*dF1_drg) / det
-            d_rho_g = -(F2*dF1_drf - F1*dF2_drf) / det
+        Reference:
+            IAPWS R6-95(2018) Sec. 6.2 (phase-equilibrium condition, Table 3).
 
-            with torch.no_grad():
-                rho_f += d_rho_f
-                rho_g += d_rho_g
-                # Stay on the correct branch: liquid above rhoc, vapor below.
-                rho_f.clamp_(rhoc*(1.0 + 1e-6), rhoc*3.5)
-                rho_g.clamp_(rhoc*1e-8, rhoc*(1.0 - 1e-6))
+        Inputs:
+            T     : temperature, K (float, numpy array, or torch tensor)
+            iters : Newton iterations
 
-            if torch.max(torch.abs(d_rho_f)).item() < tol and torch.max(torch.abs(d_rho_g)).item() < tol:
-                break
+        Returns:
+            d : dict with keys 'T' [K], 'p' [MPa], 'rho_f' and 'rho_g' [kg/m^3], each the
+                same type and shape as the input
+        """
+        (T_,), state = w.prepare(T)
+        T_ = torch.clamp(T_, min=Tt, max=Tc - 1.0e-6)
+
+        _, rhof0, rhog0 = cls._sat_ancillary(T_)
 
         with torch.no_grad():
-            psat = cls.p(cls.helmholtz(rho_f, Tt_))
+            T_fix = T_.detach()
+            rho_f, rho_g = rhof0.detach().clone(), rhog0.detach().clone()
+            for _ in range(iters):
+                rho_f, rho_g = cls._sat_step(rho_f, rho_g, T_fix)
 
-        vals = {'T': Tt_.detach(), 'p': psat.detach(),
-                'rho_f': rho_f.detach(), 'rho_g': rho_g.detach()}
+        # One more step, this time carrying the graph, so that d(rho_f)/dT and
+        # d(rho_g)/dT come out of the implicit function theorem instead of being lost.
+        rho_f, rho_g = cls._sat_step(rho_f, rho_g, T_)
+        psat = cls.p(cls._state(rho_f, T_), units='MPa')
 
-        if intype == 'torch':
-            vals = {key: val.reshape(size).to(orig_device) for key, val in vals.items()}
-        elif intype == 'np':
-            vals = {key: val.cpu().numpy().reshape(size) for key, val in vals.items()}
-        elif intype == 'single':
-            vals = {key: val.item() for key, val in vals.items()}
-        elif intype == 'list':
-            vals = {key: val.tolist() for key, val in vals.items()}
+        vals = {'T': T_, 'p': psat, 'rho_f': rho_f, 'rho_g': rho_g}
+        return {key: w.restore(val, state) for key, val in vals.items()}
 
-        return vals
+    @classmethod
+    def _sat_step(cls, rho_f, rho_g, T):
+        """One Newton step of the saturation solve. Private; see saturation() for the system.
+
+        The step is taken with a detached Jacobian and a residual that keeps whatever
+        graph T carries, so calling this once more after convergence leaves the value
+        alone and installs the correct derivative with respect to T.
+        """
+        d_f = cls._state(rho_f, T)
+        d_g = cls._state(rho_g, T)
+
+        F1 = cls.p(d_f, units='MPa') - cls.p(d_g, units='MPa')
+        g_f = cls.h(d_f, units='kJ') - T * cls.s(d_f, units='kJ')
+        g_g = cls.h(d_g, units='kJ') - T * cls.s(d_g, units='kJ')
+        F2 = g_f - g_g
+
+        with torch.no_grad():
+            pr_f = cls.p_rho(d_f, units='MPa')
+            pr_g = cls.p_rho(d_g, units='MPa')
+            # dg/drho = v * dp/drho at constant T, and p_rho is in MPa so the 1e3 puts
+            # the Gibbs residual in the kJ/kg that F2 is measured in.
+            J11, J12 = pr_f, -pr_g
+            J21, J22 = 1.0e3 * pr_f / rho_f, -1.0e3 * pr_g / rho_g
+            det = J11 * J22 - J12 * J21
+
+        d_rho_f = -(F1 * J22 - F2 * J12) / det
+        d_rho_g = -(F2 * J11 - F1 * J21) / det
+
+        rho_f = torch.clamp(rho_f + d_rho_f, rhoc * (1.0 + 1.0e-6), rhoc * 3.5)
+        rho_g = torch.clamp(rho_g + d_rho_g, rhoc * 1.0e-8, rhoc * (1.0 - 1.0e-6))
+        return rho_f, rho_g
 
     @classmethod
     def p_sat(cls, T):
-        """Saturation pressure [MPa] at temperature T [K]."""
+        """Saturation pressure [MPa] at temperature T [K]. See saturation()."""
         return cls.saturation(T)['p']
 
     @classmethod
-    def T_sat(cls, p, iters=50):
-        """Saturation temperature [K] at pressure p [MPa], via bisection
-        on p_sat(T), which is monotonic over [Tt, Tc]."""
-        if isinstance(p, torch.Tensor):
-            intype, size = 'torch', p.shape
-            orig_device = p.device
-            p_ = p.reshape(-1).to(torch.float64).to(device)
-        elif isinstance(p, np.ndarray):
-            intype, size = 'np', p.shape
-            p_ = torch.from_numpy(p).reshape(-1).to(torch.float64).to(device)
-        elif isinstance(p, list):
-            p_ = torch.tensor(p, dtype=torch.float64, device=device)
-            intype, size = 'list', p_.shape
-        else:
-            p_ = torch.tensor([float(p)], dtype=torch.float64, device=device)
-            intype, size = 'single', p_.shape
+    def T_sat(cls, p, iters=60):
+        """Saturation temperature [K] at pressure p [MPa].
 
-        lo = torch.full_like(p_, Tt)
-        hi = torch.full_like(p_, Tc - 1e-6)
+        Formulation:
+            Bisection on the ancillary saturation pressure over [T_t, T_c], then three
+            Newton steps on the exact p_sat, then one correction step
+
+                T <- T - (p_sat(T) - p) / (dp_sat/dT)
+
+            with dp_sat/dT taken from the Clausius-Clapeyron relation,
+                dp_sat/dT = (s_g - s_f) / (v_g - v_f),
+            evaluated on the converged saturation state. Using Clapeyron rather than
+            differentiating the saturation solve is what makes T_sat differentiable in p
+            at all: bisection is a chain of comparisons and carries no gradient, but the
+            correction step installs dT/dp = 1/(dp_sat/dT) exactly.
+
+        Valid range:
+            611.657 Pa <= p <= 22.064 MPa. Outside it the bracket does not contain a root
+            and the answer is an endpoint.
+
+        Uncertainty:
+            Exact to the equation of state.
+
+        Reference:
+            IAPWS R6-95(2018); the Clapeyron correction is this library's construction.
+
+        Inputs:
+            p     : pressure, MPa (float, numpy array, or torch tensor)
+            iters : bisection halvings
+
+        Returns:
+            T_sat : saturation temperature, K, same type as the input
+        """
+        (p_,), state = w.prepare(p)
+
+        with torch.no_grad():
+            p_fix = p_.detach()
+
+            lo = torch.full_like(p_fix, Tt)
+            hi = torch.full_like(p_fix, Tc - 1.0e-6)
+            for _ in range(iters):
+                mid = 0.5 * (lo + hi)
+                p_anc, _, _ = cls._sat_ancillary(mid)
+                too_hot = p_anc > p_fix
+                hi = torch.where(too_hot, mid, hi)
+                lo = torch.where(too_hot, lo, mid)
+            T_star = 0.5 * (lo + hi)
+
+            # Stage two: Newton on the exact p_sat, with dp_sat/dT from Clapeyron. From
+            # a seed this good three steps is already past the equation of state's own
+            # precision.
+            for _ in range(3):
+                T_star = T_star - (cls._p_sat(T_star) - p_fix) / cls._dpsat_dT(T_star)
+                T_star = torch.clamp(T_star, min=Tt, max=Tc - 1.0e-6)
+
+            dpdT = cls._dpsat_dT(T_star)
+
+        T = T_star - (cls._p_sat(T_star) - p_) / dpdT
+        return w.restore(T, state)
+
+    @classmethod
+    def _dpsat_dT(cls, T):
+        """Slope of the saturation line [MPa/K] from the Clausius-Clapeyron relation.
+
+        dp_sat/dT = (s_g - s_f) / (v_g - v_f), evaluated on the converged saturation
+        state. Private; it is what makes T_sat's Newton step and its derivative in p
+        exact without differentiating through the saturation solve.
+        """
+        sat = cls._saturation(T)
+        v_f, v_g = 1.0 / sat['rho_f'], 1.0 / sat['rho_g']
+        s_f = cls.s(cls._state(sat['rho_f'], T), units='kJ')
+        s_g = cls.s(cls._state(sat['rho_g'], T), units='kJ')
+        return 1.0e-3 * (s_g - s_f) / (v_g - v_f)          # kPa/K -> MPa/K
+
+    @classmethod
+    def _saturation(cls, T, iters=20):
+        """Tensor-level saturation solve. Private; see saturation()."""
+        _, rhof0, rhog0 = cls._sat_ancillary(T)
+        rho_f, rho_g = rhof0, rhog0
         for _ in range(iters):
-            mid = 0.5*(lo + hi)
-            p_mid = cls.saturation(mid)['p']
-            hi = torch.where(p_mid > p_, mid, hi)
-            lo = torch.where(p_mid > p_, lo, mid)
-        Tsat = 0.5*(lo + hi)
+            rho_f, rho_g = cls._sat_step(rho_f, rho_g, T)
+        return {'rho_f': rho_f, 'rho_g': rho_g}
 
-        if intype == 'torch':
-            return Tsat.reshape(size).to(orig_device)
-        elif intype == 'np':
-            return Tsat.cpu().numpy().reshape(size)
-        elif intype == 'single':
-            return Tsat.item()
-        elif intype == 'list':
-            return Tsat.tolist()
+    @classmethod
+    def _p_sat(cls, T):
+        """Tensor-level saturation pressure [MPa]. Private; see p_sat()."""
+        sat = cls._saturation(torch.clamp(T, min=Tt, max=Tc - 1.0e-6))
+        return cls.p(cls._state(sat['rho_f'], T), units='MPa')
 
     # =========================================
-    # (T,p) -> rho inversion, so IAPWS95 can be
-    # driven the same way as iapws.IAPWS95(T=,P=)
-    # -- needed since helmholtz() itself only
-    # takes (rho, T). Bisection (bracket, always
-    # converges) then a Newton polish (autograd)
-    # for full precision.
-    # NOTE: assumes a single real root in rho at
-    # the given (T,p), i.e. p is supercritical
-    # (p > pc) or otherwise clearly off the
-    # two-phase dome -- this is not a phase-aware
-    # solver like saturation() above.
+    # Inversions.
+    # helmholtz() takes (rho, T), but a solver
+    # knows (T, p) or (h, p). These two invert
+    # the surface, and both stay differentiable
+    # in every argument -- see rho_Tp for how.
     # =========================================
+
     @classmethod
     def rho_Tp(cls, T, p, newton_iters=60):
-        """Density [kg/m^3] at given T [K], p [MPa].
+        """Density [kg/m^3] at a given temperature and pressure.
 
-        Seeds a physically-motivated initial guess -- the saturated-liquid
-        ancillary density for compressed liquid, ideal-gas density
-        otherwise -- then refines with damped Newton iteration.
+        Formulation:
+            Seed, then damped Newton on p(rho, T) - p = 0 with the analytic (dp/drho)_T,
+            then one differentiable correction step.
 
-        A global bisection over the full [1e-3, 1300] kg/m^3 range (the
-        previous approach) is NOT safe: away from the true (T,rho) branch,
-        at subcritical temperatures the IAPWS-95 residual terms (several
-        carry tau exponents up to 50) stop cancelling cleanly in floating
-        point and the computed pressure swings by 10+ orders of magnitude
-        between adjacent densities. A bracket search reading that noise as
-        a monotonic signal can lock onto a spurious root near the critical
-        density instead of the physical one -- e.g. it silently returned
-        rho=322 kg/m^3 (the critical density) for T=300 K, p=1 MPa instead
-        of the correct ~997 kg/m^3. Seeding close to the true branch and
-        damping the Newton step keeps every evaluation on the well-behaved
-        side of that unstable region.
+            The seed is physically motivated: the saturated-liquid ancillary density for a
+            compressed liquid, the ideal-gas density otherwise. A global bisection over
+            the full [1e-3, 1300] kg/m^3 range -- which an earlier version of this
+            function used -- is NOT safe. Away from the true (T, rho) branch, at
+            subcritical temperatures, the IAPWS-95 residual terms (several carry tau
+            exponents up to 50) stop cancelling cleanly in floating point and the computed
+            pressure swings by ten or more orders of magnitude between adjacent densities.
+            A bracket search reading that noise as a monotonic signal can lock onto a
+            spurious root near the critical density instead of the physical one -- it
+            silently returned rho = 322 kg/m^3 for T = 300 K, p = 1 MPa instead of the
+            correct 997. Seeding close to the true branch and damping the Newton step
+            keeps every evaluation on the well-behaved side of that region.
+
+            The Newton loop itself runs under no_grad and uses the analytic derivative, so
+            it costs one state evaluation per iteration and no graph. What makes the
+            result differentiable is the single correction step afterwards:
+
+                rho = rho* - (p(rho*, T) - p) / (dp/drho)_T
+
+            At convergence the numerator is zero to machine precision, so the value does
+            not move; but the numerator carries T and p, and the denominator is detached,
+            so torch reads off exactly the implicit derivatives of the converged root,
+                (drho/dp)_T = 1 / (dp/drho)_T
+                (drho/dT)_p = -(dp/dT)_rho / (dp/drho)_T
+            This matters because the DeepONet power surrogate is trained through this
+            function: without the correction step, rho would be a constant as far as
+            autograd is concerned, and every gradient that reaches a property would be
+            wrong rather than merely inaccurate.
+
+        Valid range:
+            Assumes a single real root in rho at the given (T, p) -- that is, a
+            supercritical pressure or a state clearly off the two-phase dome. This is not
+            a phase-aware solver; inside the dome use saturation().
+
+        Uncertainty:
+            Exact to the equation of state, to Newton's convergence.
+
+        Reference:
+            IAPWS R6-95(2018); the seeding and damping strategy is this library's.
+
+        Inputs (float, numpy array, or torch tensor; broadcastable):
+            T            : temperature, K
+            p            : pressure, MPa
+            newton_iters : damped Newton iterations
+
+        Returns:
+            rho : density, kg/m^3, same type as the inputs
         """
-        if isinstance(T, torch.Tensor):
-            intype, size = 'torch', T.shape
-            orig_device = T.device
-            T_ = T.reshape(-1).to(torch.float64).to(device)
-        elif isinstance(T, np.ndarray):
-            intype, size = 'np', T.shape
-            T_ = torch.from_numpy(T).reshape(-1).to(torch.float64).to(device)
-        elif isinstance(T, list):
-            T_ = torch.tensor(T, dtype=torch.float64, device=device)
-            intype, size = 'list', T_.shape
-        else:
-            T_ = torch.tensor([float(T)], dtype=torch.float64, device=device)
-            intype, size = 'single', T_.shape
-        p_ = torch.as_tensor(p, dtype=torch.float64, device=device).reshape(-1).expand_as(T_)
+        (T_, p_), state = w.prepare(T, p)
 
-        psat0, rhof0, _ = cls._sat_ancillary(torch.clamp(T_, min=Tt, max=Tc - 1e-6))
-        rho_ig = torch.clamp(p_ * 1000.0 / (R * T_), min=1e-3)
-        liquid_like = (T_ < Tc) & (p_ >= psat0)
-        rho0 = torch.clamp(torch.where(liquid_like, rhof0, rho_ig), 1e-3, 1300.0)
+        with torch.no_grad():
+            rho_star = cls._rho_Tp(T_.detach(), p_.detach(), newton_iters)
+            dp_drho = cls.p_rho(cls._state(rho_star, T_.detach()), units='MPa')
 
-        rho = rho0.clone().requires_grad_(True)
+        res = cls.p(cls._state(rho_star, T_), units='MPa') - p_
+        return w.restore(rho_star - res / dp_drho, state)
+
+    @classmethod
+    def _rho_Tp(cls, T, p, newton_iters=60):
+        """Tensor-level damped Newton solve for density. Private; see rho_Tp().
+
+        The step is clamped to half the current density in either direction. Undamped,
+        a Newton step taken where the isotherm is nearly flat -- which is most of the
+        near-critical region -- can be several hundred kg/m^3 and land at a negative
+        density, from which there is no way back.
+        """
+        psat0, rhof0, _ = cls._sat_ancillary(torch.clamp(T, min=Tt, max=Tc - 1.0e-6))
+        rho_ig = torch.clamp(p * 1000.0 / (R * T), min=1.0e-3)
+        liquid_like = (T < Tc) & (p >= psat0)
+        rho = torch.clamp(torch.where(liquid_like, rhof0, rho_ig), 1.0e-3, 1300.0)
+
         for _ in range(newton_iters):
-            F = cls.p(cls.helmholtz(rho, T_), units='MPa') - p_
-            dF = torch.autograd.grad(F, rho, grad_outputs=torch.ones_like(F))[0]
-            with torch.no_grad():
-                step = torch.clamp(F / dF, -0.5 * rho, 0.5 * rho)
-                rho -= step
-                rho.clamp_(1e-4, 1300.0)
-
-        rho = rho.detach()
-        if intype == 'torch':
-            return rho.reshape(size).to(orig_device)
-        elif intype == 'np':
-            return rho.cpu().numpy().reshape(size)
-        elif intype == 'single':
-            return rho.item()
-        elif intype == 'list':
-            return rho.tolist()
+            d = cls._state(rho, T)
+            F = cls.p(d, units='MPa') - p
+            dF = cls.p_rho(d, units='MPa')
+            step = torch.clamp(F / dF, -0.5 * rho, 0.5 * rho)
+            rho = torch.clamp(rho - step, 1.0e-4, 1300.0)
+        return rho
 
     @classmethod
     def T_hp(cls, h, p, iters=60, T_lo=273.16, T_hi=1300.0):
-        """Temperature [K] at given specific enthalpy h [kJ/kg] and
-        pressure p [MPa], via bisection on h(T)|_p (built from
-        rho_Tp() + helmholtz()/h() above). Assumes h is monotonically
-        increasing in T at fixed p, true away from the two-phase dome
-        -- e.g. for the supercritical isobars used throughout SCA."""
-        if isinstance(h, torch.Tensor):
-            intype, size = 'torch', h.shape
-            orig_device = h.device
-            h_ = h.reshape(-1).to(torch.float64).to(device)
-        elif isinstance(h, np.ndarray):
-            intype, size = 'np', h.shape
-            h_ = torch.from_numpy(h).reshape(-1).to(torch.float64).to(device)
-        elif isinstance(h, list):
-            h_ = torch.tensor(h, dtype=torch.float64, device=device)
-            intype, size = 'list', h_.shape
-        else:
-            h_ = torch.tensor([float(h)], dtype=torch.float64, device=device)
-            intype, size = 'single', h_.shape
-        p_ = torch.as_tensor(p, dtype=torch.float64, device=device).reshape(-1).expand_as(h_)
+        """Temperature [K] at a given specific enthalpy and pressure.
 
-        T_lo_ = torch.full_like(h_, T_lo)
-        T_hi_ = torch.full_like(h_, T_hi)
-        for _ in range(iters):
-            mid = 0.5*(T_lo_ + T_hi_)
-            rho_mid = cls.rho_Tp(mid, p_)
-            h_mid = cls.h(cls.helmholtz(rho_mid, mid), units='kJ')
-            T_lo_ = torch.where(h_mid < h_, mid, T_lo_)
-            T_hi_ = torch.where(h_mid < h_, T_hi_, mid)
-        T = 0.5*(T_lo_ + T_hi_)
+        Formulation:
+            Bisection on h(T)|_p over [T_lo, T_hi], where each evaluation is a nested
+            rho_Tp() solve, followed by one differentiable correction step
 
-        if intype == 'torch':
-            return T.reshape(size).to(orig_device)
-        elif intype == 'np':
-            return T.cpu().numpy().reshape(size)
-        elif intype == 'single':
-            return T.item()
-        elif intype == 'list':
-            return T.tolist()
+                T <- T - (h(T*, p) - h) / cp
 
+            since (dh/dT)_p is exactly cp. As in rho_Tp(), the bisection is detached and
+            the correction installs the derivatives: dT/dh = 1/cp at fixed p, and
+            dT/dp = -(dh/dp)_T / cp at fixed h, the latter arriving through the
+            differentiable rho_Tp() inside the residual.
 
-'''
-# scalar
-d = IAPWS95.helmholtz(1000, 300)
-print(IAPWS95.p(d,'MPa'))  
-print(IAPWS95.s(d,'J'))     # 10.0003858 MPa  ✓
+            Bisection rather than Newton because h(T)|_p has a very steep, very narrow
+            rise through the pseudo-critical line -- at 25 MPa, cp peaks above 100
+            kJ/kg-K -- and a Newton step taken just off that peak overshoots by hundreds
+            of kelvin. Bisection does not care how steep the function is, only that it is
+            monotonic.
 
-# batched — every property call is free arithmetic, no recomputation
-rhos = np.linspace(100, 1000, 500)
-Ts   = np.full(500, 500.0)
-d    = IAPWS95.helmholtz(rhos, Ts)
-p    = IAPWS95.p(d)        # shape [500,]
-s    = IAPWS95.s(d)         # shape [500,]
-h    = IAPWS95.h(d)        # shape [500,]
-print(h)
+        Valid range:
+            Assumes h is monotonically increasing in T at fixed p, which holds away from
+            the two-phase dome -- in particular on the supercritical isobars the
+            single-channel analysis runs on. Inside the dome h is flat in T and this
+            returns the bracket's midpoint, not a meaningful temperature.
 
-rhos = torch.linspace(100, 1000, 500)
-Ts   = 500*torch.ones_like(rhos)
-d    = IAPWS95.helmholtz(rhos, Ts)
-p    = IAPWS95.p(d)        # shape [500,]
-s    = IAPWS95.s(d)         # shape [500,]
-h    = IAPWS95.h(d)        # shape [500,]
-print(h)
+        Uncertainty:
+            Exact to the equation of state, to the bisection tolerance: after 60 halvings
+            of a 1027 K bracket, far below floating-point resolution.
 
-print(len(rhos))
-X = torch.cartesian_prod(rhos,Ts)
-Rho, T = X[:,0:1], X[:,1:2]
-print(len(Rho))
-#Rho = Rho.reshape(250000)
-#T = T.reshape(250000)
-d    = IAPWS95.helmholtz(Rho, T)
-p    = IAPWS95.p(d)        # shape [500,]
-s    = IAPWS95.s(d)         # shape [500,]
-h    = IAPWS95.h(d)        # shape [500,]
-print(h)
-'''
+        Reference:
+            IAPWS R6-95(2018); the inversion strategy is this library's.
+
+        Inputs (float, numpy array, or torch tensor; broadcastable):
+            h            : specific enthalpy, kJ/kg
+            p            : pressure, MPa
+            iters        : bisection halvings
+            T_lo, T_hi   : bracket, K
+
+        Returns:
+            T : temperature, K, same type as the inputs
+        """
+        (h_, p_), state = w.prepare(h, p)
+
+        with torch.no_grad():
+            h_fix, p_fix = h_.detach(), p_.detach()
+            lo = torch.full_like(h_fix, T_lo)
+            hi = torch.full_like(h_fix, T_hi)
+            for _ in range(iters):
+                mid = 0.5 * (lo + hi)
+                h_mid = cls.h(cls._state(cls._rho_Tp(mid, p_fix), mid), units='kJ')
+                too_cold = h_mid < h_fix
+                lo = torch.where(too_cold, mid, lo)
+                hi = torch.where(too_cold, hi, mid)
+            T_star = 0.5 * (lo + hi)
+            cp_star = cls.cp(cls._state(cls._rho_Tp(T_star, p_fix), T_star), units='kJ')
+
+        # The residual is rebuilt with the differentiable rho_Tp so that the pressure
+        # dependence of h at fixed T reaches the correction step.
+        rho_ = cls.rho_Tp(T_star, p_)
+        res = cls.h(cls._state(rho_, T_star), units='kJ') - h_
+        return w.restore(T_star - res / cp_star, state)

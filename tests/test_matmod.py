@@ -1,19 +1,6 @@
-"""
-Smoke tests for pinthac.properties.matmod: does it import, does each public function
+"""Smoke tests for pinthac.properties.matmod: does it import, does each public function
 accept a float / numpy array / torch tensor and return the matching type, does a torch
 input keep a finite gradient where one exists.
-
-Phase 2 found no published valid-range table for this module; Phase 3 populated RANGES
-from docs/reference/MatLib_Info.pdf (PNNL-35702) -- see the module docstring and each
-function's own "Valid range" field for the section numbers. A few representative
-out-of-range-warns checks are added below now that there is something to check against;
-the untested functions are the ones RANGES still has no entry for (see
-docs/OPEN_QUESTIONS.md Q31 for the ones PNNL-35702 does not state a range for either).
-
-Theta_Klimenko and Theta_NFI are checked against scipy.integrate.quad of the k function
-each one integrates -- an independent numerical reference, not a value read off this
-module's own output, per docs/brief/PHASE3_BRIEF.md item 3 ("that check is the whole point:
-it proves the integral matches the conductivity it claims to integrate").
 
 Numbers asserted below are either literal constants written directly into the formulas
 (e.g. Zircaloy's 2098 K phase plateau, D9's stub reference value) or structural invariants
@@ -32,12 +19,6 @@ from pinthac.ranges import RangeWarning
 
 T_FLOAT = 1200.0
 
-# T_FLOAT (1200 K) sits inside UO2's and most of Zircaloy's validated ranges, but not
-# inside the narrower ranges Phase 3 added for Zircaloy creep (570-625 K per PNNL-35702
-# section 3.1.10.3) or for any HT-9 property (293-1073.15 K depending on the property, or
-# 25-600 C for HT9.E/HT9.G specifically, which document their T argument in Celsius).
-# Using T_FLOAT there would now trip pyproject.toml's "error::RangeWarning" filter, so
-# these three narrower-range functions get their own in-range constants instead.
 T_ZR_CREEP = 600.0    # K, inside Zircaloy's 570-625 K creep range
 T_HT9 = 600.0         # K, inside every HT-9 property's own range (293-1073.15 K)
 T_HT9_CELSIUS = 300.0  # C, inside HT9.E/HT9.G's 25-600 C range
@@ -51,7 +32,8 @@ def _assert_backend_contract(fn, *args, label=""):
     as numpy arrays, then all of them together as torch tensors -- and finally each one
     as a tensor on its own while the others stay plain floats. That last pass is the one
     the original audit cared about: promoting every argument together is exactly the case
-    that does not break."""
+    that does not break.
+    """
     out_f = fn(*args)
     assert np.isfinite(np.asarray(out_f, dtype=float)).all(), label
 
@@ -68,12 +50,6 @@ def _assert_backend_contract(fn, *args, label=""):
         grads = torch.autograd.grad(out_t.sum(), leaves, allow_unused=True)
         assert all(g is None or torch.isfinite(g).all() for g in grads), label
 
-    # Mixed: one argument a tensor while the rest stay plain floats. This is the real
-    # call shape -- a whole axial temperature field against a scalar burnup -- and it is
-    # the one that breaks, because a `where` over the scalar argument alone resolves to
-    # numpy and then cannot combine with the tensor. Promoting every argument together,
-    # as the passes above do, is precisely the case that does NOT break, so without this
-    # loop the contract looks satisfied when it is not.
     numeric = [i for i, a in enumerate(args) if isinstance(a, (int, float))]
     for i in numeric:
         mixed = list(args)
@@ -104,7 +80,6 @@ def test_gas_k_positive_and_increases_with_T_for_helium():
 
 # --------------------------------------------------------------------------------- UO2
 def test_uo2_k_nfi_backend_contract_including_default_burnup():
-    # The known pre-cleanup failure: Bu defaults to a float, T may be a tensor.
     _assert_backend_contract(m.UO2.k_NFI, T_FLOAT, label="UO2.k_NFI default Bu")
     _assert_backend_contract(m.UO2.k_NFI, T_FLOAT, 20.0, 0.01, label="UO2.k_NFI with Bu")
 
@@ -116,8 +91,6 @@ def test_uo2_k_klimenko_backend_contract():
 @pytest.mark.parametrize("T1,T2", [(500.0, 1000.0), (1000.0, 2000.0), (2000.0, 3000.0),
                                     (300.0, 3120.0)])
 def test_uo2_theta_klimenko_matches_quadrature_of_k_klimenko(T1, T2):
-    # scipy.integrate.quad of k_Klimenko itself is the independent reference here, per
-    # docs/brief/PHASE3_BRIEF.md item 3 -- not a value obtained from Theta_Klimenko.
     theta_diff = float(m.UO2.Theta_Klimenko(np.array([T2]))[0]
                         - m.UO2.Theta_Klimenko(np.array([T1]))[0])
     quad_val, _ = quad(m.UO2.k_Klimenko, T1, T2)
@@ -143,8 +116,6 @@ def test_uo2_theta_klimenko_derivative_matches_k_klimenko():
                                                (300.0, 2000.0, 20.0, 0.0),
                                                (300.0, 2800.0, 50.0, 0.02)])
 def test_uo2_theta_nfi_matches_quadrature_of_k_nfi(T_ref, T, Bu, f_gad):
-    # Same independent-reference check as Theta_Klimenko, against k_NFI instead --
-    # the whole point of docs/brief/PHASE3_BRIEF.md item 3's verification requirement.
     theta = float(m.UO2.Theta_NFI(np.array([T]), Bu, f_gad, T_ref=T_ref, n=1000)[0])
     quad_val, _ = quad(lambda TT: m.UO2.k_NFI(TT, Bu, f_gad), T_ref, T)
     assert theta == pytest.approx(quad_val, rel=1.0E-4)
@@ -211,7 +182,6 @@ def test_zircalloy_k_backend_contract_and_plateau():
 
 
 def test_zircalloy_cp_backend_contract_uses_backend_interp():
-    # The known pre-cleanup failure: lib.interp has no torch equivalent.
     _assert_backend_contract(m.Zircalloy.cp, T_FLOAT, label="Zircalloy.cp")
 
 
@@ -261,10 +231,6 @@ def test_zircalloy_cw_type_lookup():
 
 
 def test_zircalloy_strain_rate_thermal_backend_contract_with_scalar_fluence():
-    # The pre-cleanup failure mode this test targets: Phi passed as a plain float
-    # alongside a tensor T (a scalar fluence applied across a batch of temperatures).
-    # T_ZR_CREEP (600 K) is inside the 570-625 K creep-model range (PNNL-35702 section
-    # 3.1.10.3); T_FLOAT is not.
     _assert_backend_contract(m.Zircalloy.strain_rate_thermal, T_ZR_CREEP, 50.0, 1.0e20,
                               label="strain_rate_thermal")
 
@@ -311,9 +277,6 @@ def test_ht9_meyer_hardness_matches_zircalloy():
 
 
 def test_ht9_strain_rate_primary_backend_contract_with_scalar_time():
-    # The pre-cleanup failure mode this test targets: t passed as a plain float
-    # alongside a tensor T. 298.15-873.15 K is the validated range (PNNL-35702 section
-    # 3.3.10.2), narrower than T_FLOAT.
     _assert_backend_contract(m.HT9.strain_rate_primary, T_HT9, 50.0, 1000.0,
                               label="HT9.strain_rate_primary")
 
@@ -332,17 +295,13 @@ def test_ht9_yield_stress_backend_contract():
 
 # ------------------------------------------------------------------------------- D9_SS
 def test_d9_ss_constant_properties():
-    """D9 is the cladding of the SCWR lattice the supercritical work is built around, and
-    `k` was an unimplemented stub until Phase 4. Both values are single evaluated numbers
-    from Hughes et al. (2014) -- section 4 for the conductivity, Table 1 for the density
-    -- not correlations, so they are asserted exactly."""
+    """D9 is the cladding of the SCWR lattice the supercritical work is built around, and"""
     assert m.D9_SS.k() == 18.9
     assert m.D9_SS.k(650.0) == 18.9          # T is accepted and ignored, by design
     assert m.D9_SS.rho() == 8100.0
 
 
 
-# ------------------------------------------------------------------- RANGES (Phase 3)
 def test_uo2_eps_warns_above_range():
     # PNNL-35702 section 2.1.5.3: 300 to 2500 K.
     with warnings.catch_warnings(record=True) as caught:

@@ -1,26 +1,9 @@
-"""
-Radial conduction across the cladding.
-
-Moved verbatim from PinHT.py in Phase 1. Phase 2 brings it up to the docstring and
-backend standard without changing the formula. Per docs/DUPLICATES.md D7, this is the
-canonical implementation of the same clad-conduction equation that also appears inline,
-with no drift, in SCA_Example.py and SCW_Pb_Ann_SCA.py. See
-docs/reference/PINTHA_Code_Summary.pdf section 4.2.
-"""
+"""Radial conduction across the cladding."""
 from pinthac import backend
 
 
 def T_ci(Rco, Rci, kc, Tco, qp):
-    """
-    Temperature of the inner cladding surface, from a known outer-surface temperature.
-
-    Why this model is here:
-        The standard log-conduction step through the cladding wall, used wherever a
-        solver carries an explicit clad layer (sca/lut.py's channel march,
-        sca/annular.py's cladding_gap_step). Assumes constant clad conductivity kc over
-        the wall (no temperature dependence within this step -- a caller that wants
-        that evaluates kc at the layer's mean temperature first, as
-        sca/annular.py::closure does with MatMod.Zircalloy.k).
+    """Temperature of the inner cladding surface, from a known outer-surface temperature.
 
     Formulation:
         Tci = Tco + qp * ln(Rco/Rci) / (2*pi*kc)
@@ -52,11 +35,6 @@ def T_ci(Rco, Rci, kc, Tco, qp):
     Returns:
         val : inner cladding temperature, K, same type as Tco
     """
-    # Rco/Rci are the common case for a Python-float geometry (fixed pin radii) paired
-    # with a tensor Tco/qp (an axial temperature/power profile) -- promoting them
-    # against Tco is what lets xp.log(Rco/Rci) below run under torch: torch.log
-    # rejects a bare Python float outright, the same failure mode as
-    # MatMod.UO2.k_NFI's Bu (see that docstring).
     Rco = backend.promote(Rco, Tco)
     Rci = backend.promote(Rci, Tco)
     xp = backend.lib(Rco, Rci, kc, Tco, qp)

@@ -1,5 +1,4 @@
-"""
-Smoke tests for pinthac.correlations.friction: does it import, does each correlation
+"""Smoke tests for pinthac.correlations.friction: does it import, does each correlation
 accept a float / numpy array / torch tensor and return the matching type with a finite
 gradient, does an out-of-range input warn.
 
@@ -127,10 +126,6 @@ def test_spacer_blah2_is_an_honest_stub():
         fr.Spacer.blah2()
 
 
-# ---------------------------------------------------------------------------------------
-# Colebrook: implicit, so it gets checked against an independent root solve of the same
-# equation rather than against any value this module produced.
-# ---------------------------------------------------------------------------------------
 COLEBROOK_CASES = [
     # (G [kg/m2-s], D [m], absolute roughness [m])
     (1000.0, 0.0106, 0.0),        # smooth wall
@@ -185,7 +180,8 @@ def test_colebrook_warns_below_the_turbulent_range():
 # ---------------------------------------------------------------------------------------
 def test_petrov_popov_correction_is_off_by_default():
     """A caller that does not ask for the correction must get exactly the isothermal
-    value it got before the option existed."""
+    value it got before the option existed.
+    """
     Props = {'mu': 9.0e-5, 'rho': 257.66}
     Props_w = {'mu': 4.5e-5, 'rho': 125.09}
     plain = float(fr.f_SCW.Filonenko(Props, 1000.0, 0.0106))

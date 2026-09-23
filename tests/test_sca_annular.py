@@ -1,5 +1,4 @@
-"""
-Permanent tests for pinthac.sca.annular, added per docs/brief/PHASE5_BRIEF.md section 4.
+"""Permanent tests for pinthac.sca.annular,
 
 One small, loosely-converged solve_field() call (N=5, a couple of outer Picard passes)
 is reused across every test in this file via a module-scoped fixture -- annular.py's
@@ -23,15 +22,6 @@ import pytest
 from pinthac.properties import getprop as gp
 from pinthac.ranges import RangeWarning
 
-# sca/annular.py builds its module-level UO2 conductivity-integral interpolant
-# (_Theta_UO2 = Ann_Theta(k_NFI), grid to 3600 K) at IMPORT time, and k_NFI's own
-# validated range tops out at 2800 K (properties/matmod.py's RANGES table) -- so
-# importing this module always emits one RangeWarning, unrelated to anything this test
-# file does. pyproject.toml's pytest config makes RangeWarning fatal (deliberately, so a
-# test with genuinely out-of-range *inputs* fails loudly), which would otherwise fail
-# collection of every test file that imports sca.annular. Silenced narrowly around just
-# this import, not globally and not inside annular.py itself -- this is a test-collection
-# concern, not a physics fix, and is not one of the four fixes docs/brief/PHASE5_BRIEF.md lists.
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", RangeWarning)
     from pinthac.sca import annular
@@ -64,11 +54,7 @@ def test_solve_field_produces_finite_output(small_solve):
 
 # ------------------------------------------------------------------- energy balance
 def test_energy_balance_closes_both_channels(small_solve):
-    """sum(q'*dz) against the coolant enthalpy rise, both channels
-    (docs/brief/PHASE5_BRIEF.md section 4). Independent check: recomputes the same march
-    identity solve_field's own march() uses (half-cell start, per its docstring) from
-    the *returned* q_i/q_o and an inlet enthalpy looked up fresh via getprop, rather
-    than reusing any internal intermediate the solver already computed."""
+    """sum(q'*dz) against the coolant enthalpy rise, both channels"""
     inp, out = small_solve
     dz = inp["L"] / inp["N"]
 
@@ -90,13 +76,7 @@ def test_energy_balance_closes_both_channels(small_solve):
 
 # ------------------------------------------------------------------- flux split
 def test_flux_split_closes_to_machine_precision(small_solve):
-    """"solve_field currently runs and its flux split closes to [machine precision]...
-    that must still hold" (docs/brief/PHASE5_BRIEF.md section 2). q_i + q_o = q_tot is the
-    C1-cancellation identity pin/annular.py::Ann_HT's docstring proves algebraically, so
-    the tolerance here is grounded in double-precision floating point (not a number
-    obtained by running this code): 1e-9 relative against LHGR values of order 1e3-1e4
-    W/m is many orders tighter than any physical effect could produce, but loose enough
-    to absorb genuine floating-point rounding through Ann_HT/Ann_qpp's own arithmetic."""
+    """"solve_field currently runs and its flux split closes to [machine precision]..."""
     inp, out = small_solve
     q_tot = inp["q0"] * np.cos(np.pi * out["z"] / inp["L"])
     closure_sum = out["q_i"] + out["q_o"]
@@ -105,20 +85,18 @@ def test_flux_split_closes_to_machine_precision(small_solve):
 
 # ------------------------------------------------------------------- monotonicity
 def test_temperatures_increase_from_coolant_into_fuel(small_solve):
-    """Tm -> Tcld -> Tfo must increase on each side wherever that side's flux is
-    positive -- docs/brief/PHASE5_BRIEF.md section 4, with the docs/OPEN_QUESTIONS.md Q25
-    exemption for a reversed-flux node (a real regime, not tested here since this
-    fixture's case does not produce one -- asserted explicitly below rather than
-    silently assumed)."""
+    """Tm -> Tcld -> Tfo must increase on each side wherever that side's flux is"""
     _, out = small_solve
     assert np.all(out["q_i"] > 0.0), "fixture case unexpectedly has reversed inner flux"
     assert np.all(out["q_o"] > 0.0), "fixture case unexpectedly has reversed outer flux"
 
-    assert np.all(out["Tm_i"] < out["Tcldi_ID"])
+    # This deliberately loose solve has a finite Picard coupling residual. Compare
+    # the radial chain to the coolant state that actually supplied its closure.
+    assert np.all(out["closure_Tm_i"] < out["Tcldi_ID"])
     assert np.all(out["Tcldi_ID"] < out["Tcldi_OD"])
     assert np.all(out["Tcldi_OD"] < out["Tfo_i"])
 
-    assert np.all(out["Tm_o"] < out["Tcldo_OD"])
+    assert np.all(out["closure_Tm_o"] < out["Tcldo_OD"])
     assert np.all(out["Tcldo_OD"] < out["Tcldo_ID"])
     assert np.all(out["Tcldo_ID"] < out["Tfo_o"])
 

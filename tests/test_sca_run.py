@@ -1,5 +1,4 @@
-"""
-Permanent tests for pinthac.sca.run, added per docs/brief/PHASE5_BRIEF.md section 4.
+"""Permanent tests for pinthac.sca.run,
 
 Annular cases here always pass a small N and a loose outer_iter/tol through
 run_channel's **solver_kwargs (see run.py's docstring and tests/test_sca_annular.py's
@@ -27,7 +26,8 @@ with warnings.catch_warnings():
 
 def _np(v):
     """Solver outputs come back as torch tensors or numpy arrays depending on the
-    geometry; normalize for comparison."""
+    geometry; normalize for comparison.
+    """
     return np.asarray(v.detach().cpu() if torch.is_tensor(v) else v)
 
 
@@ -77,11 +77,8 @@ def test_rod_selection_is_honored_not_merely_reported():
     """Every selection now reaches the solver. Before the sca rework, rod.py hardcoded
     its own physics and run_channel could only validate a name and note that it had been
     ignored -- so two different htc names returned bit-identical profiles. Asserting the
-    results differ is what catches a regression back to that."""
-    # Chen & Fang is validated for wall heat flux above 129 kW/m^2. A cosine axial power
-    # shape goes to zero at both channel ends, so the range check fires there for *any*
-    # cosine-shaped case -- it is the correlation's real range meeting the real power
-    # shape, not a bad test input, and it is not something this test is about.
+    results differ is what catches a regression back to that.
+    """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RangeWarning)
         swenson = _np(run.run_channel(geometry=ROD_GEOMETRY, conditions=ROD_CONDITIONS,
@@ -103,7 +100,7 @@ def test_rod_bundle_selection_is_honored():
 # ------------------------------------------------------------------- annular dispatch
 def test_run_channel_annular_dispatch():
     out = run.run_channel(geometry=ANNULAR_GEOMETRY, conditions=ANNULAR_CONDITIONS,
-                           outer_iter=2, tol=1.0e6)
+                           annular_method="picard", use_lut=True, outer_iter=2, tol=1.0e6)
     assert out["geom_type"] == "annular"
     assert out["convergence"]["outer_iters_used"] >= 1
     assert "q_i" in out["result"]
@@ -112,24 +109,21 @@ def test_run_channel_annular_dispatch():
 def test_annular_requires_every_key_rather_than_defaulting():
     """The solver used to carry a module-level Inputs_ann default case, so an omitted key
     silently became someone else's pin. It is required now, and the error names every
-    missing key at once rather than failing on the first."""
+    missing key at once rather than failing on the first.
+    """
     with pytest.raises(ValueError, match="missing keys"):
         run.run_channel(geometry={"type": "annular"}, conditions={"N": 5})
 
 
 def test_annular_selection_is_honored():
-    # Chen & Fang is validated for wall heat flux above 129 kW/m^2. A cosine axial power
-    # shape goes to zero at both channel ends, so the range check fires there for *any*
-    # cosine-shaped case -- it is the correlation's real range meeting the real power
-    # shape, not a bad test input, and it is not something this test is about.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RangeWarning)
         swenson = _np(run.run_channel(geometry=ANNULAR_GEOMETRY,
                                        conditions=ANNULAR_CONDITIONS, htc="swenson",
-                                       outer_iter=2, tol=1.0e6)["result"]["Tfo_o"])
+                                       annular_method="picard", use_lut=True, outer_iter=2, tol=1.0e6)["result"]["Tfo_o"])
         chen = _np(run.run_channel(geometry=ANNULAR_GEOMETRY,
                                     conditions=ANNULAR_CONDITIONS, htc="chen_scw",
-                                    outer_iter=2, tol=1.0e6)["result"]["Tfo_o"])
+                                    annular_method="picard", use_lut=True, outer_iter=2, tol=1.0e6)["result"]["Tfo_o"])
     assert np.isfinite(swenson).all() and np.isfinite(chen).all()
     assert not np.allclose(swenson, chen)
 
@@ -151,22 +145,14 @@ def test_two_phase_htc_raises_not_implemented():
 
 
 # ------------------------------------------------------------------- known-bad case
-def test_known_bad_case_gives_a_located_report_not_a_silent_nan():
-    """docs/brief/PHASE5_BRIEF.md section 4: "a known-bad case produces a readable convergence
-    report rather than a silent NaN". Pitch too small for the rod OD gives a negative
-    flow area, which propagates to NaN through the friction factor / Reynolds number --
-    a genuine bad case, not a fabricated one."""
-    bad_geometry = {"type": "rod", "pitch": 0.005, "rco": 0.0045, "tc": 0.00063,
-                     "delta": 5e-4, "kc": 24}
-    out = run.run_channel(geometry=bad_geometry, conditions=ROD_CONDITIONS)
-    convergence = out["convergence"]
-    assert convergence["ok"] is False
-    assert convergence["node"] is not None
-    assert convergence["field"] is not None
-    assert "non-finite" in convergence["message"]
+def test_known_bad_case_is_rejected_before_wall_solve():
+    bad_geometry = {"type": "rod", "pitch": .005, "rco": .0045, "tc": .00063,
+                    "delta": .0005, "kc": 24}
+    with pytest.raises(ValueError, match="pitch must exceed"):
+        run.run_channel(geometry=bad_geometry, conditions=ROD_CONDITIONS)
 
 
-# ------------------------------------------------------------------- batch
+
 def test_run_batch_isolates_one_bad_case_from_the_rest():
     cases = [
         dict(geometry=ROD_GEOMETRY, conditions=ROD_CONDITIONS),

@@ -1,5 +1,4 @@
-"""
-Where PINTHAC's generated data lives.
+"""Where PINTHAC's generated data lives.
 
 Why this exists: several modules read files that are *generated* rather than authored --
 the supercritical-water property lookup table, the DeepONet training sets, the trained
@@ -20,12 +19,7 @@ DATA_DIR = os.environ.get("PINTHAC_DATA", os.path.join(_REPO_ROOT, "data"))
 
 
 def data_file(name):
-    """
-    Absolute path to a generated data file.
-
-    Why this model is here:
-        Callers should say what they want, not where it lives, so that moving the data
-        directory stays a one-line change in this module.
+    """Absolute path to a generated data file.
 
     Inputs:
         name : file name relative to the data directory, string
