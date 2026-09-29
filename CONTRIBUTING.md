@@ -11,7 +11,4 @@ Use kelvin for temperature and specify whether pressure is in MPa or Pa.
 
 Follow the existing function-based interfaces. Preserve NumPy and PyTorch behavior,
 including gradients where supported. Keep comments focused on numerical choices
-and physics that are not apparent from the code.
-
-Submit a pull request describing the change and the checks you ran. Do not include
-reference PDFs, private data, credentials, generated datasets, or model checkpoints.
+and physics that are not apparent from the code. Submit a pull request describing the change and the checks you ran.
