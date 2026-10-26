@@ -10,6 +10,8 @@ RANGES = {
     # Colebrook describes the turbulent branch of the Moody chart; below the critical
     # zone the laminar f = 64/Re applies instead and this correlation does not.
     "colebrook": {"Re": (4.0E3, None)},
+    "filonenko":{"Re": (4.0E3,1.0E12)},
+    "kirillov":{"Re":(8.0E4,1.5E6)},
 }
 
 
@@ -198,6 +200,17 @@ class f_SCW:
         if Props_w is not None:
             fval = fval * (Props_w['rho'] / Props['rho'])**0.4
         return fval
+
+    def Razumovskiy(Prop_b, Prop_w, G, D):
+        mu_b = Prop_b['mu']
+        xp = backend.lib(G, D, mu_b)
+        Re = G * D / mu_b
+        rho_b, rho_w = Prop_b['rho'],Prop_w['rho']
+        mu_w = Prop_w['mu']
+
+        fiso = 1/(1.82*xp.log10(Re)-1.64)**(2)
+        fnew = fiso * (rho_w*mu_w/(rho_b*mu_b))**(0.15)
+        return fnew
 
     def Wu(Props, G, D):
         """Wu correlation for the friction factor of supercritical water around rod
