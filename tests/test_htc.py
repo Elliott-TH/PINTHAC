@@ -155,7 +155,7 @@ def test_chen_h2o_and_bjorge_solves_satisfy_their_own_flux():
 
 # ------------------------------------------------------------------------------- SCW
 def _scw_state():
-    Props_b = {'rho': 700.0, 'mu': 8.0e-5, 'k': 0.5, 'cp': 6000.0, 'h': 1.2e6}
+    Props_b = {'rho': 700.0, 'mu': 8.0e-5, 'k': 0.5, 'cp': 6000.0, 'h': 1.2e6, 'beta': 0.01}
     Props_w = {'rho': 400.0, 'mu': 4.0e-5, 'k': 0.35, 'cp': 20000.0, 'h': 1.8e6}
     return Props_b, Props_w
 
@@ -354,16 +354,16 @@ def test_mikityuk_backend_contract():
         label="Sodium.Mikityuk")
 
 
-def test_swenson_preserves_benchmarked_bulk_cp_correction():
+def test_swenson_uses_wall_cp_in_correction():
     bulk = dict(rho=500., mu=6e-5, k=.4, cp=12000., h=1.8e6)
     wall = dict(rho=250., mu=3.5e-5, k=.3, cp=42000., h=2.2e6)
     baseline = htc.SCW.Swenson_dT(bulk, wall, 670., 650., 800., .007)
-    assert baseline == pytest.approx(37045.608380535465, rel=1e-12)
+    assert baseline == pytest.approx(17252.626654216696, rel=1e-12)
     for bulk_cp, wall_cp in ((1200., 42000.), (12000., 4200.), (80000., 2000.)):
         changed = htc.SCW.Swenson_dT(
             dict(bulk, cp=bulk_cp), dict(wall, cp=wall_cp),
             670., 650., 800., .007,
         )
-        # At fixed enthalpies, the benchmark form scales with (cp_wall/cp_bulk)^0.61.
-        factor = ((wall_cp/wall['cp']) / (bulk_cp/bulk['cp']))**.61
-        assert changed == pytest.approx(baseline*factor, rel=1e-12)
+        # Pr_w*(cp_bar/cp_w) = cp_bar*mu_w/k_w: at fixed enthalpies neither
+        # endpoint cp enters, only the secant.
+        assert changed == pytest.approx(baseline, rel=1e-12)

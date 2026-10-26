@@ -624,12 +624,15 @@ class SCW:
         Formulation:
             Pr_w = mu_w*cp_w/k_w ;  Re_w = G*D/mu_w
             cp_bar = (h_w - h_b)/(Tw - Tb)
-            Nu = 0.00459 * Re_w^0.92 * Pr_w^0.61 * (cp_bar/cp_b)^0.61
+            Nu = 0.00459 * Re_w^0.92 * Pr_w^0.61 * (cp_bar/cp_w)^0.61
                  * (rho_w/rho_b)^0.23
             htc = Nu*k_w/D
 
-        Uses the bulk-cp correction and rounded exponents of the benchmarked
-        implementation. cp_bar is the enthalpy secant, not either endpoint cp.
+        The cp correction divides by the WALL cp, so Pr_w*(cp_bar/cp_w) is
+        cp_bar*mu_w/k_w: the original Swenson wall Prandtl number with the
+        enthalpy secant cp_bar in place of cp. Exponents are the rounded ones
+        of the benchmarked implementation. cp_bar is the enthalpy secant, not
+        either endpoint cp.
 
         Valid range:
             Not established -- see docs/OPEN_QUESTIONS.md (Q16).
@@ -662,11 +665,11 @@ class SCW:
         Re_w = G * D / mu_w
 
         cp_bar = (h_w - h_b) / (Tw - Tb)
-        # Retain the benchmarked coefficients and bulk-cp correction.
+        # Benchmarked coefficients; the cp correction is against the wall cp.
         c1, c_Re, c_Pr, c_cp, c_rho = 0.00459, 0.92, 0.61, 0.61, 0.23
 
         R_rho = rho_w / rho_b
-        R_cp = cp_bar / cp_b
+        R_cp = cp_bar / cp_w
 
         Nu = c1 * Re_w**c_Re * Pr_w**c_Pr * R_cp**c_cp * R_rho**c_rho
         htc = Nu * k_w / D
@@ -698,11 +701,10 @@ class SCW:
                    * (cp_bar/cp_b)^0.88 * (Gr_b*/Gr_b)^0.81
 
         Gr_b* is the heat-flux Grashof number g*beta_b*D^4*q/(k_b*nu_b^2)
-        and Gr_b the buoyancy Grashof number g*D^3*(rho_b-rho_w)/(rho_b*nu_b^2);
-        beta is not carried in the Props dict, so the ratio is evaluated
-        with the Boussinesq finite-difference approximation
-        beta_b = (rho_b-rho_w)/(rho_b*(Tw-Tb)), which collapses
-        Gr_b*/Gr_b to q*D/(k_b*(Tw-Tb)) (g, beta and nu_b all cancel).
+        and Gr_b the buoyancy Grashof number g*D^3*(rho_b-rho_w)/(rho_b*nu_b^2),
+        with beta_b the thermal expansion coefficient at the bulk temperature.
+        g and nu_b cancel, leaving
+        Gr_b*/Gr_b = beta_b*q*D*rho_b/(k_b*(rho_b-rho_w)).
 
         Valid range:
             Bulk enthalpy 278-3169 kJ/kg ; G 201-2500 kg/m^2-s ; q 129-1735 kW/m^2 ;
@@ -718,8 +720,9 @@ class SCW:
 
         Inputs (float, numpy array, or torch tensor; broadcastable against each other):
             Props_b : bulk-temperature property dict with keys 'rho', 'mu', 'k', 'cp',
+                      'h', 'beta'
+            Props_w : wall-temperature property dict with keys 'rho', 'mu', 'k', 'cp',
                       'h'
-            Props_w : wall-temperature property dict, same keys
             Tw      : wall temperature, K
             Tb      : bulk temperature, K
             G       : mass flux, kg/m^2-s
@@ -728,7 +731,7 @@ class SCW:
         Returns:
             htc : heat transfer coefficient, W/m^2-K, same type as G
         """
-        rho_b, mu_b, k_b, cp_b, h_b = (Props_b[k] for k in ('rho', 'mu', 'k', 'cp', 'h'))
+        rho_b, mu_b, k_b, cp_b, h_b, beta_b = (Props_b[k] for k in ('rho', 'mu', 'k', 'cp', 'h', 'beta'))
         Pr_b = mu_b * cp_b / k_b
         Re_b = G * D / mu_b
         nu_b = mu_b / rho_b
@@ -743,7 +746,7 @@ class SCW:
                      RANGES["chen_scw"])
 
         cp_bar = (h_w - h_b) / (Tw - Tb)
-        Gr_ratio = (D * q) / (k_b * (Tw - Tb))
+        Gr_ratio = (beta_b * q * D * rho_b) / (k_b * (rho_b - rho_w))
 
         Nu = (0.46 * Re_b**0.16 * (Pr_w / Pr_b)**0.1 * (nu_w / nu_b)**(-0.55)
               * (cp_bar / cp_b)**0.88 * Gr_ratio**0.81)

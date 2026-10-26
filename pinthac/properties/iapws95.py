@@ -509,6 +509,16 @@ class IAPWS95:
         val = R * 1000.0 * (Tc / d['tau']) * (den + num / cv_R)
         return w.sqrt(val)
 
+    @classmethod
+    def beta(cls,d):
+        delta = d['delta']
+        tau = d['tau']
+        T = Tc / d['tau']
+        numer = 1 + delta*d['phir_d'] - delta*tau*d['phir_dt']
+        denom = 1 + 2*delta*d['phir_d']+ delta**2 * d['phir_dd']
+        val = 1/T * numer/denom
+        return val
+
     # =========================================
     # Transport properties.
     # The formulations live in iapws_transport.py --

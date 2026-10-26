@@ -72,13 +72,15 @@ def _getprop(substance, T, P, formulation=95):
             # costs a second Helmholtz evaluation, and R15-11's conductivity divides by
             # that same mu.
             mu = iapws.IAPWS95.mu(state)
+            beta = iapws.IAPWS95.beta(state)
 
             props = {
                 'rho': rho,
                 'h': iapws.IAPWS95.h(state),
                 'cp': iapws.IAPWS95.cp(state),
                 'mu': mu,
-                'k': iapws.IAPWS95.lam(state, mu=mu)
+                'k': iapws.IAPWS95.lam(state, mu=mu),
+                'beta':beta
             }
         else:
             # Only the five shared keys, so that switching formulation cannot change the
