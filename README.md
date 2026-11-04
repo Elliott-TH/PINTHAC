@@ -243,7 +243,7 @@ Run any of them from the repository root as `python -m examples.<name>`.
 - [Model limitations](docs/OPEN_QUESTIONS.md): unresolved validation questions.
 - [Contributing](CONTRIBUTING.md): development and numerical conventions.
 - Function docstrings: equations, inputs, units, validity ranges, and references.
-
+- More updates to come
 ## License
 
 MIT. See `LICENSE`.
