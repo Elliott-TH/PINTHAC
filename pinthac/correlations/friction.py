@@ -251,7 +251,7 @@ class f_SCW:
 
 
 class Spacer:
-    def blah2():
+    def Cheng():
         """Spacer-grid friction/mixing correction -- not implemented.
 
         Formulation:
