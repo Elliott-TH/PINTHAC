@@ -8,9 +8,9 @@ to a temperature are all that same shape.
 
 The `torchsolve` package alongside this repository does the same job with more care
 (guaranteed bracketing, typed failure results, extremum search for non-monotone
-residuals) and is what `correlations/htc.py` uses for the supercritical wall-temperature
-solves, where the residual really is non-monotone. This module is the plain version for
-the many cases where the residual is monotone and a fixed iteration count is enough.
+residuals) and is what `correlations/htc_solver.py` uses for the wall-temperature solves
+of the implicit heat transfer correlations. This module is the plain version for the many
+cases where the residual is monotone and a fixed iteration count is enough.
 """
 import torch
 

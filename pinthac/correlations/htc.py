@@ -1,17 +1,6 @@
 """Heat transfer coefficient correlations for water, supercritical water, and lead."""
-import torch
-import torchsolve as ts
 from pinthac import backend, ranges
-
-# NOTE: no explicit `device=` here, deliberately: lo/hi/Tb normally arrive as
-# plain numpy (from Ann_SCA's numpy-space closure loop), and torch.as_tensor
-# without a device keeps that as a CPU tensor -- matching the caller's own
-# numpy Props dicts so Swenson_dT's Props_b/Props_w arithmetic doesn't mix
-# CPU/numpy with a CUDA tensor. That does not leave this uses-the-GPU: the
-# actual floating point work happens inside IAPWS_95.rho_Tp/helmholtz, which
-# already stage onto torch.cuda (when available) internally and hand back a
-# result on the caller's original device -- so the expensive part still runs
-# on GPU regardless of what device this bracket search itself lives on.
+from pinthac.correlations import htc_solver
 
 
 UNCERTAINTY = {
@@ -23,6 +12,14 @@ UNCERTAINTY = {
     "bjorge": [0.25, 0.25],
     "swenson": [0.25, 0.25],
     "chen_scw": [0.15, 0.15],   # MAD 5.4%, R15 (within +/-15%) = 95.7%
+    # Gschnaidtner et al. (2018) Table 5: MARE on the same database, with Tw solved
+    # from the measured heat flux (MRE 0.45 and 0.02), so these two compare directly.
+    "bishop": [0.50, 0.50],
+    "mokry": [0.32, 0.32],
+    # Cheng et al. (2019) Table 2, G-1: sigma = 0.179 of e = (a_m-a_c)/(a_m+a_c), which
+    # is not a relative error. a_c/a_m = (1-e)/(1+e) gives -30% / +44% at +/-1 sigma.
+    "cheng_q": [0.30, 0.44],
+    "badea": [0.16, 0.16],      # mean -0.52%, sigma 16.28%, 85% of nodes within +/-20%
 }
 
 RANGES = {
@@ -37,219 +34,23 @@ RANGES = {
     "mikityuk": {"Pe": (30.0, 5000.0), "P_over_D": (1.1, 1.95)},
     "chen_scw": {"G": (201.0, 2500.0), "q": (129.0e3, 1735.0e3), "D": (0.006, 0.026),
                  "h_b_kJ": (278.0, 3169.0)},
+    # P (MPa) below is recorded from the sources but is not an argument anywhere, and q
+    # is only checked by the flux forms and Cheng_Q.
+    # Varju et al. (2024) Table 5; D from the Bishop tubes in Gschnaidtner et al. (2018).
+    "bishop": {"G": (651.0, 3662.0), "q": (310.0e3, 3460.0e3), "P": (22.8, 27.6),
+               "Tb": (555.15, 800.15), "D": (0.00254, 0.00513)},
+    # Varju et al. (2024) Table 5.
+    "mokry": {"G": (200.0, 1500.0), "q": (70.0e3, 1250.0e3), "P": (22.8, 29.4),
+              "D": (0.003, 0.038)},
+    # Cheng et al. (2019) section 2, as printed. G = 0.1 is much lower than the 100
+    # Badea et al. (2018) print for the same KIT databank (Table 1).
+    "cheng_q": {"G": (0.1, 3600.0), "q": (0.10e6, 9.4e6), "P": (22.3, 41.0),
+                "D": (0.0013, 0.046)},
+    # Envelope of Badea et al. (2018) Table 4, whose ranges depend on the heat flux band
+    # (full table in SCW.Badea_dT); D from Table 1 because Table 4 does not state it.
+    "badea": {"G": (200.0, 3600.0), "q": (0.1e6, 3.5e6), "P": (22.5, 31.0),
+              "Tw": (423.15, 1053.15), "D": (0.0013, 0.046)},
 }
-
-
-def _solve_Tw(resid, lo, hi, context):
-    """Solve resid(Tw) = 0 for the wall temperature via torchsolve's guarded
-    bracketed solver (replaces the previous scipy.optimize.brentq calls).
-
-    lo/hi bound the search interval; torchsolve guarantees the returned
-    root stays inside it (never diverges, never silently returns a wrong
-    branch) and raises SolverFailure -- via raise_if_failed -- rather than
-    returning a plausible-looking wrong number if it can't converge.
-
-    ftol is set for a heat-flux residual (W/m^2): a tight relative
-    tolerance (ftol_rel) with a small absolute floor (ftol) so near-zero
-    residuals near Tw ~ Tb are still resolvable. xtol/rtol target ~1e-6 K.
-    """
-    lo_t = torch.as_tensor(lo, dtype=torch.float64)
-    hi_t = torch.as_tensor(hi, dtype=torch.float64)
-    res = ts.solve(resid, bracket=(lo_t, hi_t),
-                    ftol=1e-6, ftol_rel=1e-8, xtol=1e-6, rtol=1e-10)
-    res.raise_if_failed(context)
-    Tw = res.root
-    return float(Tw) if Tw.numel() == 1 else Tw
-
-
-def _bracketed_secant(resid, lo, hi, *, xtol=1e-6, rtol=1e-10,
-                      ftol=1e-9, ftol_rel=0., max_iter=100):
-    """Two-point secant with a maintained bracket and bisection fallback.
-
-    Convergence requires a small last step and residual, or an exact zero.
-    The last step is an estimate, not the enclosing bracket's error bound.
-    """
-    if min(xtol, rtol, ftol, ftol_rel) < 0 or max_iter < 0:
-        raise ValueError("secant tolerances and max_iter must be nonnegative")
-    lo, hi = torch.broadcast_tensors(lo, hi)
-    lo, hi = torch.minimum(lo, hi), torch.maximum(lo, hi)
-    fl, fr = resid(lo), resid(hi)
-    scale = torch.maximum(fl.abs(), fr.abs())
-    threshold = torch.maximum(torch.full_like(lo, ftol), ftol_rel*scale)
-    status = torch.full_like(lo, int(ts.Status.MAX_ITER), dtype=torch.int32)
-    iterations = torch.zeros_like(lo, dtype=torch.int64)
-    finite = torch.isfinite(lo) & torch.isfinite(hi) & torch.isfinite(fl) & torch.isfinite(fr)
-    bracketed = (torch.signbit(fl) != torch.signbit(fr)) | (fl == 0) | (fr == 0)
-    status = torch.where(~bracketed, int(ts.Status.NO_BRACKET), status)
-    status = torch.where(~finite, int(ts.Status.NOT_FINITE), status)
-    active = finite & bracketed
-    take_left = fl.abs() < fr.abs()
-    x = torch.where(take_left, lo, hi)
-    fx = torch.where(take_left, fl, fr)
-    previous = torch.where(take_left, hi, lo)
-    f_previous = torch.where(take_left, fr, fl)
-    exact = active & (fx == 0)
-    status = torch.where(exact, int(ts.Status.CONVERGED), status)
-    active = active & ~exact
-    n_fev = 2
-    for step in range(max_iter):
-        if not bool(active.any()):
-            break
-        denominator = fx-f_previous
-        usable = torch.isfinite(denominator) & (denominator.abs() > torch.finfo(x.dtype).tiny)
-        candidate = x-fx*(x-previous)/torch.where(usable, denominator, torch.ones_like(x))
-        inside = usable & torch.isfinite(candidate) & (candidate >= lo) & (candidate <= hi)
-        # Periodic bisection bounds progress even for a nearly flat residual.
-        if (step+1) % 8 == 0:
-            inside = torch.zeros_like(inside)
-        candidate = torch.where(inside, candidate, lo+(hi-lo)/2)
-        candidate = torch.where(active, candidate, x)
-        value = resid(candidate)
-        n_fev += 1
-        iterations = iterations + active.to(iterations.dtype)
-        bad = active & ~torch.isfinite(value)
-        status = torch.where(bad, int(ts.Status.NOT_FINITE), status)
-        active = active & ~bad
-        small_step = (candidate-x).abs() <= xtol+rtol*candidate.abs()
-        converged = active & ((value == 0) | (small_step & (value.abs() <= threshold)))
-        same_left = torch.signbit(value) == torch.signbit(fl)
-        move_left = active & same_left
-        move_right = active & ~same_left
-        lo, fl = torch.where(move_left, candidate, lo), torch.where(move_left, value, fl)
-        hi, fr = torch.where(move_right, candidate, hi), torch.where(move_right, value, fr)
-        previous, f_previous = x, fx
-        x, fx = torch.where(active, candidate, x), torch.where(active, value, fx)
-        status = torch.where(converged, int(ts.Status.CONVERGED), status)
-        active = active & ~converged
-    root = torch.where(status == int(ts.Status.CONVERGED), x, torch.full_like(x, float('nan')))
-    return ts.SolveResult(root=root, f_root=fx, status=status, iterations=iterations,
-                          lo=lo, hi=hi, n_fev=n_fev, method="bracketed secant", x_last=x)
-
-
-def _solve_Tw_scw(resid, Tb, hi, context, tol_kw=None, anchor=None, branch_n=33):
-    """Select the lowest-superheat sampled root and solve inside its bracket.
-
-    Split the search at the pseudocritical anchor and search the lower branch
-    first, even when the full interval has opposite endpoint signs. The anchor
-    is a search aid, not a proof that the heat-flux residual has its extremum
-    there. Finite scans can miss closely spaced roots; branch_n controls resolution.
-    Both the last secant step and residual must converge; failures raise SolverFailure.
-    """
-    device = Tb.device if torch.is_tensor(Tb) else None
-    Tb_t = torch.as_tensor(Tb, dtype=torch.float64, device=device)
-    lo, hi = torch.broadcast_tensors(Tb_t + 1e-6,
-                                     torch.as_tensor(hi, dtype=torch.float64, device=device))
-    split = (lo + hi)/2 if anchor is None else torch.as_tensor(anchor, dtype=lo.dtype, device=lo.device)
-    split = torch.minimum(torch.maximum(split, lo), hi)
-    kw = dict(ftol=1e-9, ftol_rel=0.0, xtol=1e-6, rtol=1e-10, max_iter=100)
-    if tol_kw:
-        kw.update(tol_kw)
-    with torch.no_grad():
-        if branch_n < 2 or int(branch_n) != branch_n:
-            raise ValueError("branch_n must be an integer >= 2")
-        fraction = torch.linspace(0., 1., branch_n, dtype=lo.dtype, device=lo.device)
-        fraction = fraction.reshape((-1,) + (1,)*lo.ndim)
-        nodes = torch.cat((lo + fraction*(split-lo), split + fraction[1:]*(hi-split)))
-        values = resid(nodes)
-        left, right = values[:-1], values[1:]
-        finite = torch.isfinite(left) & torch.isfinite(right)
-        changes = finite & ((torch.signbit(left) != torch.signbit(right)) |
-                            (left == 0) | (right == 0))
-        found = changes.any(dim=0)
-        index = changes.to(torch.int64).argmax(dim=0, keepdim=True)
-        a = nodes[:-1].gather(0, index).squeeze(0)
-        b = nodes[1:].gather(0, index).squeeze(0)
-        if not bool(found.all()):
-            failure = ts.SolveResult(
-                root=torch.full_like(a, float('nan')), f_root=torch.full_like(a, float('nan')),
-                status=torch.where(found, int(ts.Status.CONVERGED), int(ts.Status.NO_BRACKET)),
-                iterations=torch.zeros_like(a, dtype=torch.int64))
-            failure.raise_if_failed(context + ' (no sampled sign-changing branch)')
-        result = _bracketed_secant(resid, a, b, **kw)
-        result.raise_if_failed(context)
-        root = result.root
-    # Reattach parameter sensitivities by the implicit function theorem. The
-    # bracket search is discrete; differentiating its iterations is inappropriate.
-    if torch.is_grad_enabled():
-        F = resid(root)
-        if F.requires_grad:
-            step = torch.minimum(torch.full_like(root, 1e-4), (root-Tb_t)/4)
-            with torch.no_grad():
-                slope = (resid(root + step) - resid(root - step))/(2*step)
-            root = root - (F - F.detach())/slope
-    return root
-
-
-def _scw_flux(correlation, Props_b, Props_w_func, G, D, q, Tb, *,
-              psi=1.0, tol_kw=None, anchor=None, branch_n=33, hi=None, lo=None,
-              return_state=False):
-    """Shared heat-flux interface for Swenson and Chen, in W/m² and kelvin."""
-    values = [Tb, q, G, D, psi, *Props_b.values()]
-    native_torch = any(torch.is_tensor(v) for v in values)
-    def output(Tw, coefficient):
-        result = dict(Tw=Tw, htc=coefficient, residual=coefficient*(Tw-Tb)-q)
-        if not native_torch:
-            result = {key: float(value.detach()) if value.ndim == 0
-                      else value.detach().cpu().numpy() for key, value in result.items()}
-        return result if return_state else result['htc']
-    device = next((v.device for v in values if torch.is_tensor(v)), None)
-    tensor = lambda v: torch.as_tensor(v, dtype=torch.float64, device=device)
-    Tb, q, G, D, psi = torch.broadcast_tensors(*(tensor(v) for v in (Tb, q, G, D, psi)))
-    if bool((~torch.isfinite(q) | ~torch.isfinite(psi) | (psi <= 0) | (G <= 0) | (D <= 0)).any()):
-        raise ValueError("SCW heat-flux solvers require finite q and positive psi, G, D")
-    bulk = {k: tensor(v) for k, v in Props_b.items()}
-    hi = Tb + 200 if hi is None else tensor(hi)
-    zero = q == 0
-    direction = torch.where(q < 0, -torch.ones_like(q), torch.ones_like(q))
-    lo = Tb-200 if lo is None else tensor(lo)
-    search_hi = torch.where(q < 0, 2*Tb-lo, hi)
-    search_hi = torch.where(zero, Tb+2., search_hi)
-    if bool(zero.any()):
-        if correlation == 'swenson':
-            wall = dict(bulk, h=bulk['h']+bulk['cp']*1e-3)
-            h_zero = psi * SCW.Swenson_dT(bulk, wall, Tb+1e-3, Tb, G, D)
-        else:
-            Re = G*D/bulk['mu']
-            prefactor = .46*Re**.16*(D/bulk['k'])**.81*bulk['k']/D
-            h_zero = (psi*prefactor)**(1/.19)
-    if bool(zero.all()):
-        return output(Tb+q/h_zero, h_zero)
-    if anchor is None:
-        nodes = torch.stack([Tb+direction*(search_hi-Tb)*fraction
-                             for fraction in torch.linspace(0., 1., 65)])
-        # Include endpoints: cp can be monotone (bulk already above T_pc), or
-        # constant in a test/property approximation, with no interior extremum.
-        with torch.enable_grad():
-            heat_capacity = tensor(Props_w_func(nodes)['cp']).expand_as(nodes).detach()
-        anchor = nodes.gather(0, heat_capacity.argmax(dim=0, keepdim=True)).squeeze(0)
-    # In mixed batches, solve inactive zero-flux entries at a valid reference
-    # flux and replace them with the analytic zero-superheat limit below.
-    qs = torch.where(zero, torch.full_like(q, 129000.), q)
-    def coefficient(Tw):
-        # Live IAPWS density inversion uses autograd internally even when the
-        # enclosing wall search is value-only.
-        with torch.enable_grad():
-            wall = {k: tensor(v) for k, v in Props_w_func(Tw).items()}
-        if correlation == "swenson":
-            return SCW.Swenson_dT(bulk, wall, Tw, Tb, G, D)
-        return SCW.Chen_SCW_dT(bulk, wall, Tw, Tb, G, D, qs)
-    scale = torch.maximum(qs.abs(), torch.ones_like(qs))
-    def residual(search_T):
-        Tw = Tb + direction*(search_T-Tb)
-        physical = (psi * coefficient(Tw) * (Tw - Tb) - qs)/scale
-        # Zero-flux entries must not depend on whether a reference-flux root
-        # exists. Give inactive entries a simple, guaranteed numerical root.
-        return torch.where(zero, search_T-Tb-1., physical)
-    search_anchor = Tb+direction*(tensor(anchor)-Tb)
-    search_T = _solve_Tw_scw(residual, Tb, search_hi, correlation + " wall temperature",
-                            tol_kw=tol_kw, anchor=search_anchor, branch_n=branch_n)
-    Tw = Tb + direction*(search_T-Tb)
-    h = psi * coefficient(Tw)
-    if bool(zero.any()):
-        h = torch.where(zero, h_zero, h)
-    if bool(zero.any()):
-        Tw = torch.where(zero, Tb+q/h_zero, Tw)
-    return output(Tw, h)
 
 
 class Water:
@@ -523,7 +324,7 @@ class Water:
             h = Water.Chen_H2O_dT(Props_l, Props_v, G, D, x, Tw, Tsat, dPsat, sigma, hfg)
             return h * (Tw - Tb) - q
 
-        Tw = _solve_Tw(resid, Tb, Tb + 200, "Chen_H2O wall temperature")
+        Tw = htc_solver.solve_Tw(resid, Tb, Tb + 200, "Chen_H2O wall temperature")
         val = Water.Chen_H2O_dT(Props_l, Props_v, G, D, x, Tw, Tsat, dPsat, sigma, hfg)
         return val
 
@@ -606,7 +407,7 @@ class Water:
             h = Water.Bjorge_dT(Props_l, Props_v, G, D, x, Tw, Tsat, dPsat, sigma, hfg)
             return h * (Tw - Tb) - q
 
-        Tw = _solve_Tw(resid, Tb, Tb + 200, "Bjorge wall temperature")
+        Tw = htc_solver.solve_Tw(resid, Tb, Tb + 200, "Bjorge wall temperature")
         val = Water.Bjorge_dT(Props_l, Props_v, G, D, x, Tw, Tsat, dPsat, sigma, hfg)
         return val
 
@@ -614,6 +415,19 @@ class Water:
 class SCW:
     """Supercritical water forced-convection correlations.
     Props_b / Props_w = properties at bulk / wall temperature; 'h' = specific enthalpy.
+
+    "_dT" methods evaluate h at a known wall temperature. The method of the same name
+    without the suffix takes a heat flux instead and solves for the wall temperature
+    through htc_solver.solve_flux, whose keyword arguments it accepts:
+
+        tol_kw, anchor, branch_n, hi, lo, return_state, on_no_root
+
+    The search runs from just above Tb up to T_MAX_IAPWS95 unless hi says otherwise. It
+    selects the lowest-superheat root it finds. If it finds none, it raises a
+    NoRootWarning and returns NaN for that element, or with on_no_root="raise" raises
+    SolverFailure. Cheng_Q is explicit and needs no solve.
+
+    Everything here is a round-tube correlation. No rod-bundle factor is applied.
     """
 
     @staticmethod
@@ -676,18 +490,27 @@ class SCW:
 
         return htc
 
-    def Swenson(Props_b, Props_w_func, G, D, q, Tb, tol_kw=None, anchor=None,
-                branch_n=33, hi=None, psi=1.0, return_state=False, lo=None):
-        """Solve q'' = psi*h(Tw)*(Tw-Tb) with a pseudocritical branch scan.
+    @staticmethod
+    def Swenson(Props_b, Props_w_func, G, D, q, Tb, **solver_kw):
+        """Swenson_dT solved for the wall temperature at a given heat flux.
 
-        q is heated-surface flux [W/m²], D hydraulic diameter [m], Tb/hi/anchor
-        temperatures [K]. anchor is the cp-peak temperature at the case pressure.
-        The lowest-superheat sampled root is selected. Failures raise SolverFailure.
-        Return effective htc [W/m²/K], or {Tw, htc, residual} with return_state=True.
+        Inputs:
+            Props_b      : bulk-temperature property dict, keys as for Swenson_dT
+            Props_w_func : callable Tw -> wall-temperature property dict
+            G            : mass flux, kg/m^2-s
+            D            : hydraulic diameter, m
+            q            : heated-surface flux, W/m^2
+            Tb           : bulk temperature, K
+            solver_kw    : see the SCW class docstring
+        Returns:
+            htc : heat transfer coefficient, W/m^2-K, NaN where no root exists, or
+                  {Tw, htc, residual} with return_state=True
         """
-        return _scw_flux("swenson", Props_b, Props_w_func, G, D, q, Tb,
-                         tol_kw=tol_kw, anchor=anchor, branch_n=branch_n, hi=hi,
-                         psi=psi, return_state=return_state, lo=lo)
+        def coefficient(bulk, wall, Tw, Tb, G, D, q):
+            return SCW.Swenson_dT(bulk, wall, Tw, Tb, G, D)
+
+        return htc_solver.solve_flux(coefficient, Props_b, Props_w_func, G, D, q, Tb,
+                                     name="swenson", **solver_kw)
 
     @staticmethod
     def Chen_SCW_dT(Props_b, Props_w, Tw, Tb, G, D, q):
@@ -754,19 +577,377 @@ class SCW:
 
         return htc
 
-    def Chen_SCW(Props_b, Props_w_func, G, D, q, Tb, tol_kw=None, anchor=None,
-                 branch_n=33, hi=None, psi=1.0, return_state=False, lo=None):
-        """Chen & Fang heat-flux solve; arguments and branch policy match Swenson.
+    @staticmethod
+    def Chen_SCW(Props_b, Props_w_func, G, D, q, Tb, **solver_kw):
+        """Chen_SCW_dT solved for the wall temperature at a given heat flux.
 
-        q remains the physical surface flux inside Chen_SCW_dT; psi multiplies
-        the heat-transfer coefficient inside the wall balance.
+        Arguments and returns match SCW.Swenson.
         """
-        return _scw_flux("chen_scw", Props_b, Props_w_func, G, D, q, Tb,
-                         tol_kw=tol_kw, anchor=anchor, branch_n=branch_n, hi=hi,
-                         psi=psi, return_state=return_state, lo=lo)
+        return htc_solver.solve_flux(SCW.Chen_SCW_dT, Props_b, Props_w_func, G, D, q, Tb,
+                                     name="chen_scw", zero_flux=SCW.Chen_SCW_zero_flux,
+                                     **solver_kw)
+
+    @staticmethod
+    def Chen_SCW_zero_flux(Props_b, G, D):
+        """Limit of the Chen & Fang coefficient at zero heat flux, W/m^2-K.
+
+        Chen_SCW_dT depends on q, so unlike the other SCW correlations this limit cannot
+        be found by evaluating the coefficient just above the bulk temperature.
+        """
+        Re = G * D / Props_b['mu']
+        prefactor = 0.46 * Re**0.16 * (D / Props_b['k'])**0.81 * Props_b['k'] / D
+        return prefactor**(1 / 0.19)
 
     Chen_dT = Chen_SCW_dT
     Chen = Chen_SCW
+
+    @staticmethod
+    def Bishop_dT(Props_b, Props_w, Tw, Tb, G, D, z, entrance_term=True, check_range=True):
+        """Bishop, Sandberg & Tong (1964) supercritical-water correlation, evaluated
+        from a known wall temperature.
+
+        Formulation:
+            Re_b = G*D/mu_b
+            cp_bar = (h_w - h_b)/(Tw - Tb) ;  Pr_bar = mu_b*cp_bar/k_b
+            Nu_b = 0.0069 * Re_b^0.9 * Pr_bar^0.66 * (rho_w/rho_b)^0.43 * (1 + 2.4*D/z)
+            htc = Nu_b*k_b/D
+
+            entrance_term=False drops the (1 + 2.4*D/z) factor, the form of Varju et al.
+            (2024) Eq. (3), and z is then unused. Varju et al. report that the term
+            overestimates the entrance effect in their TMM calculations. With
+            entrance_term=True, htc diverges as z goes to zero, so z = 0 is not a usable
+            input.
+
+            Solving this for Tw at a given heat flux can have multiple roots (Varju et
+            al., 2024, section 4); see SCW.Bishop.
+
+        Valid range:
+            P 22.8-27.6 MPa ; Tb 282-527 C ; G 651-3662 kg/m^2-s ; q 310-3460 kW/m^2 ;
+            D 2.54-5.13 mm ; H2O in vertical tubes, upward flow. P and q are not
+            arguments to this function and so are not checked; the others are
+            (RANGES["bishop"]).
+
+        Uncertainty:
+            MARE 50 percent, MRE +45 percent, 32 percent of 12,071 points within +/- 20
+            percent, with Tw solved from the heat flux (Gschnaidtner et al., 2018,
+            Table 5; UNCERTAINTY["bishop"]). Evaluated at the measured Tw the scatter is
+            much smaller: sigma = 0.103 of Cheng's e = (a_m-a_c)/(a_m+a_c), or about
+            -19/+23 percent on water (Cheng et al., 2019, Table 3).
+
+        Reference:
+            Bishop, A.A., Sandberg, R.O. and Tong, L.S. (1964), as given by Gschnaidtner
+            et al., Therm. Sci. Eng. Prog. 7 (2018) 267-278, Table 1, and Varju et al.,
+            Nucl. Eng. Des. 421 (2024) 113085, Eq. (3) and Table 5.
+
+        Inputs (float, numpy array, or torch tensor; broadcastable against each other):
+            Props_b : bulk-temperature property dict with keys 'rho', 'mu', 'k', 'h'
+            Props_w : wall-temperature property dict with keys 'rho', 'h'
+            Tw      : wall temperature, K
+            Tb      : bulk temperature, K
+            G       : mass flux, kg/m^2-s
+            D       : inner diameter, m
+            z       : axial distance from the start of heating, m
+            entrance_term : if True, include the (1 + 2.4*D/z) factor
+            check_range : if True, warn when G, D or Tb leaves the fitted range
+        Returns:
+            htc : heat transfer coefficient, W/m^2-K, same type as G
+        """
+        rho_b, mu_b, k_b, h_b = (Props_b[k] for k in ('rho', 'mu', 'k', 'h'))
+        rho_w, h_w = Props_w['rho'], Props_w['h']
+        if check_range:
+            ranges.check("bishop", {"G": G, "D": D, "Tb": Tb}, RANGES["bishop"])
+
+        Re_b = G * D / mu_b
+        cp_bar = (h_w - h_b) / (Tw - Tb)
+        Pr_bar = mu_b * cp_bar / k_b
+
+        Nu = 0.0069 * Re_b**0.9 * Pr_bar**0.66 * (rho_w / rho_b)**0.43
+        if entrance_term:
+            Nu = Nu * (1.0 + 2.4 * D / z)
+        htc = Nu * k_b / D
+
+        return htc
+
+    @staticmethod
+    def Bishop(Props_b, Props_w_func, G, D, q, Tb, z, entrance_term=True, **solver_kw):
+        """Bishop_dT solved for the wall temperature at a given heat flux.
+
+        G, D, Tb and q are checked once against RANGES["bishop"], not at every wall
+        temperature the search tries.
+
+        Inputs:
+            Props_b, Props_w_func, G, D, q, Tb, solver_kw : see SCW.Swenson
+            z             : axial distance from the start of heating, m; unused with
+                            entrance_term=False
+            entrance_term : if True, include the (1 + 2.4*D/z) factor
+        Returns:
+            htc : heat transfer coefficient, W/m^2-K, NaN where no root exists, or
+                  {Tw, htc, residual} with return_state=True
+        """
+        ranges.check("bishop", {"G": G, "D": D, "Tb": Tb, "q": abs(q)}, RANGES["bishop"])
+
+        def coefficient(bulk, wall, Tw, Tb, G, D, q, z=None):
+            return SCW.Bishop_dT(bulk, wall, Tw, Tb, G, D, z, entrance_term, check_range=False)
+
+        return htc_solver.solve_flux(coefficient, Props_b, Props_w_func, G, D, q, Tb,
+                                     name="bishop", params=dict(z=z) if entrance_term else None,
+                                     **solver_kw)
+
+    @staticmethod
+    def Cheng_Q(Props_b, G, D, qpp):
+        """Cheng, Zhao, Feuerstein & Liu (2019) supercritical-water correlation for a
+        given heat flux. Every property is at the bulk temperature, so this is explicit:
+        no wall-temperature solve is needed.
+
+        Formulation:
+            pi_A = beta_b*q''/(G*cp_b)
+            Re_b = G*D/mu_b ;  Pr_b = mu_b*cp_b/k_b
+
+            F1 = 0.98                               pi_A < 1.75e-4
+               = 0.85 + 0.056*(1e4*pi_A)^1.5        1.75e-4 <= pi_A <= 3.75e-4
+               = 13.1/(4.5 + (1e4*pi_A)^1.35)       3.75e-4 < pi_A
+            F2 = 0.93*Pr_b^0.265                    Pr_b < 2.5
+               = 1.61*Pr_b^-0.333                   Pr_b >= 2.5
+
+            Nu_b = 0.023 * Re_b^0.8 * Pr_b^(1/3) * F1 * F2
+            htc = Nu_b*k_b/D
+
+            The published branches do not quite meet: F1 steps by 0.0004 and 0.004 at
+            its two breakpoints and F2 by 0.001 at Pr_b = 2.5.
+
+            A cooled wall (q'' < 0) is outside the fitted data. pi_A then falls in the
+            first branch, where F1 = 0.98. The power-law branches use a non-negative
+            clamp of pi_A because every branch is evaluated, selected or not.
+
+        Valid range:
+            D 1.3-46 mm ; P 22.3-41.0 MPa ; G 0.1-3600 kg/m^2-s ; q 0.10-9.4 MW/m^2.
+            P is not an argument to this function and so is not checked; the others are,
+            with |q''| for q (RANGES["cheng_q"]).
+
+        Uncertainty:
+            mu = -0.011 and sigma = 0.179 of e = (a_m-a_c)/(a_m+a_c) on the 14,069
+            water points of group G-1, about 75 percent of them with |e| < 0.20 (Cheng
+            et al., 2019, Table 2). e is about half a relative error: +/- 1 sigma is
+            a_c/a_m - 1 = +44/-30 percent (UNCERTAINTY["cheng_q"]).
+
+        Reference:
+            Cheng, X., Zhao, M., Feuerstein, F. and Liu, X. (2019), Int. J. Heat Mass
+            Transfer 131, 527-536, Eqs. (16)-(21).
+
+        Inputs (float, numpy array, or torch tensor; broadcastable against each other):
+            Props_b : bulk-temperature property dict with keys 'mu', 'k', 'cp', 'beta'
+            G       : mass flux, kg/m^2-s
+            D       : hydraulic diameter, m
+            qpp     : wall heat flux, W/m^2
+        Returns:
+            htc : heat transfer coefficient, W/m^2-K, same type as G
+        """
+        mu_b, k_b, cp_b, beta_b = (Props_b[k] for k in ('mu', 'k', 'cp', 'beta'))
+        G, D, qpp, mu_b, k_b, cp_b, beta_b = backend.promote_all(G, D, qpp, mu_b, k_b, cp_b, beta_b)
+        ranges.check("cheng_q", {"G": G, "D": D, "q": abs(qpp)}, RANGES["cheng_q"])
+
+        pi_A = beta_b * qpp / (G * cp_b)
+        Re_b = G * D / mu_b
+        Pr_b = mu_b * cp_b / k_b
+
+        pi_scaled = backend.maximum(1e4 * pi_A, 0.0)
+        F1 = backend.where(pi_A < 1.75e-4, 0.98,
+                           backend.where(pi_A <= 3.75e-4, 0.85 + 0.056 * pi_scaled**1.5,
+                                         13.1 / (4.5 + pi_scaled**1.35)))
+        F2 = backend.where(Pr_b < 2.5, 0.93 * Pr_b**0.265, 1.61 * Pr_b**(-0.333))
+
+        Nu = 0.023 * Re_b**0.8 * Pr_b**(1/3) * F1 * F2
+        htc = Nu * k_b / D
+
+        return htc
+
+    @staticmethod
+    def Badea_dT(Props_b, Props_w, Tw, Tb, G, D, Props_pc, Tpc, check_range=True):
+        """Badea, Zhao, Cheng, Feuerstein & Liu (2018) two-branch supercritical-water
+        correlation for circular tubes, evaluated from a known wall temperature.
+
+        Formulation:
+            Re_b = G*D/mu_b ;  Pr_b = mu_b*cp_b/k_b ;  Pr_w = mu_w*cp_w/k_w
+            Nu_b = a1 * Re_b^a2 * Pr_b^a3 * Pr_w^a4 * (rho_w/rho_b)^a5 * (k_w/k_b)^a6
+                   * (mu_b/mu_w)^a7 * (cp_w/cp_b)^a8 * (pi_A/pi_A_pc)^a9
+            pi_A/pi_A_pc = (beta_b/beta_pc)*(cp_pc/cp_b)
+            htc = Nu_b*k_b/D
+
+            pi_A = beta_b*q/(cp_b*G), so q/G cancels in the ratio and the right side has
+            no heat flux dependence. a1...a9 are the HTD set of Table 3 where
+            Tw > Tpc > Tb and the no-HTD set otherwise.
+
+            Tpc and Props_pc must be evaluated at the case pressure: Tpc moves about
+            3.5 K/MPa near 25 MPa and cp peaks sharply there.
+
+        Valid range:
+            Badea et al. (2018) Table 4, by heat flux band:
+                q [MW/m^2]   G [kg/m^2-s]   P [bar]    Tw [C]
+                0.1-0.5      200-1500       225-300    150-680
+                0.5-1.0      400-2500       225-310    150-680
+                1.0-1.5      1000-3500      225-275    200-680
+                1.5-2.0      1500-3500      225-260    360-640
+                2.0-2.5      2000-3600      225-275    360-780
+                2.5-3.0      2000-2700      235-280    400-620
+                3.0-3.5      2500-3000      235-245    360-620
+            D 1.3-46 mm (Table 1) ; H2O only, in upward flow. P and q are not arguments
+            to this function, so G, D and Tw are checked against the overall envelope
+            (RANGES["badea"]), which is wider than any one band.
+
+        Uncertainty:
+            Mean -0.52 percent and standard deviation 16.28 percent over the 25,245
+            nodes of the restricted databank ; 85 percent of those nodes and 80 percent
+            of the full 28,364 within +/- 20 percent (UNCERTAINTY["badea"]).
+
+        Reference:
+            Badea, A.F., Zhao, M., Cheng, X., Feuerstein, F. and Liu, X. (2018), Nucl.
+            Eng. Des. 335, 178-185, Eqs. (6)-(7) and Table 3.
+
+        Inputs (float, numpy array, or torch tensor; broadcastable against each other):
+            Props_b  : bulk-temperature property dict with keys 'rho', 'mu', 'k', 'cp',
+                       'beta'
+            Props_w  : wall-temperature property dict with keys 'rho', 'mu', 'k', 'cp'
+            Tw       : wall temperature, K
+            Tb       : bulk temperature, K
+            G        : mass flux, kg/m^2-s
+            D        : inner diameter, m
+            Props_pc : pseudocritical-temperature property dict with keys 'cp', 'beta'
+            Tpc      : pseudocritical temperature at the case pressure, K
+            check_range : if True, warn when G, D or Tw leaves the fitted range
+        Returns:
+            htc : heat transfer coefficient, W/m^2-K, same type as G
+        """
+        rho_b, mu_b, k_b, cp_b, beta_b = (Props_b[k] for k in ('rho', 'mu', 'k', 'cp', 'beta'))
+        rho_w, mu_w, k_w, cp_w = (Props_w[k] for k in ('rho', 'mu', 'k', 'cp'))
+        cp_pc, beta_pc = Props_pc['cp'], Props_pc['beta']
+        if check_range:
+            ranges.check("badea", {"G": G, "D": D, "Tw": Tw}, RANGES["badea"])
+
+        # Badea et al. (2018) Table 3, best-estimate alpha_1 ... alpha_9.
+        a_no_htd = (1.464e-2, 8.695e-1, 4.995e-1, 1.278e-1, 1.243e0,
+                    3.267e-1, 4.329e-2, 1.608e-1, 2.217e-1)
+        a_htd = (5.864e-3, 9.158e-1, -1.189e-1, -9.812e-3, 1.004e0,
+                 2.644e-2, 2.869e0, 5.746e-2, 1.529e0)
+
+        Re_b = G * D / mu_b
+        Pr_b = mu_b * cp_b / k_b
+        Pr_w = mu_w * cp_w / k_w
+        pi_ratio = (beta_b / beta_pc) * (cp_pc / cp_b)
+
+        def Nu(a):
+            return (a[0] * Re_b**a[1] * Pr_b**a[2] * Pr_w**a[3]
+                    * (rho_w / rho_b)**a[4] * (k_w / k_b)**a[5]
+                    * (mu_b / mu_w)**a[6] * (cp_w / cp_b)**a[7] * pi_ratio**a[8])
+
+        htd = (Tw > Tpc) & (Tpc > Tb)
+        htc = backend.where(htd, Nu(a_htd), Nu(a_no_htd)) * k_b / D
+
+        return htc
+
+    @staticmethod
+    def Badea(Props_b, Props_w_func, G, D, q, Tb, Props_pc, Tpc, **solver_kw):
+        """Badea_dT solved for the wall temperature at a given heat flux.
+
+        Where Tb < Tpc, the change of branch makes the balance jump as Tw crosses Tpc.
+        A sign change across that jump is not a solution, so the search skips it and
+        moves on to the next one. The scan always splits at Tpc, so anchor is not an
+        accepted keyword here.
+
+        G, D and q are checked once against RANGES["badea"], and the solved Tw after the
+        solve, not at every wall temperature the search tries.
+
+        Inputs:
+            Props_b, Props_w_func, G, D, q, Tb, solver_kw : see SCW.Swenson
+            Props_pc : pseudocritical-temperature property dict with keys 'cp', 'beta'
+            Tpc      : pseudocritical temperature at the case pressure, K
+        Returns:
+            htc : heat transfer coefficient, W/m^2-K, NaN where no root exists, or
+                  {Tw, htc, residual} with return_state=True
+        """
+        ranges.check("badea", {"G": G, "D": D, "q": abs(q)}, RANGES["badea"])
+        return_state = solver_kw.pop("return_state", False)
+
+        def coefficient(bulk, wall, Tw, Tb, G, D, q, Tpc, cp_pc, beta_pc):
+            Props_pc = {'cp': cp_pc, 'beta': beta_pc}
+            return SCW.Badea_dT(bulk, wall, Tw, Tb, G, D, Props_pc, Tpc, check_range=False)
+
+        state = htc_solver.solve_flux(
+            coefficient, Props_b, Props_w_func, G, D, q, Tb, name="badea", anchor=Tpc,
+            jump_at_anchor=True, return_state=True,
+            params=dict(Tpc=Tpc, cp_pc=Props_pc['cp'], beta_pc=Props_pc['beta']), **solver_kw)
+        ranges.check("badea", {"Tw": state['Tw']}, RANGES["badea"])
+        return state if return_state else state['htc']
+
+    @staticmethod
+    def Mokry_dT(Props_b, Props_w, Tw, Tb, G, D, check_range=True):
+        """Mokry et al. (2011) supercritical-water correlation for vertical bare tubes,
+        evaluated from a known wall temperature.
+
+        Formulation:
+            Re_b = G*D/mu_b
+            cp_bar = (h_w - h_b)/(Tw - Tb) ;  Pr_bar = mu_b*cp_bar/k_b
+            Nu_b = 0.0061 * Re_b^0.904 * Pr_bar^0.684 * (rho_w/rho_b)^0.564
+            htc = Nu_b*k_b/D
+
+            Solving this for Tw at a given heat flux can have multiple roots or none
+            (Varju et al., 2024, section 4 ; Gschnaidtner et al., 2018, Fig. 5); see
+            SCW.Mokry.
+
+        Valid range:
+            P 22.8-29.4 MPa ; G 200-1500 kg/m^2-s ; q 70-1250 kW/m^2 ; D 3-38 mm ; H2O
+            in vertical tubes, upward flow, normal and enhanced heat transfer regimes.
+            P and q are not arguments to this function and so are not checked; G and D
+            are (RANGES["mokry"]).
+
+        Uncertainty:
+            MARE 32 percent, MRE +2 percent, 47 percent of 11,919 points within +/- 20
+            percent, with Tw solved from the heat flux (Gschnaidtner et al., 2018,
+            Table 5; UNCERTAINTY["mokry"]).
+
+        Reference:
+            Mokry, S. et al. (2011), Nucl. Eng. Des. 241, 1126-1136, as given by
+            Gschnaidtner et al., Therm. Sci. Eng. Prog. 7 (2018) 267-278, Table 1, and
+            Varju et al., Nucl. Eng. Des. 421 (2024) 113085, Eq. (6) and Table 5.
+
+        Inputs (float, numpy array, or torch tensor; broadcastable against each other):
+            Props_b : bulk-temperature property dict with keys 'rho', 'mu', 'k', 'h'
+            Props_w : wall-temperature property dict with keys 'rho', 'h'
+            Tw      : wall temperature, K
+            Tb      : bulk temperature, K
+            G       : mass flux, kg/m^2-s
+            D       : inner diameter, m
+            check_range : if True, warn when G or D leaves the fitted range
+        Returns:
+            htc : heat transfer coefficient, W/m^2-K, same type as G
+        """
+        rho_b, mu_b, k_b, h_b = (Props_b[k] for k in ('rho', 'mu', 'k', 'h'))
+        rho_w, h_w = Props_w['rho'], Props_w['h']
+        if check_range:
+            ranges.check("mokry", {"G": G, "D": D}, RANGES["mokry"])
+
+        Re_b = G * D / mu_b
+        cp_bar = (h_w - h_b) / (Tw - Tb)
+        Pr_bar = mu_b * cp_bar / k_b
+
+        Nu = 0.0061 * Re_b**0.904 * Pr_bar**0.684 * (rho_w / rho_b)**0.564
+        htc = Nu * k_b / D
+
+        return htc
+
+    @staticmethod
+    def Mokry(Props_b, Props_w_func, G, D, q, Tb, **solver_kw):
+        """Mokry_dT solved for the wall temperature at a given heat flux.
+
+        G, D and q are checked once against RANGES["mokry"], not at every wall
+        temperature the search tries. Arguments and returns match SCW.Swenson.
+        """
+        ranges.check("mokry", {"G": G, "D": D, "q": abs(q)}, RANGES["mokry"])
+
+        def coefficient(bulk, wall, Tw, Tb, G, D, q):
+            return SCW.Mokry_dT(bulk, wall, Tw, Tb, G, D, check_range=False)
+
+        return htc_solver.solve_flux(coefficient, Props_b, Props_w_func, G, D, q, Tb,
+                                     name="mokry", **solver_kw)
 
 
 class Sodium:
@@ -979,6 +1160,6 @@ class Lead:
         Pr = mu * cp / k
         Re = G * D / mu
         Pe = Re*Pr
-        Nu = 10.287*Pe**(0.1175)+(0.0599/2.5)*Pe**(0.7575)
+        Nu = 10.287*Pe**(-0.1175)+(0.0599/2.5)*Pe**(0.7575)
         htc = Nu*(k/D)
         return htc

@@ -8,10 +8,11 @@ q'(z) crosses every surface, so the chain is a series of resistances with a know
 and needs no iteration between regions -- unlike sca/annular.py, where the power split
 between two coolants is itself unknown.
 
-Three nonlinear scalar solves per node, all through solvers.bisect_newton (aliased
-gpu_solve below): the wall-temperature balance when the correlation needs the wall state
-(htc_scw), the gas-gap conduction+radiation balance (gap), and inverting the
-conductivity integral for the centreline temperature (pin.cylindrical.Cyl_T).
+Three nonlinear scalar solves per node: the wall-temperature balance when the correlation
+needs the wall state (htc_scw, through film.solve and correlations/htc_solver.py), and
+through solvers.bisect_newton (aliased gpu_solve below) the gas-gap conduction+radiation
+balance (gap) and the inversion of the conductivity integral for the centreline
+temperature (pin.cylindrical.Cyl_T).
 
 Everything here is torch and broadcast-generic, so the same node routine serves one rod
 (run_SCA) or a batch of independent rods at once (run_SCA_batch), on CPU or GPU.

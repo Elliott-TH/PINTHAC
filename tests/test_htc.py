@@ -11,9 +11,11 @@ import warnings
 import numpy as np
 import pytest
 import torch
+import torchsolve as ts
 
-from pinthac.correlations import htc
+from pinthac.correlations import htc, htc_solver
 from pinthac.ranges import RangeWarning
+from pinthac.sca import film
 
 
 def props_water():
@@ -210,6 +212,301 @@ def test_swenson_and_chen_scw_solves_converge():
     # RangeWarning into a test failure -- 2e5 is comfortably inside it.
     h_chen_scw = htc.SCW.Chen_SCW(Props_b, Props_w_func, G, D, 2.0e5, Tb_scw)
     assert np.isfinite(h_chen_scw) and h_chen_scw > 0.0
+
+
+# ----------------------------------------------- Bishop, Mokry, Badea, Cheng (given q)
+# The Bishop tubes are 2.54-5.13 mm, so these states sit inside every new range table.
+SCW_G, SCW_D, SCW_Tw, SCW_Tb = 1200.0, 0.004, 650.0, 600.0
+SCW_cp_bar = (1.8e6 - 1.2e6)/50.0
+# Badea et al. (2018) Table 3.
+NO_HTD = (1.464e-2, 8.695e-1, 4.995e-1, 1.278e-1, 1.243, 3.267e-1, 4.329e-2, 1.608e-1, 2.217e-1)
+HTD = (5.864e-3, 9.158e-1, -1.189e-1, -9.812e-3, 1.004, 2.644e-2, 2.869, 5.746e-2, 1.529)
+
+
+def _pc_state():
+    return {'cp': 40000.0, 'beta': 0.05}
+
+
+def _badea_published(a):
+    b, w = _scw_state()
+    pc = _pc_state()
+    Re = SCW_G*SCW_D/b['mu']
+    Pr_b = b['mu']*b['cp']/b['k']
+    Pr_w = w['mu']*w['cp']/w['k']
+    Nu = (a[0]*Re**a[1]*Pr_b**a[2]*Pr_w**a[3]*(w['rho']/b['rho'])**a[4]*(w['k']/b['k'])**a[5]
+          * (b['mu']/w['mu'])**a[6]*(w['cp']/b['cp'])**a[7]
+          * (b['beta']*pc['cp']/(pc['beta']*b['cp']))**a[8])
+    return Nu*b['k']/SCW_D
+
+
+def test_bishop_dt_matches_the_published_equation_with_and_without_entrance():
+    b, w = _scw_state()
+    z = 0.2
+    Re = SCW_G*SCW_D/b['mu']
+    Pr_bar = b['mu']*SCW_cp_bar/b['k']
+    Nu = 0.0069*Re**0.9*Pr_bar**0.66*(w['rho']/b['rho'])**0.43
+
+    developed = htc.SCW.Bishop_dT(b, w, SCW_Tw, SCW_Tb, SCW_G, SCW_D, z, entrance_term=False)
+    assert developed == pytest.approx(Nu*b['k']/SCW_D, rel=1e-12)
+
+    default = htc.SCW.Bishop_dT(b, w, SCW_Tw, SCW_Tb, SCW_G, SCW_D, z)
+    assert default == pytest.approx(developed*(1 + 2.4*SCW_D/z), rel=1e-12)
+
+
+def test_bishop_dt_ignores_z_when_the_entrance_term_is_off():
+    b, w = _scw_state()
+    near = htc.SCW.Bishop_dT(b, w, SCW_Tw, SCW_Tb, SCW_G, SCW_D, 0.01, entrance_term=False)
+    unset = htc.SCW.Bishop_dT(b, w, SCW_Tw, SCW_Tb, SCW_G, SCW_D, None, entrance_term=False)
+    assert near == unset
+
+
+def test_mokry_dt_matches_the_published_equation():
+    b, w = _scw_state()
+    Re = SCW_G*SCW_D/b['mu']
+    Pr_bar = b['mu']*SCW_cp_bar/b['k']
+    Nu = 0.0061*Re**0.904*Pr_bar**0.684*(w['rho']/b['rho'])**0.564
+    out = htc.SCW.Mokry_dT(b, w, SCW_Tw, SCW_Tb, SCW_G, SCW_D)
+    assert out == pytest.approx(Nu*b['k']/SCW_D, rel=1e-12)
+
+
+@pytest.mark.parametrize("Tw,Tb,a", [
+    (660.0, 620.0, HTD),         # Tw > Tpc > Tb
+    (640.0, 600.0, NO_HTD),      # film entirely below Tpc
+    (700.0, 660.0, NO_HTD),      # film entirely above Tpc
+    (600.0, 660.0, NO_HTD),      # cooled wall across Tpc
+])
+def test_badea_dt_selects_the_published_branch(Tw, Tb, a):
+    b, w = _scw_state()
+    out = htc.SCW.Badea_dT(b, w, Tw, Tb, SCW_G, SCW_D, _pc_state(), 650.0)
+    assert out == pytest.approx(_badea_published(a), rel=1e-12)
+
+
+def test_badea_dt_selects_a_branch_per_element():
+    b, w = _scw_state()
+    Tw = np.array([660.0, 640.0])
+    out = htc.SCW.Badea_dT(b, w, Tw, 620.0, SCW_G, SCW_D, _pc_state(), 650.0)
+    assert out == pytest.approx([_badea_published(HTD), _badea_published(NO_HTD)], rel=1e-12)
+
+
+@pytest.mark.parametrize("pi_A,F1", [
+    (1.0e-4, 0.98),
+    (2.0e-4, 0.85 + 0.056*2.0**1.5),
+    (5.0e-4, 13.1/(4.5 + 5.0**1.35)),
+])
+@pytest.mark.parametrize("cp,F2_of_Pr", [
+    (5000.0, lambda Pr: 0.93*Pr**0.265),     # Pr = 1
+    (15000.0, lambda Pr: 1.61*Pr**(-0.333)),  # Pr = 3
+])
+def test_cheng_q_matches_the_published_branches(pi_A, F1, cp, F2_of_Pr):
+    mu, k, beta = 8.0e-5, 0.4, 0.002
+    q = pi_A*SCW_G*cp/beta
+    Re = SCW_G*SCW_D/mu
+    Pr = mu*cp/k
+    expected = 0.023*Re**0.8*Pr**(1/3)*F1*F2_of_Pr(Pr)*k/SCW_D
+    out = htc.SCW.Cheng_Q({'mu': mu, 'k': k, 'cp': cp, 'beta': beta}, SCW_G, SCW_D, q)
+    assert out == pytest.approx(expected, rel=1e-12)
+
+
+def test_cheng_q_cooled_wall_uses_the_first_branch():
+    props = {'mu': 8.0e-5, 'k': 0.4, 'cp': 5000.0, 'beta': 0.01}
+    Re = SCW_G*SCW_D/props['mu']
+    expected = 0.023*Re**0.8*0.93*0.98*props['k']/SCW_D       # Pr = 1
+    assert htc.SCW.Cheng_Q(props, SCW_G, SCW_D, -6.0e5) == pytest.approx(expected, rel=1e-12)
+
+
+@pytest.mark.parametrize("call", [
+    lambda b, w, Tw, G: htc.SCW.Bishop_dT(b, w, Tw, SCW_Tb, G, SCW_D, 0.2),
+    lambda b, w, Tw, G: htc.SCW.Mokry_dT(b, w, Tw, SCW_Tb, G, SCW_D),
+    lambda b, w, Tw, G: htc.SCW.Badea_dT(b, w, Tw, SCW_Tb, G, SCW_D, _pc_state(), 625.0),
+    lambda b, w, Tw, G: htc.SCW.Cheng_Q(b, G, SCW_D, 6.0e5),
+], ids=["bishop", "mokry", "badea", "cheng_q"])
+def test_new_scw_correlations_backend_contract(call):
+    b, w = _scw_state()
+    assert np.isfinite(call(b, w, SCW_Tw, SCW_G))
+
+    out_np = call(dict(b, mu=np.array([8.0e-5, 9.0e-5])), w, SCW_Tw, SCW_G)
+    assert isinstance(out_np, np.ndarray) and np.all(np.isfinite(out_np))
+
+    mu = torch.tensor([8.0e-5, 9.0e-5], dtype=torch.float64, requires_grad=True)
+    out_mu = call(dict(b, mu=mu), w, SCW_Tw, SCW_G)
+    (grad,) = torch.autograd.grad(out_mu.sum(), mu)
+    assert torch.isfinite(grad).all() and (grad != 0).all()
+
+    G = torch.tensor([1200.0, 1400.0], dtype=torch.float64, requires_grad=True)
+    out_G = call(b, w, SCW_Tw, G)
+    (grad,) = torch.autograd.grad(out_G.sum(), G)
+    assert torch.isfinite(grad).all() and (grad != 0).all()
+
+
+@pytest.mark.parametrize("name,call,bound", [
+    ("bishop", lambda b, w: htc.SCW.Bishop_dT(b, w, SCW_Tw, SCW_Tb, 500.0, SCW_D, 0.2), "651"),
+    ("bishop", lambda b, w: htc.SCW.Bishop_dT(b, w, SCW_Tw, 500.0, SCW_G, SCW_D, 0.2), "555"),
+    ("mokry", lambda b, w: htc.SCW.Mokry_dT(b, w, SCW_Tw, SCW_Tb, 2000.0, SCW_D), "1500"),
+    ("badea", lambda b, w: htc.SCW.Badea_dT(b, w, 1100.0, SCW_Tb, SCW_G, SCW_D, _pc_state(), 625.0),
+     "1053"),
+    ("cheng_q", lambda b, w: htc.SCW.Cheng_Q(b, SCW_G, SCW_D, -1.0e7), "9.4"),
+])
+def test_new_scw_correlations_warn_outside_their_published_range(name, call, bound):
+    b, w = _scw_state()
+    with pytest.warns(RangeWarning, match=name) as caught:
+        call(b, w)
+    assert len(caught) == 1 and bound in str(caught[0].message)
+
+
+def test_new_scw_correlations_have_uncertainty_and_range_entries():
+    for name in ("bishop", "mokry", "cheng_q", "badea"):
+        assert name in htc.UNCERTAINTY and name in htc.RANGES
+
+
+# ------------------------------------------------------ flux solvers, new correlations
+def _smooth_props(T):
+    """Monotone wall properties, so each balance below has one root."""
+    frac = (T - 600.0)/400.0
+    zero = frac*0.0
+    return {'rho': 700.0 - 400.0*frac, 'mu': 8.0e-5 - 3.0e-5*frac + zero, 'k': 0.5 - 0.2*frac,
+            'cp': 6000.0 + zero, 'h': 1.2e6 + 2.4e6*frac, 'beta': 0.01 + zero}
+
+
+def _flux_bulk(Tb=600.0):
+    return _smooth_props(np.asarray(Tb, dtype=float))
+
+
+FLUX_Tb, FLUX_q = 600.0, 6.0e5
+
+
+@pytest.mark.parametrize("flux,evaluate", [
+    (lambda b, **kw: htc.SCW.Bishop(b, _smooth_props, SCW_G, SCW_D, FLUX_q, FLUX_Tb, 0.2, **kw),
+     lambda b, w, Tw: htc.SCW.Bishop_dT(b, w, Tw, FLUX_Tb, SCW_G, SCW_D, 0.2)),
+    (lambda b, **kw: htc.SCW.Bishop(b, _smooth_props, SCW_G, SCW_D, FLUX_q, FLUX_Tb, None,
+                                    entrance_term=False, **kw),
+     lambda b, w, Tw: htc.SCW.Bishop_dT(b, w, Tw, FLUX_Tb, SCW_G, SCW_D, None, entrance_term=False)),
+    (lambda b, **kw: htc.SCW.Mokry(b, _smooth_props, SCW_G, SCW_D, FLUX_q, FLUX_Tb, **kw),
+     lambda b, w, Tw: htc.SCW.Mokry_dT(b, w, Tw, FLUX_Tb, SCW_G, SCW_D)),
+    (lambda b, **kw: htc.SCW.Badea(b, _smooth_props, SCW_G, SCW_D, FLUX_q, FLUX_Tb, _pc_state(),
+                                   590.0, **kw),
+     lambda b, w, Tw: htc.SCW.Badea_dT(b, w, Tw, FLUX_Tb, SCW_G, SCW_D, _pc_state(), 590.0)),
+], ids=["bishop", "bishop_no_entrance", "mokry", "badea"])
+def test_flux_solvers_satisfy_the_balance_with_their_own_dt_form(flux, evaluate):
+    bulk = _flux_bulk()
+    state = flux(bulk, return_state=True)
+    Tw = state['Tw']
+    assert FLUX_Tb < Tw < 1273.0
+    h = evaluate(bulk, _smooth_props(np.asarray(Tw)), Tw)
+    assert state['htc'] == pytest.approx(h, rel=1e-12)
+    assert h*(Tw - FLUX_Tb) == pytest.approx(FLUX_q, rel=1e-8)
+    assert flux(bulk) == pytest.approx(state['htc'], rel=1e-12)
+
+
+def test_flux_solver_keeps_gradients_through_the_new_correlations():
+    bulk = _flux_bulk()
+    q = torch.tensor([5.0e5, 7.0e5], dtype=torch.float64, requires_grad=True)
+    out = htc.SCW.Mokry(bulk, _smooth_props, SCW_G, SCW_D, q, FLUX_Tb, return_state=True)
+    (grad,) = torch.autograd.grad(out['Tw'].sum(), q)
+    step = 1.0e3
+    plus = htc.SCW.Mokry(bulk, _smooth_props, SCW_G, SCW_D, q.detach() + step, FLUX_Tb,
+                         return_state=True)['Tw']
+    minus = htc.SCW.Mokry(bulk, _smooth_props, SCW_G, SCW_D, q.detach() - step, FLUX_Tb,
+                          return_state=True)['Tw']
+    assert torch.allclose(grad, (plus - minus)/(2*step), rtol=1e-5)
+
+
+def _peaked_coefficient_props(T):
+    """A wall state whose density collapse caps h*(Tw-Tb) well below the test flux."""
+    zero = T*0.0
+    return {'rho': 700.0*torch.exp(-(T - 600.0)/5.0) + 1e-3, 'mu': 8.0e-5 + zero,
+            'k': 0.5 + zero, 'cp': 6000.0 + zero, 'h': 1.2e6 + 6000.0*(T - 600.0),
+            'beta': 0.01 + zero}
+
+
+def test_flux_solver_warns_and_returns_nan_when_no_root_exists():
+    bulk = _flux_bulk()
+    with pytest.warns(htc_solver.NoRootWarning, match=r"1273\.00 K.*does not always have a root"):
+        out = htc.SCW.Mokry(bulk, _peaked_coefficient_props, SCW_G, SCW_D, 3.0e5*4, FLUX_Tb,
+                            anchor=610.0)
+    assert np.isnan(out)
+
+
+def test_flux_solver_can_raise_when_no_root_exists():
+    bulk = _flux_bulk()
+    with pytest.raises(ts.SolverFailure, match="mokry wall temperature"):
+        htc.SCW.Mokry(bulk, _peaked_coefficient_props, SCW_G, SCW_D, 3.0e5*4, FLUX_Tb,
+                      anchor=610.0, on_no_root="raise")
+
+
+def test_flux_solver_isolates_a_missing_root_to_its_batch_element():
+    bulk = _flux_bulk()
+    q = torch.tensor([1.0e3, 1.2e6], dtype=torch.float64, requires_grad=True)
+    with pytest.warns(htc_solver.NoRootWarning, match="1 of 2"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RangeWarning)
+            out = htc.SCW.Mokry(bulk, _peaked_coefficient_props, SCW_G, SCW_D, q, FLUX_Tb,
+                                anchor=610.0, return_state=True)
+    assert torch.isfinite(out['Tw'][0]) and torch.isnan(out['Tw'][1])
+    (grad,) = torch.autograd.grad(out['Tw'][0], q)
+    assert torch.isfinite(grad).all()
+
+
+def test_scan_skips_a_sign_change_that_is_a_jump_at_the_anchor():
+    # F jumps from negative to positive across T = 650, then has a real root at 680.
+    root = htc_solver.solve_branch(lambda T: torch.where(T > 650.0, 680.0 - T, -torch.ones_like(T)),
+                                   torch.tensor(600.0, dtype=torch.float64), 720.0, "jump",
+                                   anchor=650.0, jump_at_anchor=True)
+    assert float(root) == pytest.approx(680.0, abs=1e-6)
+
+
+def test_scan_reports_a_jump_with_nothing_beyond_it_as_no_root():
+    with pytest.warns(htc_solver.NoRootWarning):
+        root = htc_solver.solve_branch(lambda T: torch.where(T > 650.0, 1.0, -1.0) + 0*T,
+                                       torch.tensor(600.0, dtype=torch.float64), 720.0, "jump",
+                                       anchor=650.0, jump_at_anchor=True)
+    assert torch.isnan(root)
+
+
+def test_default_search_reaches_the_iapws95_limit():
+    # The only root is far beyond the old Tb + 200 K window.
+    def coefficient(bulk, wall, Tw, Tb, G, D, q):
+        return 1.0e3*(Tw - Tb)/(Tw - Tb)
+    q = 1.0e3*600.0
+    state = htc_solver.solve_flux(coefficient, _flux_bulk(), _smooth_props, SCW_G, SCW_D, q,
+                                  FLUX_Tb, name="constant", return_state=True)
+    assert state['Tw'] == pytest.approx(1200.0, abs=1e-5)
+
+
+def test_flux_solvers_check_q_once_and_not_the_scanned_wall_temperatures():
+    bulk = _flux_bulk()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        htc.SCW.Badea(bulk, _smooth_props, SCW_G, SCW_D, 1.0e7, FLUX_Tb, _pc_state(), 590.0)
+    messages = [str(w.message) for w in caught if issubclass(w.category, RangeWarning)]
+    assert len(messages) == 1 and "q =" in messages[0]
+
+
+def test_new_flux_solvers_at_zero_flux_return_the_near_bulk_limit():
+    bulk = _flux_bulk()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RangeWarning)
+        out = htc.SCW.Mokry(bulk, _smooth_props, SCW_G, SCW_D, 0.0, FLUX_Tb, return_state=True)
+    assert out['Tw'] == FLUX_Tb
+    Pr = bulk['mu']*bulk['cp']/bulk['k']
+    Re = SCW_G*SCW_D/bulk['mu']
+    expected = 0.0061*Re**0.904*Pr**0.684*bulk['k']/SCW_D
+    assert out['htc'] == pytest.approx(expected, rel=1e-3)
+
+
+@pytest.mark.parametrize("flux", [htc.SCW.Swenson, htc.SCW.Chen_SCW, htc.SCW.Mokry])
+def test_flux_solvers_apply_no_bundle_factor(flux):
+    with pytest.raises(TypeError, match="psi"):
+        flux(_flux_bulk(), _smooth_props, SCW_G, SCW_D, FLUX_q, FLUX_Tb, psi=1.2)
+
+
+def test_film_applies_the_bundle_factor_inside_the_wall_balance():
+    bulk = _flux_bulk()
+    state = film.solve(lambda T: _smooth_props(T), FLUX_Tb, SCW_G, SCW_D, FLUX_q, name='swenson',
+                       psi=1.2)
+    h = htc.SCW.Swenson_dT(bulk, _smooth_props(np.asarray(state['Tw'])), state['Tw'], FLUX_Tb,
+                           SCW_G, SCW_D)
+    assert state['htc'] == pytest.approx(1.2*h, rel=1e-10)
+    assert state['htc']*(state['Tw'] - FLUX_Tb) == pytest.approx(FLUX_q, rel=1e-8)
 
 
 # ------------------------------------------------------------------------------- Lead

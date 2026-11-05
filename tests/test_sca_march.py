@@ -4,8 +4,8 @@ import pytest
 import torch
 import torchsolve as ts
 
-from pinthac.correlations import htc
-from pinthac.sca import coolant, annular, annular_march, rod
+from pinthac.correlations import htc, htc_solver
+from pinthac.sca import coolant, annular, annular_march, film, rod
 from pinthac.sca.run import run_channel
 
 GEOM = dict(type='annular', ri=.0035, ro=.0055, tci=.0006, tco=.0006,
@@ -66,24 +66,31 @@ def test_coefficients_reconstruct_surfaces_and_maximum(marched):
 def test_branch_scan_selects_lower_root_even_with_full_bracket_sign_change():
     # Three separated roots; a full-interval solve need not choose the first.
     residual = lambda T: (T-610)*(T-650)*(T-690)/1e5
-    root = htc._solve_Tw_scw(residual, torch.tensor(600.), 720., 'synthetic', anchor=660.)
+    root = htc_solver.solve_branch(residual, torch.tensor(600.), 720., 'synthetic', anchor=660.)
     assert float(root) == pytest.approx(610., abs=1e-6)
 
 
-def test_branch_scan_reports_missing_root():
-    with pytest.raises(ts.SolverFailure):
-        htc._solve_Tw_scw(lambda T: T*0+1, torch.tensor(600.), 700., 'no root', anchor=650.)
+def test_branch_scan_warns_about_a_missing_root_by_default():
+    with pytest.warns(htc_solver.NoRootWarning, match='does not always have a root'):
+        root = htc_solver.solve_branch(lambda T: T*0+1, torch.tensor(600.), 700., 'no root',
+                                       anchor=650.)
+    assert torch.isnan(root)
 
 
-@pytest.mark.parametrize('name', ['Swenson', 'Chen'])
+def test_branch_scan_can_raise_on_a_missing_root():
+    with pytest.raises(ts.SolverFailure, match='does not always have a root'):
+        htc_solver.solve_branch(lambda T: T*0+1, torch.tensor(600.), 700., 'no root',
+                                anchor=650., on_no_root='raise')
+
+
+@pytest.mark.parametrize('name', ['swenson', 'chen_scw'])
 def test_shared_flux_solver_batched_balance_and_gradient(name):
     table = coolant.build_table('scw', 25., device='cpu')
     props, _ = coolant.make_lookups('scw', 25., table=table)
-    temperatures = [600., 630., 650.] if name == 'Chen' else [600., 640., 680.]
+    temperatures = [600., 630., 650.] if name == 'chen_scw' else [600., 640., 680.]
     T = torch.tensor(temperatures, dtype=torch.float64)
     q = torch.tensor([2e5, 3e5, 4e5], dtype=torch.float64, requires_grad=True)
-    result = getattr(htc.SCW, name)(props(T), props, 1000., .008, q, T,
-                                  psi=1.2, anchor=658., hi=1200., return_state=True)
+    result = film.solve(props, T, 1000., .008, q, name=name, psi=1.2, anchor=658., hi=1200.)
     assert torch.allclose(result['htc']*(result['Tw']-T), q, rtol=2e-9, atol=1e-5)
     gradient, = torch.autograd.grad(result['Tw'].sum(), q)
     assert torch.isfinite(gradient).all()
@@ -133,9 +140,8 @@ def test_chen_missing_heating_root_is_reported():
     table = coolant.build_table('scw', 25., device='cpu')
     props, _ = coolant.make_lookups('scw', 25., table=table)
     T = torch.tensor(680., dtype=torch.float64)
-    with pytest.raises(ts.SolverFailure, match='no sampled sign-changing branch'):
-        htc.SCW.Chen(props(T), props, 1000., .008, 4e5, T,
-                     psi=1.2, anchor=658., hi=1200.)
+    with pytest.raises(ts.SolverFailure, match='does not always have a root'):
+        film.solve(props, T, 1000., .008, 4e5, name='chen_scw', psi=1.2, anchor=658., hi=1200.)
 
 
 def test_zero_flux_in_mixed_chen_batch_does_not_require_a_heating_root():

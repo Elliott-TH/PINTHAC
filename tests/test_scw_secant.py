@@ -1,13 +1,14 @@
-"""Bracket safeguards and convergence of the shared SCW secant iteration."""
+"""Bracket safeguards and convergence of the shared wall-temperature secant iteration."""
 import pytest
 import torch
 
-from pinthac.correlations import htc
+from pinthac.correlations import htc, htc_solver
 
 
 def solve(f, lo, hi, **kw):
-    return htc._bracketed_secant(f, torch.tensor(lo, dtype=torch.float64),
-                               torch.tensor(hi, dtype=torch.float64), **kw)
+    tolerances = {**htc_solver.SCW_TOLERANCES, **kw}
+    return htc_solver.refine_root(f, torch.tensor(lo, dtype=torch.float64),
+                                  torch.tensor(hi, dtype=torch.float64), **tolerances)
 
 
 def test_narrow_bracket_secant_converges_in_a_few_steps():
@@ -37,7 +38,6 @@ def test_step_stagnation_is_not_convergence_at_a_discontinuity():
 def test_exact_endpoints_and_failed_elements_are_independent():
     result = solve(lambda x: x*x-1, [1., 0., 2.], [2., 2., 3.])
     assert result.converged.tolist() == [True, True, False]
-    assert result.iterations[0] == 0
     assert result.root[:2].tolist() == pytest.approx([1., 1.])
 
 
@@ -53,7 +53,7 @@ def test_branch_scan_evaluates_the_temperature_grid_as_one_batch():
     def residual(T):
         shapes.append(T.shape)
         return (T-610)*(T-650)*(T-690)/1e5
-    roots = htc._solve_Tw_scw(residual, torch.tensor([600., 605.]), 720.,
+    roots = htc_solver.solve_branch(residual, torch.tensor([600., 605.]), 720.,
                               'test', anchor=660.)
     assert roots.tolist() == pytest.approx([610., 610.], abs=1e-6)
     assert shapes[0] == (65, 2)

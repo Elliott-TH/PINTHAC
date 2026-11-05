@@ -29,42 +29,110 @@ A complete runnable case is in `examples/sca_annular_channel.py`.
 
 ## Wall-temperature solve
 
-`htc.SCW.Swenson` and `htc.SCW.Chen` (`Chen_SCW` remains an alias interface)
-accept surface heat flux, not wall temperature. Their `_dT` counterparts remain
-available for direct evaluation. Both SCA geometries use `sca.film.solve`:
+An implicit correlation needs properties at the wall, so a given heat flux only fixes
+the wall temperature through a balance that has to be solved numerically:
+
+```
+q'' = h(Tw) * (Tw - Tb)
+```
+
+The solvers are in `pinthac/correlations/htc_solver.py`. Each `_dT` method evaluates h
+at a known wall temperature. The method with the same name without the suffix takes a
+heat flux and solves for the wall temperature:
+
+| Known wall temperature | Given heat flux | Notes |
+|---|---|---|
+| `SCW.Swenson_dT` | `SCW.Swenson` | |
+| `SCW.Chen_SCW_dT` (`Chen_dT`) | `SCW.Chen_SCW` (`Chen`) | Physical `q` enters the correlation |
+| `SCW.Bishop_dT` | `SCW.Bishop` | Takes `z`; `entrance_term=False` drops the entrance factor |
+| `SCW.Mokry_dT` | `SCW.Mokry` | |
+| `SCW.Badea_dT` | `SCW.Badea` | Takes `Props_pc` and `Tpc` at the case pressure |
+| None | `SCW.Cheng_Q` | Explicit: bulk properties and `q` only, no solve |
+| `Water.Chen_H2O_dT` | `Water.Chen_H2O` | Solved on `[Tb, Tb + 200 K]` |
+| `Water.Bjorge_dT` | `Water.Bjorge` | Solved on `[Tb, Tb + 200 K]` |
 
 ```python
-state = htc.SCW.Swenson(
+state = htc.SCW.Mokry(
     bulk_properties, wall_properties_callable, G, hydraulic_diameter,
     surface_heat_flux, bulk_temperature,
-    anchor=T_pc, lo=T_min, hi=T_max, psi=bundle_factor, return_state=True,
+    anchor=T_pc, return_state=True,
 )
 # state: Tw [K], htc [W/m²/K], residual [W/m²]
 ```
 
-The balance is `q'' = psi*h(Tw)*(Tw - Tb)`. The bundle multiplier is included
-inside the solve; Chen receives the physical flux in its correlation. Hydraulic
-diameter enters the correlation, while heated perimeter converts W/m to W/m².
+`hydraulic_diameter` enters the correlation; heated perimeter converts W/m to W/m².
 
-The channel drivers locate the fixed-pressure heat-capacity peak once and use
-it as a pseudocritical anchor. Direct HTC callers may supply the anchor; otherwise
-it is estimated from the property callable over the search window. The search
-scans both sides of the anchor, selecting the first resolved sign change away
-from the bulk state. It does this even if the full interval already has opposite
-endpoint signs. The grid is evaluated as one property batch. A two-point secant
-iteration maintains the selected bracket, falling back to bisection for an invalid
-step or degenerate slope and every eighth iteration to ensure bracket reduction.
-Convergence requires both a small residual and a small last step (or an exact zero).
-The step tolerance is not a rigorous temperature-error bound. Missing brackets and
-nonconvergence raise `SolverFailure`; marching failures also identify the cell
-and axial location. Tensor inputs retain implicit parameter sensitivities.
+### Search
 
-This guarantees neither empirical-model accuracy nor uniqueness between scan
-points. T_pc need not be the extremum of the wall heat-flux residual. The scan
-resolution is controlled by `branch_n` (33 by default), and a sufficiently narrow
-pair of roots can evade it. No finite scan proves that all physical branches have
-been found. The residual is normalized by `max(abs(q''), 1 W/m²)`; its default
-absolute tolerance is 1e-9, with a wall-temperature step tolerance of 1e-6 K (plus a relative tolerance of 1e-10).
+`htc_solver.solve_flux` handles the flux interface for every SCW correlation, and
+`solve_branch` finds the root:
+
+1. **Window.** Heating searches from just above `Tb` (1e-6 K) up to `hi`, by default
+   `T_MAX_IAPWS95` = 1273 K. Property tables must pass their own limit.
+2. **Scan.** The residual `(h(Tw)*(Tw - Tb) - q'')/max(|q''|, 1 W/m²)` is evaluated as
+   one property batch on `branch_n` nodes (33 by default) from `Tb` to the anchor, and
+   as many beyond it. The anchor is the fixed-pressure cp peak: the channel drivers
+   supply it, and otherwise it is taken from the property callable within 200 K of `Tb`.
+   Above the anchor the nodes are spaced quadratically, so they stay fine just past
+   `T_pc`, where the residual changes fastest, and coarsen toward 1273 K.
+3. **Selection.** The first sign change above `Tb` is taken, which is the
+   lowest-superheat root. This holds even if the whole window's endpoints already have
+   opposite signs. Non-finite nodes are skipped.
+4. **Refinement.** That cell goes to `torchsolve.solve` with `method="secant"`: secant
+   steps inside a maintained bracket, with a forced bisection every fourth step.
+   Convergence needs both a residual below 1e-9 and a bracket narrower than 1e-6 K (plus
+   a relative 1e-10), so the final bracket bounds the error in `Tw`. `tol_kw` overrides
+   these. Secant is selected explicitly: Newton's autograd derivative through live IAPWS
+   took about three times as many evaluations.
+5. **Gradients.** The search runs without autograd. One detached-slope Newton step then
+   reattaches `dTw/dp` by the implicit function theorem. Differentiating the iterations
+   would be incorrect, since the bracket search is discrete.
+
+Badea has one more rule. Where `Tb < Tpc`, its change of branch makes the balance jump
+as `Tw` crosses `Tpc`, so a sign change across that point is not a solution. The scan
+always splits at `Tpc`, isolates the jump in one narrow cell, and skips it.
+
+Signed flux is supported: cooling mirrors the search below `Tb`, down to `lo` (by default
+`Tb - 200 K`). This permits inter-channel heat exchange near an unheated channel end.
+Using a heating correlation for cooling is an extrapolation; in particular, Chen's
+published positive-flux validation does not extend to reversed flux. Zero flux uses the
+zero-superheat limiting coefficient without a `0/0` evaluation.
+
+### When no root exists
+
+The balance of an implicit SCW correlation does not always have a root: an empirical
+`h(Tw)` curve need not reach every heat flux. Mokry and Badea both show this at high
+flux. If the search finds no sign change in the window, the default is:
+
+- a `htc_solver.NoRootWarning` naming the window and the number of elements affected,
+- NaN at those elements, with the rest of the batch unaffected and gradients kept clean.
+
+Pass `on_no_root="raise"` for `SolverFailure` instead. A bracket that was found but does
+not converge always raises `SolverFailure`, since that is a failure and not a property
+of the correlation.
+
+`sca.film.solve` uses `on_no_root="raise"`. The annular marcher treats a missing root as
+an infeasible heat split and keeps scanning, and NaN must not march silently along a
+channel. Marching failures also identify the cell and axial location.
+
+### Rod-bundle factor
+
+The correlations and solvers in `htc.py` and `htc_solver.py` are round-tube models and
+apply no bundle factor. Multiply one on yourself if you want it, but note that doing so
+after a flux solve changes `h` without changing `Tw`, so the result no longer satisfies
+`q''`. To put the factor inside the balance, `q'' = psi*h(Tw)*(Tw - Tb)`, scale the
+coefficient callable passed to `solve_flux`.
+
+`sca.film.solve` does exactly that for the `bundle=` model selected in `run_channel`. The
+returned `htc` is then `psi*h`. Chen still receives the physical flux in its correlation.
+
+### Limits
+
+This guarantees neither empirical-model accuracy nor uniqueness between scan points.
+`T_pc` need not be the extremum of the residual, and a sufficiently narrow pair of roots
+can fall between scan nodes, which is more likely far above `T_pc`, where they are widely
+spaced. Raise `branch_n` for a finer scan. No finite scan proves that all physical
+branches have been found, and a `NoRootWarning` means only that this scan found none.
 
 To compare against an external Swenson benchmark table without adding its data to
 the repository:
@@ -78,12 +146,6 @@ The CSV columns are `q` [W/m²] and `Tw` [°C]. Defaults match the 27 MPa,
 uses 500 scan points per side and a 1400°C wall-temperature ceiling; these are
 explicit benchmark settings, not changes to the library's default search range.
 It reports iteration counts, heat-flux residuals, and an independent bisection check.
-
-Signed flux is supported: cooling searches below the bulk temperature, heating
-above it. This permits inter-channel heat exchange near an unheated channel end.
-Using a heating correlation for cooling is an extrapolation; in particular,
-Chen's published positive-flux validation does not extend to reversed flux.
-Zero flux uses the zero-superheat limiting coefficient without a `0/0` evaluation.
 
 ## Axial and radial balances
 

@@ -5,7 +5,7 @@ import time
 import numpy as np
 import torch
 
-from pinthac.correlations import htc
+from pinthac.correlations import htc, htc_solver
 from pinthac.properties import getprop
 
 
@@ -23,22 +23,22 @@ def main():
     q = np.atleast_1d(table['q'])
     Tb = np.full_like(q, args.bulk_c+273.15)
     properties = lambda T: getprop._getprop('SCW', T, args.pressure)
-    original = htc._bracketed_secant
+    original = htc_solver.refine_root
     recorded = []
 
-    def measured(residual, lo, hi, **kwargs):
-        result = original(residual, lo, hi, **kwargs)
+    def measured(residual, lo, hi, **tolerances):
+        result = original(residual, lo, hi, **tolerances)
         recorded.append((residual, lo.clone(), hi.clone(), result))
         return result
 
     start = time.perf_counter()
-    htc._bracketed_secant = measured
+    htc_solver.refine_root = measured
     try:
         state = htc.SCW.Swenson(
             properties(Tb), properties, args.mass_flux, args.diameter, q, Tb,
             hi=args.max_wall_c+273.15, branch_n=args.scan_points, return_state=True)
     finally:
-        htc._bracketed_secant = original
+        htc_solver.refine_root = original
     elapsed = time.perf_counter()-start
     residual, lo, hi, result = recorded[0]
     with torch.no_grad():

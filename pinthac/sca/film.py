@@ -2,7 +2,7 @@
 import numpy as np
 import torch
 
-from pinthac.correlations import htc
+from pinthac.correlations import htc, htc_solver
 
 EXPLICIT = {
     'dittus': lambda p, G, D, pitch, T: htc.Water.Dittus(p, G, D),
@@ -38,9 +38,27 @@ def solve(props_at, Tb, G, D, q, name='swenson', psi=1., pitch=None,
         raise NotImplementedError('single-channel solvers do not support two-phase HTC')
     if name not in ('swenson', 'chen_scw'):
         raise ValueError(f'unknown htc correlation {name!r}; expected swenson, chen_scw or {sorted(EXPLICIT)}')
-    function = htc.SCW.Swenson if name == 'swenson' else htc.SCW.Chen_SCW
-    return function(props_at(Tb), props_at, G, D, q, Tb, psi=psi,
-                    anchor=anchor, hi=hi, lo=lo, return_state=True)
+
+    # The correlations carry no bundle factor, so it is applied here. It has to scale h
+    # inside the balance, q = psi*h(Tw)*(Tw - Tb), because Tw depends on it: multiplying
+    # the result of a psi-free solve would leave Tw inconsistent with q.
+    if name == 'swenson':
+        def coefficient(bulk, wall, Tw, Tb, G, D, q):
+            return psi*htc.SCW.Swenson_dT(bulk, wall, Tw, Tb, G, D)
+        zero_flux = None
+    else:
+        # q stays the physical surface flux inside Chen's Grashof ratio.
+        def coefficient(bulk, wall, Tw, Tb, G, D, q):
+            return psi*htc.SCW.Chen_SCW_dT(bulk, wall, Tw, Tb, G, D, q)
+
+        def zero_flux(bulk, G, D):
+            return psi**(1/.19)*htc.SCW.Chen_SCW_zero_flux(bulk, G, D)
+
+    # raise, not warn: the annular marcher treats a missing root as an infeasible heat
+    # split and scans on, and NaN must not march silently through a rod.
+    return htc_solver.solve_flux(coefficient, props_at(Tb), props_at, G, D, q, Tb, name=name,
+                                 zero_flux=zero_flux, anchor=anchor, hi=hi, lo=lo,
+                                 return_state=True, on_no_root='raise')
 
 
 def numpy_adapter(props_at):
