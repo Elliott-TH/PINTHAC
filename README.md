@@ -70,7 +70,7 @@ there so the call site states it too.
 
 ## What the library covers
 
-**16 heat transfer correlations**
+**16 heat transfer correlations and 2 bundle corrections**
 
 | Regime | Correlations |
 |---|---|
@@ -79,14 +79,14 @@ there so the call site states it too.
 | Supercritical water | Swenson · Chen & Fang · Bishop · Mokry · Badea · Cheng |
 | Sodium | Lyon · Seban-Shimazaki · Mikityuk |
 | Lead | Shen |
+| Rod bundle correction | Presser · Weissman |
 
-**6 friction correlations and 2 bundle corrections**
+**6 friction correlations**
 
 | Regime | Models |
 |---|---|
 | Single-phase water | Blasius · McAdams · Colebrook |
 | Supercritical water | Filonenko · Razumovskiy · Wu |
-| Rod bundles | Presser · Weissman |
 
 **Properties and materials**
 
