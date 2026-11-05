@@ -1,6 +1,6 @@
 # PINTHAC
 
-**P**hysics **I**nformed **N**uclear **T**hermal-**H**ydraulic **A**nalysis **C**ode.
+**P**ython **I**ntegrated **N**uclear **T**hermal-**H**ydraulic **A**nalysis **C**ode.
 
 Repository: <https://github.com/Elliott-TH/PINTHAC>
 
