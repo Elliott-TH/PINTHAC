@@ -2,6 +2,13 @@
 
 **P**hysics **I**nformed **N**uclear **T**hermal-**H**ydraulic **A**nalysis **C**ode.
 
+Repository: <https://github.com/Elliott-TH/PINTHAC>
+
+![Wall-clock time and speedup of PINTHAC's GPU-batched IAPWS-95 against the iapws package](figures/output/iapws95-benchmark.png)
+
+*IAPWS-95 property evaluation on one GPU against the reference `iapws` package on CPU:
+73.8x faster at 20,000 state points. Dotted lines use an extrapolated `iapws` time.*
+
 A Python library for reactor thermal hydraulics: differentiable water properties
 (IAPWS-95/97), liquid-metal properties (sodium, lead, LBE), solid fuel and cladding
 material models (UO2, Zircaloy, HT-9), heat transfer and friction correlations,
@@ -17,8 +24,8 @@ limitations are described in `docs/SCA_SOLVERS.md`.
 ## Install
 
 ```bash
-git clone <this repository>
-cd Pinthac
+git clone https://github.com/Elliott-TH/PINTHAC.git
+cd PINTHAC
 pip install -e .
 ```
 
@@ -63,6 +70,46 @@ there so the call site states it too.
 
 ## What the library covers
 
+**16 heat transfer correlations**
+
+| Regime | Correlations |
+|---|---|
+| Single-phase water | Dittus-Boelter · Petukhov · Gnielinski |
+| Two-phase water | Schrock-Grossman · Chen · Bjorge |
+| Supercritical water | Swenson · Chen & Fang · Bishop · Mokry · Badea · Cheng |
+| Sodium | Lyon · Seban-Shimazaki · Mikityuk |
+| Lead | Shen |
+
+**6 friction correlations and 2 bundle corrections**
+
+| Regime | Models |
+|---|---|
+| Single-phase water | Blasius · McAdams · Colebrook |
+| Supercritical water | Filonenko · Razumovskiy · Wu |
+| Rod bundles | Presser · Weissman |
+
+**Properties and materials**
+
+| Material | Models |
+|---|---|
+| Water | IAPWS-95 · IAPWS-IF97 (all five regions) |
+| Water transport | Viscosity (R12-08) · Conductivity (R15-11) · Surface tension (R1-76) |
+| Liquid metals | Sodium · Lead · Lead-bismuth eutectic |
+| Fuel | UO2, with NFI and Klimenko conductivity |
+| Cladding | Zircaloy · HT-9 · D9 stainless |
+| Gap gases | He · Ar · Kr · Xe · H2 · N2 · Air |
+
+**Solvers and surrogates**
+
+| Area | Capabilities |
+|---|---|
+| Pin conduction | Solid pellet · Annular pellet · Cladding · Gas gap |
+| Single-channel analysis | Solid rod · Dual-cooled annular fuel |
+| Neural surrogates | DeepONet · PINN |
+
+<details>
+<summary>Module-by-module detail</summary>
+
 | Layer | Module | What it does |
 |---|---|---|
 | Properties | `properties/iapws95.py` | IAPWS-95 equation of state, GPU-batched, differentiable: p, h, u, s, cv, cp, speed of sound, the saturation line from the Maxwell criterion, and the (T,p) and (h,p) inversions. |
@@ -88,6 +135,8 @@ there so the call site states it too.
 `backend.py`, `ranges.py` and `uncertainty.py` sit below all of this and implement the
 float/numpy/torch dispatch, the shared range-checking helper, and Monte Carlo
 model-form perturbation, respectively.
+
+</details>
 
 ### How uncertainty is meant to be used
 
@@ -155,10 +204,7 @@ actually ran on this machine -- see the cited file for how to reproduce it.
   `iapws` PyPI package on the same machine's CPU (AMD Radeon RX 7800 XT / ROCm 7.2 vs.
   CPU, best of 5 GPU runs, both sides measured up to N=20,000): **73.8x measured at
   N=20,000**; **~82x extrapolated to N=1,000,000** (CPU side extrapolated from its own
-  measured per-point cost -- the GPU side is measured directly at that size). See `docs/FIGURE_CAPTIONS.md` figure 1.
-
-  ![IAPWS-95 wall-clock time and speedup against the iapws package](figures/output/iapws95-benchmark.png)
-
+  measured per-point cost -- the GPU side is measured directly at that size). See the figure at the top of this page and `docs/FIGURE_CAPTIONS.md` figure 1.
 - **IAPWS-95 autograd derivatives.** `figures/iapws95_derivative_validation.py`:
   d(rho)/dT|_p from autograd vs. central finite differences, 200 points at 25 MPa,
   300-800 K. Mean relative error 5.4e-5; worst 4.9e-3, in a narrow band around the
