@@ -9,23 +9,6 @@ def Cyl_HT(r, q_vol, kint, C):
     Formulation:
         T(r) = C - q_vol*r^2/(4*kint)
 
-        Sign convention confirmed against Annular_Heat_Transfer_Final.pdf
-        Eq. (2), which carries the same -q'''*r^2/4 term for the general (annular) case
-        this is the r_i=0 special case of -- see docs/OPEN_QUESTIONS.md Q17 item 4,
-        where a different source document had the sign the other way and the PDF (and
-        this code) were confirmed correct.
-
-    Valid range:
-        Not established -- see docs/OPEN_QUESTIONS.md (Q31). Standard cylindrical
-        conduction; no fitted database to be out of range of.
-
-    Uncertainty:
-        Not established -- see docs/OPEN_QUESTIONS.md (Q31).
-
-    Reference:
-        Not established -- see docs/OPEN_QUESTIONS.md (Q31). Standard steady-state
-        cylindrical (Fourier) conduction with uniform volumetric generation.
-
     Inputs (float, numpy array, or torch tensor; broadcastable against each other):
         r     : radial position, m
         q_vol : volumetric heat generation rate, W/m^3
@@ -50,21 +33,6 @@ def Cyl_Theta(r, rfo, q3, Theta_fo):
             C2 = Theta_fo + q3/4*rfo^2
             Theta(r) = Theta_fo + q3/4*(rfo^2 - r^2)
 
-        At r = 0 this gives the centreline value Theta_fo + q3*rfo^2/4 directly, which
-        is why peak fuel temperature in a solid pin costs one inversion rather than a
-        solve.
-
-    Valid range:
-        0 <= r <= rfo. Uniform volumetric generation across the pellet.
-
-    Uncertainty:
-        Not applicable -- exact given Theta_fo. Whatever uncertainty exists is in the
-        conductivity model behind Theta.
-
-    Reference:
-        PINTHA_Code_Summary.pdf section 4.3, and
-        Annular_Heat_Transfer_Final.pdf Eq. (2) with ri -> 0.
-
     Inputs (float, numpy array, or torch tensor; broadcastable against each other):
         r        : radial position, m
         rfo      : pellet outer radius, m
@@ -82,18 +50,6 @@ def Cyl_qpp(r, q3):
     Formulation:
         q''(r) = q3*r/2
 
-        This is pin/annular.py::Ann_qpp with C1 = 0, which is what a solid pellet forces.
-        It vanishes at the centreline, as symmetry requires.
-
-    Valid range:
-        0 <= r <= rfo. Uniform volumetric generation.
-
-    Uncertainty:
-        Not applicable -- an energy balance, not a correlation.
-
-    Reference:
-        PINTHA_Code_Summary.pdf section 4.3.
-
     Inputs (float, numpy array, or torch tensor; broadcastable against each other):
         r  : radial position, m
         q3 : volumetric heat generation rate, W/m^3
@@ -108,18 +64,6 @@ def Cyl_qlin(r, q3):
 
     Formulation:
         q'(r) = 2*pi*r * q''(r) = pi*q3*r^2
-
-        At r = rfo this returns the pin's whole linear heat rate, which is the identity
-        worth testing against.
-
-    Valid range:
-        0 <= r <= rfo. Uniform volumetric generation.
-
-    Uncertainty:
-        Not applicable -- an energy balance, not a correlation.
-
-    Reference:
-        PINTHA_Code_Summary.pdf section 4.3.
 
     Inputs (float, numpy array, or torch tensor; broadcastable against each other):
         r  : radial position, m
@@ -159,9 +103,6 @@ def Cyl_T(r, rfo, q3, Theta_fo, Theta_func, k_func=None,
 
     Uncertainty:
         Inherited from the conductivity model behind Theta_func.
-
-    Reference:
-        PINTHA_Code_Summary.pdf section 4.3.
 
     Inputs (float, numpy array, or torch tensor; broadcastable against each other):
         r          : radial position, m

@@ -20,9 +20,8 @@ def Ann_Theta(kf_func, T_ref=300.0, T_max=3600.0, n=4000):
     Valid range:
         [T_ref, T_max] (defaults 300-3600 K); extrapolates via the cubic spline's own
         extrapolation outside that window (fill_value='extrapolate'), matching
-        SCA_Example.py's Property() lookup convention. Not established beyond that --
-        see docs/OPEN_QUESTIONS.md (Q31) for kf_func's own valid range, which this
-        function inherits.
+        SCA_Example.py's Property() lookup convention. Also inherits kf_func's own
+        valid range.
 
     Uncertainty:
         Not applicable to the integration itself (n=4000 trapezoidal points over a
@@ -76,17 +75,6 @@ def Ann_HT(ri, ro, q3, Theta_i, Theta_o):
         already carries the correct sign, unlike an earlier PinHT derivation this one
         superseded.
 
-    Valid range:
-        Not established -- see docs/OPEN_QUESTIONS.md (Q31). A closed-form algebraic
-        solve, not a fitted correlation.
-
-    Uncertainty:
-        Not applicable -- exact given Theta_i, Theta_o (whatever uncertainty exists is
-        in kf_func, inherited through Ann_Theta).
-
-    Reference:
-        Annular_Heat_Transfer_Final.pdf section 1.1, Eq. (2).
-
     Inputs (float, numpy array, or torch tensor; broadcastable against each other):
         ri, ro           : fuel inner/outer radius, m
         q3               : volumetric heat generation rate, W/m^3
@@ -115,17 +103,6 @@ def Ann_qpp(r, q3, C1):
 
     Formulation:
         q''(r) = q3/2*r - C1/r
-
-    Valid range:
-        Not established -- see docs/OPEN_QUESTIONS.md (Q31). An algebraic consequence
-        of Ann_HT's C1, not a fitted correlation.
-
-    Uncertainty:
-        Not applicable -- exact given C1.
-
-    Reference:
-        Annular_Heat_Transfer_Final.pdf section 1.1 (same derivation as
-        Ann_HT).
 
     Inputs (float, numpy array, or torch tensor; broadcastable against each other):
         r  : radial position, m

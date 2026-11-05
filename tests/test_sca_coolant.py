@@ -37,7 +37,8 @@ def test_enthalpy_inversion_round_trips(name):
 def test_props_at_returns_every_key_the_correlations_need(name):
     lo, hi = cl.COOLANTS[name]["T_range"]
     props = cl.make_lookups(name, 25.0)[0](0.5 * (lo + hi))
-    assert set(props) == set(cl.PROP_KEYS)
+    expected = cl.TABLE_KEYS if cl.COOLANTS[name]["tabulated"] else cl.PROP_KEYS
+    assert set(props) == set(expected)
     for key, value in props.items():
         assert np.all(np.isfinite(np.asarray(value, dtype=float))), key
 

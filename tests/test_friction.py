@@ -121,9 +121,9 @@ def test_wu_matches_filonenko_raised_to_its_own_exponent():
     assert fr.f_SCW.Wu(Props, G, D) == pytest.approx(expected)
 
 
-def test_spacer_blah2_is_an_honest_stub():
+def test_spacer_cheng_is_an_honest_stub():
     with pytest.raises(NotImplementedError):
-        fr.Spacer.blah2()
+        fr.Spacer.Cheng()
 
 
 COLEBROOK_CASES = [

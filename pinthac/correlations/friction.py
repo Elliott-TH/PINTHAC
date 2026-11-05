@@ -27,10 +27,10 @@ class f_water:
             Re < 1.0e5, as stated in the original source.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+            Not established.
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+            Not established.
 
         Inputs:
             Props : property dict with key 'mu' (dynamic viscosity, Pa-s)
@@ -56,10 +56,10 @@ class f_water:
             30,000 < Re < 1,000,000, as stated in the original source.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+            Not established.
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+            Not established.
 
         Inputs:
             Props : property dict with key 'mu' (dynamic viscosity, Pa-s)
@@ -108,8 +108,7 @@ class f_water:
 
         Uncertainty:
             Not established as a percentage in the sources here -- Colebrook is itself
-            the reference the explicit fits are measured against. See
-            docs/OPEN_QUESTIONS.md (Q16).
+            the reference the explicit fits are measured against.
 
         Reference:
             Colebrook, C.F., "Turbulent flow in pipes, with particular reference to the
@@ -168,10 +167,10 @@ class f_SCW:
             f = 1 / (1.82*log10(Re) - 1.64)^2
 
         Valid range:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+            Not established.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+            Not established.
 
         Reference:
             Petrov & Popov (1988), as cited by Hughes et al. (2014) Eq. (9) -- see
@@ -224,10 +223,10 @@ class f_SCW:
             G <= 1000 kg/m^2-s (implementation limit).
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q14).
+            Not established.
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q14). The negative exponent
+            Not established. The negative exponent
             on the isothermal friction factor is unusual for a bundle correction and is
             unconfirmed against any source.
 
@@ -252,7 +251,7 @@ class f_SCW:
 
 class Spacer:
     def Cheng():
-        """Spacer-grid friction/mixing correction -- not implemented.
+        """Cheng spacer-grid friction models -- planned, not yet implemented.
 
         Formulation:
             Not implemented.
@@ -264,7 +263,7 @@ class Spacer:
             Not applicable.
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q33).
+            Not applicable until implemented.
 
         Inputs:
             None.
@@ -272,6 +271,5 @@ class Spacer:
             Does not return; raises NotImplementedError.
         """
         raise NotImplementedError(
-            "Spacer-grid friction/mixing correction was never implemented in the "
-            "original source -- see docs/OPEN_QUESTIONS.md (Q33)."
+            "The Cheng spacer-grid friction models are planned but not yet implemented."
         )

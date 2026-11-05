@@ -15,14 +15,13 @@ def htc_gap(Tfo, Tci, delta, kgas, eps_c=1.0, eps_f=1.0, units='J'):
         htc  = (cond + rad) * scale(units)
 
     Valid range:
-        Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+        Not established.
 
     Uncertainty:
-        Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+        Not established.
 
     Reference:
-        Not established -- see docs/OPEN_QUESTIONS.md (Q31) for this composite
-        conduction+radiation form itself. The gas conductivity usually passed in as
+        Not established for this composite conduction+radiation form itself. The gas conductivity usually passed in as
         `kgas` (e.g. MatMod.Gas.k) is Von Ubisch et al. (1958), per
         the model references.
 

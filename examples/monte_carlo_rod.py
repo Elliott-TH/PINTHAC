@@ -1,17 +1,17 @@
 """Monte Carlo uncertainty propagation through a supercritical rod single-channel analysis.
 
 What this shows: how far the answers move when the heat transfer correlation is allowed to
-be wrong by its own documented uncertainty. Swenson's band is +/- 25 percent
+be wrong by its own documented uncertainty. Cheng_Q's band is +44/-30 percent at one sigma
 (correlations/htc.py::UNCERTAINTY), so this runs the same rod many times with the
-correlation perturbed inside that band and looks at the spread of two numbers a designer
-cares about -- the coolant outlet temperature and the peak fuel temperature.
+correlation perturbed inside that band and looks at the spread of the number a designer
+cares about most -- the peak fuel temperature.
 
 The one thing that matters about how the sampling is done
 ---------------------------------------------------------
 Each trial draws ONE perturbation and holds it fixed for every axial node of that trial.
 
 That is not a convenience, it is the physics. Model-form error is systematic, not noise:
-if Swenson is 15 percent high for this geometry and these conditions, it is 15 percent
+if the correlation is 15 percent high for this geometry and these conditions, it is 15 percent
 high at the inlet and still 15 percent high at the outlet. Redrawing at each node would
 model the correlation as though it made an independent mistake every centimetre, and those
 mistakes would average out along the channel -- giving a confidently narrow error band that
@@ -56,10 +56,10 @@ SEED = 12345
 
 
 def main():
-    # Swenson's documented model-form band, taken from the library rather than retyped.
-    sigma = float(np.mean(UNCERTAINTY["swenson"]))
-    print(f"Swenson model-form uncertainty: +/- {sigma*100:.0f} percent "
-          f"(correlations/htc.py::UNCERTAINTY)")
+    # Cheng's documented model-form band, taken from the library rather than retyped.
+    low, high = UNCERTAINTY["cheng_q"]
+    print(f"Cheng_Q model-form uncertainty: +{high*100:.0f}/-{low*100:.0f} percent at one "
+          f"sigma (correlations/htc.py::UNCERTAINTY)")
     print(f"{N_TRIALS} trials, {N_AXIAL} axial nodes, one perturbation per trial "
           f"held fixed along the channel")
 
@@ -68,15 +68,12 @@ def main():
     # One draw per trial. Shape (N_TRIALS,), broadcast across every axial node by the
     # closure below -- this is the whole point of the example.
     z = torch.randn(N_TRIALS, dtype=rod.DTYPE, generator=generator).to(dev)
-    # Lognormal, not 1 + sigma*z. The additive form crosses zero at z = -1/sigma, which
-    # for this +/- 25 percent band is -4 sigma: invisible in a few hundred trials, and
-    # reliably present in a few hundred thousand. At 500000 draws about 15 come back with
-    # a negative heat transfer coefficient, and the near-zero ones are worse still because
-    # they do not fail loudly -- they just report a peak fuel temperature of 350000 K.
-    # exp(sigma_ln*z) with sigma_ln = ln(1+sigma) is strictly positive, reproduces the
-    # same band (exp(+/-0.223) = 1.25 / 0.80), and makes "25 percent high" and "25 percent
-    # low" mirror images, which a multiplicative error should be.
-    sigma_ln = float(np.log(1.0 + sigma))
+    # Lognormal, not 1 + sigma*z: the band is multiplicative and the additive form can
+    # reach a negative heat transfer coefficient. It is also what this band already is:
+    # +44/-30 percent are mirror images in log space, ln(1.44) = 0.365 and
+    # -ln(0.70) = 0.357, because a_c/a_m = (1-e)/(1+e) is symmetric in ln for symmetric e.
+    # The small mean bias in Cheng's Table 2 is left out, so this is spread only.
+    sigma_ln = 0.5*float(np.log((1.0 + high)/(1.0 - low)))
     factor = torch.exp(sigma_ln * z)
 
     # The batch is N_TRIALS copies of one rod; only `factor` differs between them.
@@ -104,76 +101,45 @@ def main():
     out = rod.run_SCA_batch(
         inputs_b, Tin_b, q_sensors_b, sensor_z,
         pval=CONDITIONS["pval"], L=CONDITIONS["L"], n=N_AXIAL,
-        htc_name="swenson", bundle_func=perturbed_bundle,
+        htc_name="cheng_q", bundle_func=perturbed_bundle,
     )
 
-    T_out = np.asarray(out["T_i"].detach().cpu())[:, -1]          # outlet coolant, K
     T_fuel = np.asarray(out["T_fuel_max"].detach().cpu()).max(axis=1)   # peak fuel, K
 
-    good = np.isfinite(T_out) & np.isfinite(T_fuel)
+    good = np.isfinite(T_fuel)
     print(f"{good.sum()} of {N_TRIALS} trials finite")
-    T_out, T_fuel = T_out[good], T_fuel[good]
+    T_fuel = T_fuel[good]
 
-    def report(name, x, unit="K"):
-        lo, hi = np.percentile(x, [2.5, 97.5])
-        print(f"  {name:24s} mean {x.mean():8.2f} {unit}   sd {x.std():6.2f}   "
-              f"95% [{lo:8.2f}, {hi:8.2f}]   spread {hi-lo:6.2f}")
-
+    lo, hi = np.percentile(T_fuel, [2.5, 97.5])
     print("\nPropagated uncertainty:")
-    report("coolant outlet T", T_out)
-    report("peak fuel T", T_fuel)
+    print(f"  peak fuel T   mean {T_fuel.mean():8.2f} K   sd {T_fuel.std():6.2f}   "
+          f"95% [{lo:8.2f}, {hi:8.2f}]   spread {hi-lo:6.2f}")
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    _plot(T_out, T_fuel, sigma)
+    _plot(T_fuel, low, high)
     print(f"\nPlots written to {OUT_DIR}/")
 
 
-def _plot(T_out, T_fuel, sigma):
-    """Two histograms, in the site's dark palette.
+def _plot(T_fuel, low, high):
+    """Peak fuel temperature histogram, in the site's dark palette.
 
-    Two presentation choices worth explaining, because both are about not misleading the
-    reader rather than about looks:
-
-    The outlet-temperature panel is a single spike, and that is the correct answer, not a
-    broken plot. Outlet temperature follows from the axial energy balance,
-    mdot*dh = integral of q' dz, which contains no heat transfer coefficient at all. A
-    correlation error moves the wall temperature, never the bulk. The panel is annotated
-    so nobody reads the spike as a bug -- and it is worth keeping precisely because it
-    shows which quantities a correlation uncertainty cannot touch.
-
-    The fuel panel uses a log count axis. The distribution is strongly right-skewed: a
+    The panel uses a log count axis, which is about not misleading the reader rather than
+    about looks. The distribution is strongly right-skewed: a
     symmetric +/- 25 percent band on htc is not symmetric in temperature, because the
     film drop goes as 1/htc, so the low-htc trials reach much further than the high-htc
     ones. On a linear count axis the tail is invisible and the figure understates the
     risk side of the band -- which is the side that matters.
     """
     BG, ACCENT, MUTED, TEXT = "#0a0d12", "#6fd3f7", "#8b93a1", "#e8ecf1"
-    fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.6), facecolor=BG)
+    fig, ax = plt.subplots(figsize=(6.5, 4.6), facecolor=BG)
 
-    for ax in axes:
-        ax.set_facecolor(BG)
-        ax.tick_params(colors=MUTED, labelsize=8)
-        for spine in ax.spines.values():
-            spine.set_color(MUTED)
-            spine.set_alpha(0.4)
-        ax.grid(True, color=MUTED, alpha=0.15, lw=0.6)
-        ax.set_ylabel("trials", color=TEXT, fontsize=10)
+    ax.set_facecolor(BG)
+    ax.tick_params(colors=MUTED, labelsize=8)
+    for spine in ax.spines.values():
+        spine.set_color(MUTED)
+        spine.set_alpha(0.4)
+    ax.grid(True, color=MUTED, alpha=0.15, lw=0.6)
 
-    # --- outlet coolant temperature -------------------------------------------------
-    ax = axes[0]
-    ax.hist(T_out, bins=40, color=ACCENT, alpha=0.85, edgecolor=BG)
-    ax.set_xlim(T_out.mean() - 2.0, T_out.mean() + 2.0)
-    ax.set_xlabel("Coolant outlet temperature [K]", color=TEXT, fontsize=10)
-    ax.set_title(f"mean {T_out.mean():.2f} K,  spread {T_out.max()-T_out.min():.2e} K",
-                 color=TEXT, fontsize=9.5)
-    ax.annotate("no spread, and that is correct:\n"
-                "outlet T follows from the energy\n"
-                "balance, which has no htc in it",
-                xy=(0.04, 0.72), xycoords="axes fraction",
-                color=MUTED, fontsize=8.5, linespacing=1.5)
-
-    # --- peak fuel temperature ------------------------------------------------------
-    ax = axes[1]
     ax.hist(T_fuel, bins=60, color=ACCENT, alpha=0.85, edgecolor=BG)
     ax.set_yscale("log")
     lo, hi = np.percentile(T_fuel, [2.5, 97.5])
@@ -186,10 +152,10 @@ def _plot(T_out, T_fuel, sigma):
     ax.annotate("right-skewed: the film drop goes\n"
                 "as 1/htc, so a symmetric band on\n"
                 "htc is asymmetric in temperature",
-                xy=(0.40, 0.72), xycoords="axes fraction",
+                xy=(0.58, 0.72), xycoords="axes fraction",
                 color=MUTED, fontsize=8.5, linespacing=1.5)
 
-    fig.suptitle(f"Swenson +/- {sigma*100:.0f}% model-form error through a supercritical "
+    fig.suptitle(f"Cheng +{high*100:.0f}/-{low*100:.0f}% model-form error through a supercritical "
                  f"rod channel  --  {len(T_fuel)} trials,\n"
                  f"one perturbation drawn per trial and held fixed along the channel",
                  color=TEXT, fontsize=10.5)
@@ -207,27 +173,22 @@ if __name__ == "__main__":
 Real output (python -m examples.monte_carlo_rod, from the repository root, on this
 machine, GenEnv3.12, torch 2.9.1+rocm7.2.1):
 
-Swenson model-form uncertainty: +/- 25 percent (correlations/htc.py::UNCERTAINTY)
+Cheng_Q model-form uncertainty: +44/-30 percent at one sigma (correlations/htc.py::UNCERTAINTY)
 20000 trials, 60 axial nodes, one perturbation per trial held fixed along the channel
 running...
 20000 of 20000 trials finite
 
 Propagated uncertainty:
-  coolant outlet T         mean   627.95 K   sd   0.00   95% [  627.95,   627.95]   spread   0.00
-  peak fuel T              mean  2517.65 K   sd   3.72   95% [ 2511.19,  2525.38]   spread  14.19
+  peak fuel T   mean  2515.83 K   sd   6.31   95% [ 2506.87,  2531.25]   spread  24.38
 
-Plots written to /home/elliott/Codes/Projects/Pinthac/examples/output/
+Plots written to examples/output/
 
-The coolant outlet temperature comes back with a spread of exactly zero across all
-20,000 trials. That is the correct answer and not a broken run: outlet temperature is
-fixed by the axial energy balance, mdot*dh = integral of q' dz, in which the heat
-transfer coefficient does not appear. Perturbing htc moves the wall and fuel
-temperatures and leaves the bulk alone.
+The run warns that Cheng_Q is outside its fitted flux range near the channel ends, where
+the cosine power falls below 0.1 MW/m^2. Those nodes are far from the peak.
 
-The peak fuel temperature moves by only about +/- 7 K on a +/- 25 percent band on htc,
-because the film drop is a small part of the total 2517 - 628 = 1890 K rise from
-coolant to fuel centerline -- most of that is the fuel's own conduction drop, which
-this perturbation does not touch. The distribution is nonetheless right-skewed: the
-film drop goes as 1/htc, so the low-htc trials reach further above the mean than the
-high-htc ones reach below it.
+The peak fuel temperature stays within about -9 K / +15 K of the mean on this band,
+because the film drop is a small part of the total rise from coolant to fuel centerline --
+most of that is the fuel's own conduction drop, which this perturbation does not touch.
+The distribution is right-skewed: the film drop goes as 1/htc, so the low-htc trials reach
+further above the mean than the high-htc ones reach below it.
 """

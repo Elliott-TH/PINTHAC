@@ -32,7 +32,7 @@ def test_backend_contract_float_and_numpy():
 
 
 def test_annulus_flip_matches_the_unflipped_geometry():
-    # Rco < Rci (an annulus's inner-channel clad, named per docs/OPEN_QUESTIONS.md Q11)
+    # Rco < Rci (an annulus's inner-channel clad, by naming convention)
     # must give the identical result to the same two radii the other way round --
     # T_ci's whole point is that only the larger-over-smaller ratio matters, not which
     # argument position it arrived in.

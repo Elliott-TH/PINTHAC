@@ -32,7 +32,7 @@ def small_solve():
     # The solver no longer carries a default case -- see pinthac/sca/run.py's
     # _ANNULAR_GEOM_KEYS comment. The test states its own, as a caller must.
     inp = dict(L=4.27, N=100, ri=0.0035, ro=0.0055, tci=0.0006, tco=0.0006,
-               delta_i=0.0001, delta_o=0.0001, Gas="He", Pitch=0.0130,
+               delta_i=0.0001, delta_o=0.0001, Gas="He", Pitch=0.0131,
                Tin_i=623.15, Tin_o=623.15, Pnom=25.0,
                mdot_i=0.010, mdot_o=0.060, q0=10.0e3)
     inp["N"] = 5

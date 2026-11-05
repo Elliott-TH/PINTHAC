@@ -12,7 +12,7 @@ cp is the property to perturb here, not k. Outlet temperature follows from the a
 energy balance, mdot*cp*dT = q'*dz, in which the thermal conductivity does not appear at
 all -- k moves the wall temperature, never the bulk. Lead's stated band is
 Lead.uncert_cp = [5, 7] percent; the upper end is used throughout, as the conservative
-reading (see figures/liquid_metal_uncertainty.py and docs/OPEN_QUESTIONS.md Q31 for why
+reading (see figures/liquid_metal_uncertainty.py for why
 that pair is a range of quoted uncertainties rather than a temperature-dependent sigma).
 
 Cell stepping follows sca/lut.py's convention: N cells of width dz, node i sitting at the

@@ -344,7 +344,7 @@ if __name__ == '__main__':
     branch_phys_c, z_c, q_sensors_c, pitch_c, rco_c, G_c = sample_collocation(polish_colloc)
 
     if not SSBROYDEN_AVAILABLE:
-        print('SSBroyden unavailable (see docs/OPEN_QUESTIONS.md Q24) -- '
+        print('SSBroyden unavailable -- '
               'skipping the polish stage; the SOAP checkpoint is already saved.')
         # SystemExit rather than return: this block is the script's __main__ body, not a
         # function, so `return` is a syntax error here. Exit status 0 because a run that

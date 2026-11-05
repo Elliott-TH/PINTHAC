@@ -17,6 +17,9 @@ from pinthac.ranges import RangeWarning
 # The five keys every correlation in the library consumes. Liquid metals also return
 # 'sigma'; it is dropped here so both families hand the correlations the same dict.
 PROP_KEYS = ('rho', 'mu', 'k', 'cp', 'h')
+# Tabulated coolants also carry beta, which only IAPWS-95 provides. Chen & Fang and Cheng
+# need it, and those correlations do not apply to the liquid metals.
+TABLE_KEYS = PROP_KEYS + ('beta',)
 
 def _liquid_metal_range(mat):
     """The temperature window over which every property of a liquid metal is validated:
@@ -94,7 +97,7 @@ def build_table(coolant, p, Tmin=None, Tmax=None, n=3000, device=None):
         n       : number of grid points
         device  : None for numpy arrays, or a torch device for torch tensors on it
     Returns:
-        dict with key 'T' plus every key in PROP_KEYS, each an array of length n
+        dict with key 'T' plus every key in TABLE_KEYS, each an array of length n
     """
     entry = resolve(coolant)
     lo, hi = entry["T_range"]
@@ -104,7 +107,7 @@ def build_table(coolant, p, Tmin=None, Tmax=None, n=3000, device=None):
     T = np.linspace(Tmin, Tmax, n)
     props = gp._getprop(entry["substance"], T, p)
     table = {'T': T}
-    for key in PROP_KEYS:
+    for key in TABLE_KEYS:
         table[key] = np.asarray(props[key], dtype=float)
 
     if device is None:
@@ -161,7 +164,7 @@ def _table_lookups(table):
             return np.interp(np.asarray(xq, dtype=float), x, y)
 
     def props_at(T):
-        return {key: _interp(T, T_grid, table[key]) for key in PROP_KEYS}
+        return {key: _interp(T, T_grid, table[key]) for key in TABLE_KEYS if key in table}
 
     T_lo = float(np.asarray(T_grid[0] if not is_torch else T_grid[0].cpu()))
     T_hi = float(np.asarray(T_grid[-1] if not is_torch else T_grid[-1].cpu()))

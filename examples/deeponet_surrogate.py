@@ -147,7 +147,7 @@ if __name__ == "__main__":
 Real output (python -m examples.deeponet_surrogate, from the repository root, on this
 machine, GenEnv3.12, torch 2.9.1+rocm7.2.1):
 
-Dataset: 59773 runs x 100 axial nodes (/home/elliott/Codes/Projects/Pinthac/data/sca_rod_deeponet_dataset.npz)
+Dataset: 59773 runs x 100 axial nodes (data/sca_rod_deeponet_dataset.npz)
 
 Accuracy vs. ground-truth FVM, 3 held-out operating points:
   run 39948: G=2252 kg/m2-s  Tin=574.0 K  q0=39053 W/m  MAE T_i=0.035 K  MAE T_fuel_max=10.958 K

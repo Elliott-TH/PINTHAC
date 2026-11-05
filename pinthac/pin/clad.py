@@ -9,21 +9,9 @@ def T_ci(Rco, Rci, kc, Tco, qp):
         Tci = Tco + qp * ln(Rco/Rci) / (2*pi*kc)
 
         Handles the annulus case, where the *inner* channel's clad has Rco < Rci by
-        naming convention (see docs/OPEN_QUESTIONS.md Q11 on the two geometry-naming
-        conventions in this repository): the larger of the two radii goes on top of the
+        naming convention: the larger of the two radii goes on top of the
         log ratio either way, by flipping the sign rather than the ratio, so the result
         is identical whichever of Rco/Rci happens to be the larger one.
-
-    Valid range:
-        Not established -- see docs/OPEN_QUESTIONS.md (Q31). Standard cylindrical
-        conduction; no fitted database to be out of range of.
-
-    Uncertainty:
-        Not established -- see docs/OPEN_QUESTIONS.md (Q31).
-
-    Reference:
-        Not established -- see docs/OPEN_QUESTIONS.md (Q31). Standard steady-state
-        cylindrical (Fourier) conduction.
 
     Inputs (Rco, Rci, Tco, qp broadcastable float / numpy array / torch tensor; kc
             float, numpy array, or torch tensor, broadcastable against the others):

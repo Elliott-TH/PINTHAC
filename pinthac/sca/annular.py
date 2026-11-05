@@ -183,7 +183,7 @@ if __name__ == "__main__":
 _TWO_PHASE_HTC = ("chen_h2o", "bjorge", "schrock_grossman")
 
 
-_IMPLICIT_HTC = ('swenson', 'chen_scw')
+_IMPLICIT_HTC = ('swenson', 'chen_scw', 'cheng_q')   # those that depend on the flux
 _EXPLICIT_HTC = film.EXPLICIT
 
 

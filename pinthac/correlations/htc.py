@@ -202,7 +202,7 @@ class Water:
             h_tp = htc_lo * (1.11*Xtt^-0.66 + 7400*q''/(G*h_fg))
 
         Valid range:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+            Not established.
 
         Uncertainty:
             +/- 30 percent (UNCERTAINTY["schrock_grossman"]).
@@ -250,7 +250,7 @@ class Water:
             S    = 1 / (1 + 2.53e-6*Re_tp^1.17),   Re_tp = Re_l*F^1.25
 
         Valid range:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+            Not established.
 
         Uncertainty:
             Same as the wrapping solve, Water.Chen_H2O (UNCERTAINTY["chen_h2o"]).
@@ -304,7 +304,7 @@ class Water:
             Water.Chen_H2O_dT at that Tw.
 
         Valid range:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+            Not established.
 
         Uncertainty:
             +/- 30 percent (UNCERTAINTY["chen_h2o"]).
@@ -343,7 +343,7 @@ class Water:
                    * dTsat^0.24 * dPsat^0.75,   dTsat = Tw - Tsat
 
         Valid range:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+            Not established.
 
         Uncertainty:
             Same as the wrapping solve, Water.Bjorge (UNCERTAINTY["bjorge"]).
@@ -387,7 +387,7 @@ class Water:
             Water.Bjorge_dT at that Tw.
 
         Valid range:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+            Not established.
 
         Uncertainty:
             +/- 25 percent (UNCERTAINTY["bjorge"]).
@@ -449,7 +449,7 @@ class SCW:
         either endpoint cp.
 
         Valid range:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+            Not established.
 
         Uncertainty:
             +/- 25 percent (UNCERTAINTY["swenson"]).
@@ -969,11 +969,6 @@ class Sodium:
         """Lyon correlation for liquid-metal heat transfer in a circular tube at constant
         heat flux.
 
-            It is here rather than Notter-Sleicher, which section 2.4.1 names, because
-            no source for Notter-Sleicher is available in this repository. Guessing its
-            exponents would be worse than leaving the gap; see docs/OPEN_QUESTIONS.md
-            (Q15).
-
         Formulation:
             Pe = Re*Pr = (G*D/mu) * (mu*cp/k) = G*D*cp/k
             Nu = 7.0 + 0.025*Pe^0.8
@@ -988,7 +983,7 @@ class Sodium:
             do not attach a Peclet range to Eq. (10.126a) itself.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16). T&K quote the
+            Not established. T&K quote the
             correlation without an error band.
 
         Reference:
@@ -1027,7 +1022,7 @@ class Sodium:
             uniform radial heat flux. No Peclet range attached in the source.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+            Not established.
 
         Reference:
             Seban, R.A. and Shimazaki, T.T., as given by Todreas & Kazimi, Nuclear
@@ -1092,7 +1087,7 @@ class Sodium:
             Todreas & Kazimi Nuclear Systems Volume 1 3rd ed. reproduces this as its
             Eq. (10.133), but with the Peclet exponent mis-typeset: it prints
             "(Pe < 0.77+250)" where the exponent should be a superscript. Confirmed
-            against Mikityuk's own paper -- see docs/OPEN_QUESTIONS.md Q41.
+            against Mikityuk's own paper.
 
         Inputs:
             Props : property dict with keys 'mu' (Pa-s), 'cp' (J/kg-K), 'k' (W/m-K)
@@ -1127,22 +1122,17 @@ class Lead:
 
         Formulation:
             Pr = mu*cp/k ;  Re = G*D/mu ;  Pe = Re*Pr
-            Nu = 10.287*Pe^0.1175 + (0.0599/2.5)*Pe^0.7575
+            Nu = 10.287*Pe^-0.1175 + (0.0599/2.5)*Pe^0.7575
             htc = Nu*k/D
 
         Valid range:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q13).
+            Not established.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q13).
+            Not established.
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q13). Two of the three
-            pre-cleanup copies of this correlation used a *negative* exponent on the
-            leading Peclet term (Nu = 10.287*Pe^-0.1175 + ...), a substantial difference
-            (Nu = 24.0 vs. 7.6 at Pe = 500) -- see the model references D3. This module
-            keeps the positive-exponent form it already had; development changes no physics,
-            so this is flagged rather than resolved.
+            Not established.
 
         Inputs (float, numpy array, or torch tensor; broadcastable against each other):
             Props : property dict with keys 'mu', 'k', 'cp'

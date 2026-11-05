@@ -11,6 +11,9 @@ Kept to one small module rather than a matplotlib style sheet file so every scri
 `import style` line is explicit about where the look comes from, and so per-figure code
 can still override a color locally (a highlighted series, say) without fighting a global
 rcParam.
+
+apply_textbook() is the alternative for figures shown in the README: black on white,
+series told apart by line style, framed legend, no grid.
 """
 import matplotlib.pyplot as plt
 
@@ -61,6 +64,37 @@ def apply():
     })
 
 
+def apply_textbook():
+    """Set rcParams for the black-on-white textbook look. Use instead of apply(), and
+    create axes with plt.subplots rather than figure(), which colors them for dark mode.
+
+    Inputs: none
+    Returns: none (mutates matplotlib's global rcParams)
+    """
+    plt.rcdefaults()
+    plt.rcParams.update({
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+        "savefig.facecolor": "white",
+        "axes.edgecolor": "black",
+        "axes.grid": False,
+        "axes.linewidth": 0.8,
+        "font.family": "sans-serif",
+        "font.size": 11,
+        "axes.labelsize": 12,
+        "xtick.labelsize": 11,
+        "ytick.labelsize": 11,
+        "legend.fontsize": 10,
+        "legend.frameon": True,
+        "legend.framealpha": 1.0,
+        "legend.edgecolor": "0.8",
+        "legend.fancybox": True,
+        "mathtext.fontset": "stix",
+        "lines.color": "black",
+        "svg.fonttype": "path",   # text as outlines, so it renders the same everywhere
+    })
+
+
 def figure(figsize=(7.0, 4.5), ncols=1, nrows=1, **kwargs):
     """A dark-styled Figure/Axes pair (or array of Axes), with no title set -- captions live
     in docs/FIGURE_CAPTIONS.md / the HTML page, never baked into the image per the site's
@@ -84,7 +118,7 @@ def figure(figsize=(7.0, 4.5), ncols=1, nrows=1, **kwargs):
 
 
 def finish(fig, out_path):
-    """Tight-layout and save as SVG with the dark background preserved.
+    """Tight-layout and save as SVG and PNG, keeping the figure's own background.
 
     Inputs:
         fig      : matplotlib Figure
@@ -92,9 +126,9 @@ def finish(fig, out_path):
     Returns: none
     """
     fig.tight_layout()
-    fig.savefig(out_path, format="svg", facecolor=BG)
+    fig.savefig(out_path, format="svg", facecolor=fig.get_facecolor())
     # A PNG beside the SVG so the figure can actually be looked at while it is being
-    # built. The SVG is the deliverable; the PNG is never referenced by the page.
-    fig.savefig(str(out_path).replace(".svg", ".png"), dpi=130,
+    # built, and so the README has a raster to embed.
+    fig.savefig(str(out_path).replace(".svg", ".png"), dpi=200,
                 facecolor=fig.get_facecolor())
     print(f"Saved {out_path}")

@@ -153,9 +153,12 @@ actually ran on this machine -- see the cited file for how to reproduce it.
   answer and a zero gradient; only that comparison catches it.
 - **IAPWS-95 GPU speedup.** `figures/iapws95_benchmark.py`, against the reference
   `iapws` PyPI package on the same machine's CPU (AMD Radeon RX 7800 XT / ROCm 7.2 vs.
-  CPU, best of 5 runs each, both sides measured up to N=20,000): **59.9x measured at
-  N=20,000**; **~67x extrapolated to N=1,000,000** (CPU side extrapolated from its own
+  CPU, best of 5 GPU runs, both sides measured up to N=20,000): **73.8x measured at
+  N=20,000**; **~82x extrapolated to N=1,000,000** (CPU side extrapolated from its own
   measured per-point cost -- the GPU side is measured directly at that size). See `docs/FIGURE_CAPTIONS.md` figure 1.
+
+  ![IAPWS-95 wall-clock time and speedup against the iapws package](figures/output/iapws95-benchmark.png)
+
 - **IAPWS-95 autograd derivatives.** `figures/iapws95_derivative_validation.py`:
   d(rho)/dT|_p from autograd vs. central finite differences, 200 points at 25 MPa,
   300-800 K. Mean relative error 5.4e-5; worst 4.9e-3, in a narrow band around the
@@ -167,8 +170,7 @@ actually ran on this machine -- see the cited file for how to reproduce it.
 - **The annular flux split closes to machine precision.** `pinthac/pin/annular.py`'s
   `Ann_flux_split` satisfies `q_i + q_o = q'''*pi*(ro^2-ri^2)` to `4.8e-16` relative,
   at every iterate, not just at convergence (it is an algebraic identity of the
-  scheme, not a fitted result) -- see `tests/test_annular.py` and
-  `docs/OPEN_QUESTIONS.md`.
+  scheme, not a fitted result) -- see `tests/test_annular.py`.
 - **Energy balance closes in both single-channel solvers.** `sca/rod.py::run_SCA` and
   `sca/annular.py::solve_field` both integrate the supplied axial power profile into
   an enthalpy rise that matches the coolant's own enthalpy march to within the axial
@@ -202,19 +204,9 @@ because the target itself is `sca/rod.py`, an unvalidated-against-experiment sol
   selectable by name through `sca/run.py`, but selecting one raises
   `NotImplementedError` rather than silently running a boiling channel that isn't
   there.
-- **Shen's Peclet exponent (liquid lead) is unresolved.** `correlations/htc.py::Lead.Shen`
-  keeps the sign it had before this cleanup; the pre-cleanup codebase itself
-  disagreed on it (two of three copies used the opposite sign, a difference of
-  Nu = 24.0 vs. 7.6 at Pe = 500), and no source document resolves it. See
-  `docs/OPEN_QUESTIONS.md`.
-- **Notter-Sleicher (sodium, manual section 2.4.1) is not implemented at all** -- no
-  source for it exists in this repository. Lyon and Seban-Shimazaki (the two classic
-  constant-flux/constant-wall-temperature sodium correlations) are implemented
-  instead; see `docs/OPEN_QUESTIONS.md`.
 - **Every correlation without a stated valid range or uncertainty says so explicitly**
-  in its own docstring ("Not established -- see docs/OPEN_QUESTIONS.md") rather than
-  a plausible-looking invented number. `docs/OPEN_QUESTIONS.md` track which
-  ones and why.
+  in its own docstring ("Not established") rather than a plausible-looking invented
+  number.
 
 ## Single-channel solver outputs
 
@@ -234,7 +226,7 @@ with example results or runtime balance checks:
 | `examples/sca_rod_channel.py` | A single-channel fuel-rod axial solve, run at the supercritical conditions its correlations were actually fit to (see the file's own comment for why this is not a PWR case -- two-phase is not implemented). |
 | `examples/sca_annular_channel.py` | Annular axial march with energy-balance checks and fuel-profile reconstruction. |
 | `examples/deeponet_surrogate.py` | The trained DeepONet surrogate against the ground-truth solver it was trained on: accuracy on held-out cases, and timing across batch sizes. |
-| `examples/monte_carlo_rod.py` | Monte Carlo propagation of the Swenson correlation's own +/- 25 percent model-form uncertainty through a rod channel, with one perturbation drawn per trial and held fixed along the whole channel. Writes two histograms to `examples/output/`. |
+| `examples/monte_carlo_rod.py` | Monte Carlo propagation of the Cheng correlation's own +44/-30 percent model-form uncertainty through a rod channel, with one perturbation drawn per trial and held fixed along the whole channel. Writes a peak-fuel-temperature histogram to `examples/output/`. |
 
 Run any of them from the repository root as `python -m examples.<name>`.
 

@@ -1,4 +1,6 @@
 """Conservation, wall balance, branch selection, and profile reconstruction."""
+import warnings
+
 import numpy as np
 import pytest
 import torch
@@ -6,10 +8,11 @@ import torchsolve as ts
 
 from pinthac.correlations import htc, htc_solver
 from pinthac.sca import coolant, annular, annular_march, film, rod
+from pinthac.ranges import RangeWarning
 from pinthac.sca.run import run_channel
 
 GEOM = dict(type='annular', ri=.0035, ro=.0055, tci=.0006, tco=.0006,
-            delta_i=.0001, delta_o=.0001, Pitch=.013)
+            delta_i=.0001, delta_o=.0001, Pitch=.0131)
 COND = dict(L=4.27, N=5, Tin_i=623.15, Tin_o=623.15, Pnom=25.,
             mdot_i=.01, mdot_o=.06, q0=10000.)
 
@@ -140,8 +143,37 @@ def test_chen_missing_heating_root_is_reported():
     table = coolant.build_table('scw', 25., device='cpu')
     props, _ = coolant.make_lookups('scw', 25., table=table)
     T = torch.tensor(680., dtype=torch.float64)
-    with pytest.raises(ts.SolverFailure, match='does not always have a root'):
-        film.solve(props, T, 1000., .008, 4e5, name='chen_scw', psi=1.2, anchor=658., hi=1200.)
+    # No root is only reached far above the correlation's fitted flux range.
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RangeWarning)
+        with pytest.raises(ts.SolverFailure, match='does not always have a root'):
+            film.solve(props, T, 1000., .008, 8e6, name='chen_scw', psi=1.2, anchor=658.,
+                       hi=1200.)
+
+
+def test_cheng_q_needs_no_wall_solve():
+    table = coolant.build_table('scw', 25., device='cpu')
+    props, _ = coolant.make_lookups('scw', 25., table=table)
+    Tb = torch.tensor(600., dtype=torch.float64)
+    G, D, q, psi = 1000., .008, 5e5, 1.1
+    state = film.solve(props, Tb, G, D, q, name='cheng_q', psi=psi)
+    assert state['htc'] == psi*htc.SCW.Cheng_Q(props(Tb), G, D, q)
+    assert state['Tw'] == Tb + q/state['htc']
+
+
+@pytest.mark.parametrize('geometry, conditions, method', [
+    (dict(type='rod', pitch=.0125, rco=.0045, tc=.00063, delta=5e-4, kc=24.),
+     dict(G=1200., pval=25., Tin=573.15, q0=25e3, N=20), None),
+    (GEOM, COND, 'march'),
+    (GEOM, COND, 'picard'),
+])
+def test_cheng_q_runs_through_the_channel_solvers(geometry, conditions, method):
+    kwargs = {} if method is None else dict(annular_method=method)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RangeWarning)
+        out = run_channel(geometry=geometry, conditions=conditions, htc='cheng_q', **kwargs)
+    assert 'error' not in out
+    assert 'result' in out
 
 
 def test_zero_flux_in_mixed_chen_batch_does_not_require_a_heating_root():

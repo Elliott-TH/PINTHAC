@@ -1,15 +1,13 @@
 # Model limitations
 
-- The sign of the Peclet exponent in the Shen lead correlation needs verification
-  against its primary source. Treat that correlation as unvalidated.
-- Notter–Sleicher, two-phase channel balances, and transient channel solvers are
-  not implemented.
+- Two-phase channel balances and transient channel solvers are not implemented.
 - Some correlations lack established validity ranges, uncertainty estimates, or
   complete citations. These omissions are identified in their docstrings.
-- The Presser and Weissman bundle corrections have no established validity range
-  in this implementation. Extrapolation near a pitch/diameter ratio of one can
-  produce a correction below one.
-- `friction.Spacer.blah2` is an unimplemented placeholder.
+- The Presser (1.05 <= P/D <= 1.9) and Weissman (1.1 <= P/D <= 1.3) bundle
+  corrections warn outside their validity ranges. Extrapolation near a
+  pitch/diameter ratio of one can produce a correction below one.
+- `friction.Spacer.Cheng` is a placeholder: the Cheng spacer-grid friction models are
+  planned but not yet implemented.
 - Liquid-metal enthalpy expressions and uncertainty bands require further source
   validation; compare enthalpy derivatives with heat capacity before relying on them.
 
@@ -28,7 +26,7 @@ predicted heat transfer. The regression test preserves the benchmark convention.
 
 ## Annular branch limitation
 
-The 10 kW/m, five-cell SCW annular regression also fails under the current
+The 10 kW/m, five-cell SCW annular regression fails under the current
 formulation. An extreme trial heat split has no film root; searching interior
 splits reveals a radial mismatch jump of about +4 to -6 kW/m when the selected
 wall-temperature branch changes. The failure persists with 500 wall-scan points

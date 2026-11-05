@@ -12,12 +12,13 @@ them at once as tensor ops on the GPU.
 Run (GPU pinned to the discrete card -- device 1 on this machine is integrated
 graphics, and timing it would be meaningless):
     HIP_VISIBLE_DEVICES=0 python figures/iapws95_benchmark.py
-Produces: figures/output/iapws95-benchmark.svg, prints a results table to stdout.
+Produces: figures/output/iapws95-benchmark.svg and .png, prints a results table to stdout.
 """
 
 import os
 import time
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from iapws import IAPWS95 as RefIAPWS95
@@ -195,11 +196,11 @@ def plot_results(results, gpu_only_results, out_path):
 
     Every (N, reference_time, gpu_time) triple in `results` was actually measured on
     this machine -- both libraries run at every one of those sizes. `gpu_only_results`
-    points (where the pure-Python reference would take too long to be practical) are
-    drawn with an open marker and connected by a dashed line, and the reference time
-    used for their speedup is the extrapolation run_benchmark() already computed and
-    printed (measured per-point CPU cost at the largest shared size, times N) -- shown
-    as a lighter, dashed reference curve so it cannot be mistaken for a measurement.
+    points (where the pure-Python reference would take too long to be practical) have
+    a measured GPU time, but the reference time behind them is the extrapolation
+    run_benchmark() already computed and printed (measured per-point CPU cost at the
+    largest shared size, times N). Everything resting on that extrapolation is drawn
+    dotted with open markers so it cannot be mistaken for a measurement.
     """
     ns = [r[0] for r in results]
     ref_t = [r[1] for r in results]
@@ -209,47 +210,40 @@ def plot_results(results, gpu_only_results, out_path):
 
     per_point_ref = ref_t[-1] / ns[-1]
     # Start the extrapolated series at the last *measured* point rather than at the first
-    # GPU-only batch size, so the dashed line continues the solid one instead of floating
-    # detached from it with a gap in between.
+    # GPU-only batch size, so the dotted line continues the measured one instead of
+    # floating detached from it with a gap in between.
     ext_ns = [ns[-1]] + list(gpu_only_ns)
-    gpu_only_ref_est = [per_point_ref * n for n in ext_ns]
+    ext_ref_t = [per_point_ref * n for n in ext_ns]
     ext_gpu_t = [gpu_t[-1]] + list(gpu_only_t)
 
-    fig, (ax_t, ax_s) = style.figure(figsize=(10.5, 4.6), ncols=2)
+    black = dict(color="black", lw=1.5, ms=4.5)
+    extrapolated = dict(black, ls=":", marker="o", mfc="white", markevery=slice(1, None))
 
-    ax_t.loglog(ns, ref_t, "o-", color=style.MUTED, lw=1.6, ms=5,
-                label="iapws (CPU, measured)")
-    ax_t.loglog(ext_ns, gpu_only_ref_est, "--", color=style.MUTED, lw=1.2,
-                alpha=0.6, label="iapws (CPU, extrapolated)")
-    ax_t.loglog(ext_ns[1:], gpu_only_ref_est[1:], "o", color=style.MUTED, ms=4, alpha=0.6)
-    ax_t.loglog(ns, gpu_t, "o-", color=style.ACCENT, lw=1.8, ms=5,
-                label="this library (GPU, measured)")
-    ax_t.loglog(ext_ns, ext_gpu_t, "o-", color=style.ACCENT, lw=1.8, ms=5)
-    ax_t.set_xlabel("Batch size (state points)")
-    ax_t.set_ylabel("Wall-clock time [s]")
-    ax_t.legend(frameon=False, fontsize=8, loc="upper left")
+    fig, (ax_t, ax_s) = plt.subplots(1, 2, figsize=(10.5, 4.4))
+
+    ax_t.loglog(ns + gpu_only_ns, gpu_t + gpu_only_t, "o-", label="PINTHAC (GPU)", **black)
+    ax_t.loglog(ns, ref_t, "s--", label="iapws (CPU)", **black)
+    ax_t.loglog(ext_ns, ext_ref_t, label="iapws (CPU), extrapolated", **extrapolated)
+    ax_t.set_xlabel(r"Batch size $N$ [state points]")
+    ax_t.set_ylabel(r"Wall-clock time $t$ [s]")
+    ax_t.legend(loc="upper left")
 
     ns_speedup = [n for n in ns if n >= 100]
     speedup = [r / g for n, r, g in zip(ns, ref_t, gpu_t) if n >= 100]
-    gpu_only_speedup = [r / g for r, g in zip(gpu_only_ref_est, ext_gpu_t)]
+    ext_speedup = [r / g for r, g in zip(ext_ref_t, ext_gpu_t)]
 
-    ax_s.semilogx(ns_speedup, speedup, "o-", color=style.ACCENT, lw=1.8, ms=5,
-                  label="measured speedup")
-    # Same continuation trick as the left panel: the dashed segment begins at the last
-    # measured point, so the two read as one curve rather than two disconnected ones.
-    ax_s.semilogx(ext_ns, gpu_only_speedup, "--", color=style.ACCENT, lw=1.4, alpha=0.6,
-                  label="extrapolated speedup")
-    ax_s.semilogx(ext_ns[1:], gpu_only_speedup[1:], "o", color=style.ACCENT, ms=4,
-                  alpha=0.6)
-    ax_s.set_xlabel("Batch size (state points)")
-    ax_s.set_ylabel("Speedup (x)")
-    ax_s.legend(frameon=False, fontsize=8, loc="upper left")
+    ax_s.semilogx(ns_speedup, speedup, "o-", label="Measured", **black)
+    ax_s.semilogx(ext_ns, ext_speedup, label="Extrapolated iapws time", **extrapolated)
+    ax_s.set_xlabel(r"Batch size $N$ [state points]")
+    ax_s.set_ylabel(r"Speedup $t_{\mathrm{iapws}}\,/\,t_{\mathrm{GPU}}$")
+    ax_s.set_ylim(bottom=0)
+    ax_s.legend(loc="lower right")
 
     style.finish(fig, out_path)
 
 
 if __name__ == "__main__":
-    style.apply()
+    style.apply_textbook()
     print(f"Device: {DEVICE}")
     if DEVICE.type == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(DEVICE)}\n")

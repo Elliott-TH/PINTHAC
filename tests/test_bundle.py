@@ -2,15 +2,17 @@
 psi factors accept a float / numpy array / torch tensor and return the matching type
 with a finite gradient.
 
-No range table exists for either correlation (see bundle.RANGES's docstring note), so
-there is no out-of-range-warns test here. No asserted number was obtained by running the
-code under test -- structural properties only (psi > 0, both correlations agree at a
-reference P/D commonly quoted for both).
+No asserted number was obtained by running the code under test -- structural properties
+only (psi > 0, both correlations agree at a reference P/D commonly quoted for both).
 """
+import warnings
+
 import numpy as np
+import pytest
 import torch
 
 from pinthac.correlations import bundle as b
+from pinthac.ranges import RangeWarning
 
 
 def test_module_imports():
@@ -18,14 +20,14 @@ def test_module_imports():
 
 
 def test_weissman_backend_contract():
-    val_f = b.Bundle.Weissman(0.0130, 0.0095)
+    val_f = b.Bundle.Weissman(0.0115, 0.0095)
     assert np.isfinite(val_f) and val_f > 0.0
 
-    val_np = b.Bundle.Weissman(np.array([0.0130, 0.0112]), np.array([0.0095, 0.0102]))
+    val_np = b.Bundle.Weissman(np.array([0.0115, 0.0112]), np.array([0.0095, 0.0100]))
     assert np.all(np.isfinite(val_np))
 
-    P = torch.tensor([0.0130, 0.0112], dtype=torch.float64, requires_grad=True)
-    D = torch.tensor([0.0095, 0.0102], dtype=torch.float64, requires_grad=True)
+    P = torch.tensor([0.0115, 0.0112], dtype=torch.float64, requires_grad=True)
+    D = torch.tensor([0.0095, 0.0100], dtype=torch.float64, requires_grad=True)
     val_t = b.Bundle.Weissman(P, D)
     assert torch.is_tensor(val_t)
     gP, gD = torch.autograd.grad(val_t.sum(), [P, D])
@@ -51,4 +53,20 @@ def test_presser_is_close_to_unity_for_a_tight_lattice():
     # As P/D -> 1 (rods touching), Presser's exponential term -> c3, leaving
     # psi -> c1 + c2 - c3 = 0.9217 + 0.1478 - 0.1130 = 0.9565 -- a direct algebraic
     # consequence of the formula's own constants, not a value read off a run.
-    assert b.Bundle.Presser(0.0100, 0.0100) == 0.9217 + 0.1478 - 0.1130
+    # P/D = 1 is below Presser's validated range, so this limit is reached with a warning.
+    with pytest.warns(RangeWarning):
+        val = b.Bundle.Presser(0.0100, 0.0100)
+    assert val == 0.9217 + 0.1478 - 0.1130
+
+
+@pytest.mark.parametrize("func, low, high", [(b.Bundle.Weissman, 1.1, 1.3),
+                                             (b.Bundle.Presser, 1.05, 1.9)])
+def test_range_bounds_are_inclusive_and_warn_outside(func, low, high):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RangeWarning)
+        func(low, 1.0)
+        func(high, 1.0)
+    with pytest.warns(RangeWarning):
+        func(low - 0.01, 1.0)
+    with pytest.warns(RangeWarning):
+        func(high + 0.01, 1.0)

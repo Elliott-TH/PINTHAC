@@ -74,7 +74,7 @@ class Sodium:
             variation of "(3-6)%" between sources for surface tension, but as one
             collective figure covering Na, Pb and Pb-Bi(e) together, not broken out per
             metal -- so this is consistent with, but not independently confirmed
-            specifically for, sodium. See docs/OPEN_QUESTIONS.md (Q31).
+            specifically for, sodium.
 
         Reference:
             Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
@@ -202,8 +202,7 @@ class Sodium:
             5.3, which instead reports that Fink and Leibowitz's examination of the Na
             thermal-conductivity literature found differences of "up to +/-15%" over
             371-1500 K -- a wider band than this module states, from an examination
-            rather than a single recommended sigma. Not adjusted to match; see
-            docs/OPEN_QUESTIONS.md (Q31).
+            rather than a single recommended sigma. Not adjusted to match;
 
         Reference:
             Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
@@ -284,7 +283,7 @@ class Lead:
             0 to 5 percent (Lead.uncert_sig). Sobolev (2020) section 4.3 gives only a
             collective "(3-6)%" spread across Na, Pb and Pb-Bi(e) together, not a
             per-metal number -- this module's [0, 5%] is not independently confirmable
-            from that single combined figure. See docs/OPEN_QUESTIONS.md (Q31).
+            from that single combined figure.
 
         Reference:
             Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",
@@ -487,7 +486,7 @@ class LBE:
             0 to 0.3 percent (LBE.uncert_sig). As with Lead.sigma, Sobolev (2020) section
             4.3 gives only a collective "(3-6)%" spread across all three coolants, not a
             per-metal number, so this module's much tighter [0, 0.3%] is not
-            independently confirmable from that figure. See docs/OPEN_QUESTIONS.md (Q31).
+            independently confirmable from that figure.
 
         Reference:
             Sobolev, V. (2020), "Properties of Liquid Metal Coolants: Na, Pb, Pb-Bi",

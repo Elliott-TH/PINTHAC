@@ -35,7 +35,7 @@ ROD_GEOMETRY = {"type": "rod", "pitch": 0.0125, "rco": 0.0045, "tc": 0.00063,
                  "delta": 5e-4, "kc": 24}
 ANNULAR_GEOMETRY = {"type": "annular", "ri": 0.0035, "ro": 0.0055, "tci": 0.0006,
                     "tco": 0.0006, "delta_i": 1.0e-4, "delta_o": 1.0e-4,
-                    "Pitch": 0.0130, "Gas": "He"}
+                    "Pitch": 0.0131, "Gas": "He"}
 ANNULAR_CONDITIONS = {"L": 4.27, "N": 5, "Tin_i": 623.15, "Tin_o": 623.15,
                       "Pnom": 25.0, "mdot_i": 0.010, "mdot_o": 0.060, "q0": 5.0e3}
 

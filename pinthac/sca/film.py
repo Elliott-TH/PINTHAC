@@ -34,6 +34,11 @@ def solve(props_at, Tb, G, D, q, name='swenson', psi=1., pitch=None,
     if name in EXPLICIT:
         coefficient = psi * EXPLICIT[name](props_at(Tb), G, D, pitch, Tb)
         return dict(Tw=Tb + q/coefficient, htc=coefficient, residual=q*0)
+    if name == 'cheng_q':
+        # Explicit like the above, but it takes the flux, so no wall solve and no root
+        # branches. Not in EXPLICIT, whose entries are functions of bulk state alone.
+        coefficient = psi * htc.SCW.Cheng_Q(props_at(Tb), G, D, q)
+        return dict(Tw=Tb + q/coefficient, htc=coefficient, residual=q*0)
     if name in ('chen_h2o', 'bjorge', 'schrock_grossman'):
         raise NotImplementedError('single-channel solvers do not support two-phase HTC')
     if name not in ('swenson', 'chen_scw'):

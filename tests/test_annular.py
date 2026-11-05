@@ -79,7 +79,7 @@ def test_energy_balance_invariant_q_i_plus_q_o_equals_generation():
     C1, C2 = ann.Ann_HT(ri, ro, q3, Theta(Tfo_i), Theta(Tfo_o))
 
     Per_fuel_i, Per_fuel_o = 2*np.pi*ri, 2*np.pi*ro
-    q_i = -ann.Ann_qpp(ri, q3, C1) * Per_fuel_i    # minus at the inner surface (Q18)
+    q_i = -ann.Ann_qpp(ri, q3, C1) * Per_fuel_i    # minus at the inner surface
     q_o = ann.Ann_qpp(ro, q3, C1) * Per_fuel_o
 
     generation = q3 * np.pi * (ro**2 - ri**2)

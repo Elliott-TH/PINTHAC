@@ -45,6 +45,7 @@ from pinthac.sca import annular, coolant as coolant_mod, rod
 HTC_MODELS = {
     "swenson": htc.SCW.Swenson_dT,
     "chen_scw": htc.SCW.Chen_SCW_dT,
+    "cheng_q": htc.SCW.Cheng_Q,
     "chen_h2o": htc.Water.Chen_H2O_dT,
     "bjorge": htc.Water.Bjorge_dT,
     "schrock_grossman": htc.Water.SchrockGrossman,
@@ -89,7 +90,7 @@ _TWO_PHASE_HTC = ("chen_h2o", "bjorge", "schrock_grossman")
 # liquid-metal correlations are the Peclet-number fits built for that regime, and they
 # are equally wrong applied to water.
 HTC_FAMILY = {
-    "swenson": "water", "chen_scw": "water",
+    "swenson": "water", "chen_scw": "water", "cheng_q": "water",
     "dittus": "water", "gnielinski": "water", "petukhov": "water",
     "chen_h2o": "water", "bjorge": "water", "schrock_grossman": "water",
     "lyon": "liquid_metal", "seban": "liquid_metal",

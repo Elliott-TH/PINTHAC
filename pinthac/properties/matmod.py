@@ -74,13 +74,12 @@ class Gas:
             He, Ar, N2: 273 to 2500 K. Kr: 273 to 2300 K. Xe: 273 to 2200 K.
             H2: 273 to 2000 K. (PNNL-35702 section 4.1.3.) Air is in PNNL-35702's Table
             4-1 fitting-constant table (section 4.1.1) but has no range in section 4.1.3's
-            applicability bullets -- not established for Air; see docs/OPEN_QUESTIONS.md
-            (Q31).
+            applicability bullets -- not established for Air.
 
         Uncertainty:
             Absolute standard error, PNNL-35702 section 4.1.3: He 8.99e-3, Ar 9.66e-4,
-            Kr 8.86e-4, Xe 5.34e-4, H2 1.67e-2, N2 1.99e-3 W/m-K. Air: not established --
-            see docs/OPEN_QUESTIONS.md (Q31), same gap as its valid range above.
+            Kr 8.86e-4, Xe 5.34e-4, H2 1.67e-2, N2 1.99e-3 W/m-K. Air: not established,
+            same gap as its valid range above.
 
         Reference:
             PNNL-35702 (Geelhood et al., 2024), section 4.1.1, Equation 4-1, Table 4-1.
@@ -194,13 +193,13 @@ class UO2:
             duplicated here.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31). tests/test_matmod.py
+            Not established. tests/test_matmod.py
             checks this integral against scipy.integrate.quad of k_NFI itself instead,
             the same verification approach as Theta_Klimenko,
             item 3.
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31); same as k_NFI, which
+            Not established; same as k_NFI, which
             this integrates. The trapezoid scheme itself is a standard numerical method,
             not something drawn from a source that needs citing.
 
@@ -235,13 +234,13 @@ class UO2:
             k = 100 / (7.5408 + 17.692*tau + 3.6142*tau^2) + 6400*tau^(-5/2)*exp(-16.35/tau)
 
         Valid range:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Not established.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31).
+            Not established.
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31). Checked
+            Not established. Checked
             MatLib_Info.pdf (PNNL-35702) in full and
             Hughes_SCWR_1.pdf: neither names "Klimenko-Zorin" or contains
             this formula's coefficients (7.5408, 17.692, 3.6142, 6400, 16.35). Hughes
@@ -280,17 +279,17 @@ class UO2:
             monotonic instead).
 
         Valid range:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31); same caveat as
+            Not established; same caveat as
             k_Klimenko, which this integrates.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31). tests/test_matmod.py
+            Not established. tests/test_matmod.py
             checks this integral against scipy.integrate.quad of k_Klimenko itself
             instead,
             verification, not a substitute for a published uncertainty.
 
         Reference:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31); same as k_Klimenko. The
+            Not established; same as k_Klimenko. The
             antiderivative's coefficients were re-derived and numerically checked in
             commit 14172e4 (pinthac/sca/rod.py::Kint), not taken from a published source.
 
@@ -323,7 +322,7 @@ class UO2:
         Uncertainty:
             sigma = 0.072, absolute standard error (PNNL-35702 section 2.1.5.3). This
             replaces the "+/- 6.8 percent" this docstring stated before development, whose
-            source was never established (Q31) and which is not obviously the same
+            source was never established and which is not obviously the same
             number: eps itself only spans about 0.79 to 0.82 over 300-2500 K, so a 0.072
             absolute band and a 6.8 percent relative band are not equivalent here. Using
             PNNL-35702's figure since it is the one with a traceable source.
@@ -393,13 +392,12 @@ class UO2:
             Not established -- checked PNNL-35702 (Geelhood et al., 2024) section 2.1.7.3
             in full: it states the correlation is "applicable to the range of available
             data (i.e., fuels with pore size distributions similar to those included in
-            the [Freshley et al., 1976] study)" without giving numeric bounds. See
-            docs/OPEN_QUESTIONS.md (Q31).
+            the [Freshley et al., 1976] study)" without giving numeric bounds.
 
         Uncertainty:
             Not established -- PNNL-35702 section 2.1.7.3 states explicitly "Due to the
             scatter in the experimental data, it is difficult to establish a meaningful
-            measure of uncertainty." See docs/OPEN_QUESTIONS.md (Q31).
+            measure of uncertainty."
 
         Reference:
             Rolstad et al. (1974), via PNNL-35702 (Geelhood et al., 2024) section 2.1.7.1,
@@ -433,7 +431,7 @@ class UO2:
             with no numeric bounds, since B is solved from dens_max's output.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31); n_iter=100 bisection
+            Not established; n_iter=100 bisection
             steps on [0, 50] resolve B to well below double precision's useful digits.
 
         Reference:
@@ -523,7 +521,6 @@ class UO2:
             0.00016 dV/V for UO2/MOX in a second, separate bullet -- both stated for the
             same "Bu < 80 GWd/MTU" condition in the extracted text, so which applies where
             is not established from this document alone; UO2-Gd2O3: sigma = 0.00008 dV/V.
-            See docs/OPEN_QUESTIONS.md (Q31).
 
         Reference:
             PNNL-35702 (Geelhood et al., 2024), section 2.1.8.1, Equations 2-17 (UO2/MOX)
@@ -571,7 +568,7 @@ class UO2:
             Not established for the gaseous term specifically -- PNNL-35702 section
             2.1.8.3 states an uncertainty only for the solid-swelling dV/V term (see
             UO2.swelling_solid's docstring); no analogous number is given for this
-            gaseous dL/L term. See docs/OPEN_QUESTIONS.md (Q31).
+            gaseous dL/L term.
 
         Reference:
             PNNL-35702 (Geelhood et al., 2024), section 2.1.8.1, Equations 2-19 through
@@ -669,8 +666,7 @@ class Zircalloy:
 
         Uncertainty:
             Not established -- PNNL-35702 (Geelhood et al., 2024) section 3.1.3.3 states
-            explicitly "No uncertainty is given on the melting temperature." See
-            docs/OPEN_QUESTIONS.md (Q31).
+            explicitly "No uncertainty is given on the melting temperature."
 
         Reference:
             PNNL-35702 (Geelhood et al., 2024), section 3.1.3.1, Equation 3-3.
@@ -694,7 +690,7 @@ class Zircalloy:
 
         Uncertainty:
             Not established -- PNNL-35702 (Geelhood et al., 2024) section 3.1.6.2 states
-            "No uncertainty is given on the density." See docs/OPEN_QUESTIONS.md (Q31).
+            "No uncertainty is given on the density."
 
         Reference:
             PNNL-35702 (Geelhood et al., 2024), section 3.1.6.1, Equation 3-8.
@@ -944,7 +940,7 @@ class Zircalloy:
         Uncertainty:
             Not established -- PNNL-35702 (Geelhood et al., 2024) section 3.1.8.3 states
             explicitly "An estimate of the uncertainty in this correlation has not been
-            established due to the limited data." See docs/OPEN_QUESTIONS.md (Q31).
+            established due to the limited data."
 
         Reference:
             PNNL-35702 (Geelhood et al., 2024), section 3.1.8.1, Equation 3-11.
@@ -1076,8 +1072,8 @@ class Zircalloy:
             for ZIRLO and Optimized ZIRLO with a reduction factor of 0.8". PNNL-35702
             contradicts itself on this one alloy; this table follows the second, more
             specific statement (the one next to the equations and the 0.8 factor that
-            Zircalloy.creep_strain/creep_rate also implement), not the first. Logged as a
-            documentation quirk in docs/OPEN_QUESTIONS.md rather than a code defect, since
+            Zircalloy.creep_strain/creep_rate also implement), not the first. Treated as a
+            documentation quirk rather than a code defect, since
             the code is self-consistent with the equation-level statement.
 
         Inputs:
@@ -1112,7 +1108,7 @@ class Zircalloy:
             has no stated unit or range anywhere in PNNL-35702's section 3.1.10 -- its
             "Where," clause for Equation 3-17b lists ai as a "Fluence term" without giving
             Phi's unit, unlike every other symbol in that clause. Not established; RANGES
-            checks T and sig here, not Phi. See docs/OPEN_QUESTIONS.md (Q31).
+            checks T and sig here, not Phi.
 
         Uncertainty:
             Relative standard error, PNNL-35702 section 3.1.10.3: sigma = 21.6% for
@@ -1170,8 +1166,7 @@ class Zircalloy:
             docstring below), but section 3.1.10.3's applicability bullet gives the range
             "1e17 to 2e18 n/cm2-s" -- a factor-of-1e4 unit mismatch between PNNL-35702's
             own formula and its own stated applicability range. Not resolved by guessing
-            which is right; RANGES therefore does not check flux here. See
-            docs/OPEN_QUESTIONS.md (Q31).
+            which is right; RANGES therefore does not check flux here.
 
         Uncertainty:
             Relative standard error, PNNL-35702 section 3.1.10.3: sigma = 21.6% for
@@ -1217,10 +1212,10 @@ class Zircalloy:
             range for "the strain correlations" as a whole (T 570-625 K, sig 40-130 MPa),
             not for this intermediate quantity by itself; eps_dot is derived from
             strain_rate_thermal/strain_rate_irrad, whose own T and sig ranges already
-            enforce that. See docs/OPEN_QUESTIONS.md (Q31).
+            enforce that.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31); PNNL-35702 gives an
+            Not established; PNNL-35702 gives an
             uncertainty for the combined creep strain (Zircalloy.creep_strain's docstring)
             but not for this intermediate saturated-primary-strain term alone.
 
@@ -1348,7 +1343,7 @@ class HT9:
 
         Uncertainty:
             Not established -- PNNL-35702 (Geelhood et al., 2024) section 3.3.1.3 states
-            "No uncertainty is given." See docs/OPEN_QUESTIONS.md (Q31).
+            "No uncertainty is given."
 
         Reference:
             Akiyama, M. (1991), via PNNL-35702 (Geelhood et al., 2024) section 3.3.1.1,
@@ -1377,8 +1372,7 @@ class HT9:
 
         Uncertainty:
             Not established -- PNNL-35702 (Geelhood et al., 2024) section 3.3.2.3 states
-            "No uncertainty for the specific heat capacity is reported." See
-            docs/OPEN_QUESTIONS.md (Q31).
+            "No uncertainty for the specific heat capacity is reported."
 
         Reference:
             Yamanouchi et al. (1992), via PNNL-35702 (Geelhood et al., 2024) section
@@ -1405,7 +1399,7 @@ class HT9:
             Not applicable -- a constant.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31); PNNL-35702 gives no
+            Not established; PNNL-35702 gives no
             uncertainty on this constant.
 
         Reference:
@@ -1430,7 +1424,7 @@ class HT9:
             Not applicable -- a constant.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31); PNNL-35702 gives no
+            Not established; PNNL-35702 gives no
             uncertainty on this constant.
 
         Reference:
@@ -1456,7 +1450,7 @@ class HT9:
             or burnup dependence observed.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q31); PNNL-35702 gives no
+            Not established; PNNL-35702 gives no
             uncertainty on this constant.
 
         Reference:
@@ -1482,7 +1476,7 @@ class HT9:
 
         Uncertainty:
             Not established -- PNNL-35702 (Geelhood et al., 2024) section 3.3.4.3 states
-            "No uncertainty is given." See docs/OPEN_QUESTIONS.md (Q31).
+            "No uncertainty is given."
 
         Reference:
             Yamanouchi et al. (1992), via PNNL-35702 (Geelhood et al., 2024) section
@@ -1492,7 +1486,7 @@ class HT9:
             return value a dimensionless "strain" instead, matching how Zircalloy.thrm_expan_*
             and UO2.thrm_expan are used elsewhere. Whether the coefficients were fit to a
             true CTE or to a strain under the "alpha" name is not resolved here -- flagged
-            in docs/OPEN_QUESTIONS.md rather than reinterpreted, since either reading is
+            here rather than reinterpreted, since either reading is
             physically plausible from the formula alone and this is a units/labeling
             question, not something to guess at.
 
@@ -1520,7 +1514,7 @@ class HT9:
 
         Uncertainty:
             Not established -- PNNL-35702 (Geelhood et al., 2024) section 3.3.7.3 states
-            "No uncertainty is given." See docs/OPEN_QUESTIONS.md (Q31).
+            "No uncertainty is given."
 
         Reference:
             Akiyama, M. (1991), via PNNL-35702 (Geelhood et al., 2024) section 3.3.7.1,
@@ -1553,7 +1547,7 @@ class HT9:
 
         Uncertainty:
             Not established -- PNNL-35702 (Geelhood et al., 2024) section 3.3.8.3 states
-            "No uncertainty is given." See docs/OPEN_QUESTIONS.md (Q31).
+            "No uncertainty is given."
 
         Reference:
             PNNL-35702 (Geelhood et al., 2024), section 3.3.8.1, Equation 3-46 (T given
@@ -1614,7 +1608,7 @@ class HT9:
 
         Uncertainty:
             Not established -- PNNL-35702 (Geelhood et al., 2024) section 3.3.10.2 states
-            "No uncertainty is given." See docs/OPEN_QUESTIONS.md (Q31).
+            "No uncertainty is given."
 
         Reference:
             Akiyama, M. (1991), via PNNL-35702 (Geelhood et al., 2024) section 3.3.10.1,
@@ -1823,7 +1817,7 @@ class HT9:
 
         Uncertainty:
             Not established -- PNNL-35702 (Geelhood et al., 2024) section 3.3.11.2 states
-            "No uncertainty is given." See docs/OPEN_QUESTIONS.md (Q31).
+            "No uncertainty is given."
 
         Reference:
             Akiyama, M. (1991), via PNNL-35702 (Geelhood et al., 2024) section 3.3.11.1,
@@ -1866,7 +1860,7 @@ class D9_SS:
             the other cladding materials in this module.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16). The source quotes a
+            Not established. The source quotes a
             single value with no band.
 
         Reference:
@@ -1891,7 +1885,7 @@ class D9_SS:
             As-modelled value for the SCWR lattice of Hughes et al. Table 1.
 
         Uncertainty:
-            Not established -- see docs/OPEN_QUESTIONS.md (Q16).
+            Not established.
 
         Reference:
             Hughes et al., Nucl. Eng. Des. 270 (2014) 412-420, Table 1
